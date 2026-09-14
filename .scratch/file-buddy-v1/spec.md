@@ -83,10 +83,16 @@ corrupts any loop that feeds it file names.
 
 Keyboard first. The mouse is optional.
 
-- The search box always holds focus. Any typed character goes to it.
+- The window holds focus, not the search box. `f` or a click focuses the box,
+  escape or a click outside it gives focus back to the window. Only the focused
+  box takes typed characters, which leaves the letters free for the window.
 - Arrow keys move the selection in a virtual grid.
 - Enter copies the file to the clipboard as `CF_HDROP` and as path text.
-- Escape clears the query.
+- `m` mutes the side pane. `space` plays or pauses it, for that clip only.
+- `ctrl-space` is the autoplay flag, off at the start, which decides whether a
+  new selection starts playing in the side pane. It also plays or pauses the
+  current clip. It works whether or not the search box holds focus, and it
+  never touches a tile.
 - Hover starts one live video in the tile. Only one plays at a time.
 - A resizable side pane plays the selection and shows its transcript.
 - Each result shows the matched text and a badge: tag, filename, speech or

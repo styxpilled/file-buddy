@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -n --rawfile f \"$CLAUDE_PROJECT_DIR/.claude/skills/unslop/SKILL.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"The unslop skill applies to all writing in this session. Follow it:\n\n\"+$f)}}' 2>/dev/null || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

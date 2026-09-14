@@ -11,15 +11,15 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, Focusable, KeyBinding, ScrollStrategy, SharedString, Task, Window, div,
-    px,
+    App, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseDownEvent, ScrollStrategy,
+    SharedString, Task, Window, div, px,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{
     ActiveTheme, ResizableState, VirtualListScrollHandle, h_flex, h_resizable, resizable_panel,
     v_flex,
 };
-use gpui_video::Video;
+use gpui_video::{Video, VideoOptions};
 use url::Url;
 
 use crate::config::{Config, Weights};
@@ -31,26 +31,49 @@ use crate::search::{self, Hit};
 /// How long the selection must rest before the side pane opens a decoder. Held
 /// arrow keys would otherwise open one file per keystroke.
 const PREVIEW_DELAY: Duration = Duration::from_millis(180);
+/// How long the pane waits for the first frame of the new clip before it shows
+/// it anyway. `FIRST_FRAME_TRIES * FIRST_FRAME_POLL` is the whole budget.
+const FIRST_FRAME_POLL: Duration = Duration::from_millis(16);
+const FIRST_FRAME_TRIES: usize = 75;
+/// How long the next file in the direction of travel waits before it opens. It
+/// must outlast `PREVIEW_DELAY`, so a held arrow key opens nothing at all.
+const PRELOAD_DELAY: Duration = Duration::from_millis(400);
+/// Frames the file opened ahead may hold. It is paused, so it stops at the
+/// prebuffer anyway, but a cap keeps a large clip from taking the memory of a
+/// full buffer for a file the user may never reach.
+const PRELOAD_BUFFER: usize = 8;
+const PREVIEW_BUFFER: usize = 120;
 pub const SIDE_PANE_WIDTH: f32 = 380.;
 
 gpui_kit::actions!(
     file_buddy,
-    [SelectLeft, SelectRight, SelectUp, SelectDown, ClearQuery]
+    [
+        SelectLeft,
+        SelectRight,
+        SelectUp,
+        SelectDown,
+        FocusQuery,
+        ToggleMuted,
+        TogglePaused,
+        ToggleAutoplay
+    ]
 );
 
-/// The search box owns the keyboard, so the grid keys are bound in its context.
-/// A binding added later wins over one added before it at the same depth, which
-/// is how the arrow keys reach the grid instead of the caret.
+/// The window keys are plain letters, so they must not reach the search box
+/// while it types. `!Input` fails the match when any node on the focus path is
+/// an input. Autoplay is the one key that works either way.
 pub fn bind_keys(cx: &mut App) {
-    for context in [Some("Input"), None] {
-        cx.bind_keys([
-            KeyBinding::new("left", SelectLeft, context),
-            KeyBinding::new("right", SelectRight, context),
-            KeyBinding::new("up", SelectUp, context),
-            KeyBinding::new("down", SelectDown, context),
-            KeyBinding::new("escape", ClearQuery, context),
-        ]);
-    }
+    let grid = Some("FileBuddy && !Input");
+    cx.bind_keys([
+        KeyBinding::new("left", SelectLeft, grid),
+        KeyBinding::new("right", SelectRight, grid),
+        KeyBinding::new("up", SelectUp, grid),
+        KeyBinding::new("down", SelectDown, grid),
+        KeyBinding::new("f", FocusQuery, grid),
+        KeyBinding::new("m", ToggleMuted, grid),
+        KeyBinding::new("space", TogglePaused, grid),
+        KeyBinding::new("ctrl-space", ToggleAutoplay, Some("FileBuddy")),
+    ]);
 }
 
 pub struct FileBuddy {
@@ -58,6 +81,8 @@ pub struct FileBuddy {
     weights: Weights,
     cache: PathBuf,
     input: Entity<InputState>,
+    /// Held while the search box is not focused, so the window keys arrive.
+    focus: FocusHandle,
     panes: Entity<ResizableState>,
     scroll: VirtualListScrollHandle,
     results: Vec<Hit>,
@@ -70,8 +95,17 @@ pub struct FileBuddy {
     hovered: Option<(usize, Video)>,
     preview: Option<Video>,
     preview_task: Option<Task<()>>,
+    /// The next file in the direction of travel, opened silent and still, with
+    /// the index it was opened for. A change of direction discards it.
+    preloaded: Option<(usize, Video)>,
+    preload_task: Option<Task<()>>,
+    /// The last step through the grid, which says which file to open ahead.
+    step: isize,
     /// Kept across selections, so the sound does not come back by itself.
     preview_muted: bool,
+    /// Whether a new preview starts playing. Pausing one clip does not change
+    /// it, and it never touches a tile.
+    autoplay: bool,
     preview_paused: bool,
     status: SharedString,
 }
@@ -99,6 +133,7 @@ impl FileBuddy {
             weights: config.weights,
             cache: cache.to_path_buf(),
             input,
+            focus: cx.focus_handle(),
             panes: cx.new(|_| ResizableState::default()),
             scroll: VirtualListScrollHandle::new(),
             results: Vec::new(),
@@ -108,11 +143,14 @@ impl FileBuddy {
             hovered: None,
             preview: None,
             preview_task: None,
+            preloaded: None,
+            preload_task: None,
+            step: 1,
             preview_muted: true,
-            preview_paused: false,
+            autoplay: false,
+            preview_paused: true,
             status: "".into(),
         };
-        this.focus_query(window, cx);
         this.run_search(cx);
         this.rescan(config, db_path, cx);
         this
@@ -170,6 +208,8 @@ impl FileBuddy {
         }
         self.selected = 0;
         self.hovered = None;
+        // The index it was opened for means nothing against new results.
+        self.preloaded = None;
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.schedule_preview(cx);
         cx.notify();
@@ -182,6 +222,12 @@ impl FileBuddy {
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         if index >= self.results.len() || index == self.selected {
             return;
+        }
+        // One cell or one row is travel, and says what to open ahead. A click
+        // across the grid says nothing, so the direction holds.
+        let step = index as isize - self.selected as isize;
+        if step.abs() <= self.columns.max(1) as isize {
+            self.step = step;
         }
         self.selected = index;
         self.scroll
@@ -201,47 +247,152 @@ impl FileBuddy {
         self.select(target, cx);
     }
 
-    fn clear_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input
-            .update(cx, |state, cx| state.set_value("", window, cx));
-        // Setting the value is not typing, so it raises no change event.
-        self.run_search(cx);
-        self.focus_query(window, cx);
+    fn query_focused(&self, window: &Window, cx: &App) -> bool {
+        self.input.read(cx).focus_handle(cx).is_focused(window)
     }
 
-    /// The search box holds focus at all times, so any typed character goes to
-    /// it. Focus given in the constructor is lost while the window finishes
-    /// opening, so every frame takes it back.
     fn focus_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.input.read(cx).focus_handle(cx);
-        if !handle.is_focused(window) {
-            window.focus(&handle, cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    fn blur_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query_focused(window, cx) {
+            window.focus(&self.focus, cx);
+            cx.notify();
         }
     }
 
-    /// The side pane plays the selection, after it stops moving.
+    /// Focus given in the constructor is lost while the window finishes
+    /// opening, so every frame takes it back for the window keys.
+    fn hold_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.focus.is_focused(window) && !self.query_focused(window, cx) {
+            window.focus(&self.focus, cx);
+        }
+    }
+
+    /// The side pane plays the selection, after it stops moving. The clip on
+    /// screen stays there, silent, until the new one has a frame to show.
+    /// Clearing it first left the stage empty for a moment, which flashed.
     fn schedule_preview(&mut self, cx: &mut Context<Self>) {
-        self.preview = None;
         self.preview_task = None;
         let Some(hit) = self.selected_hit() else {
+            self.preview = None;
+            self.preloaded = None;
+            return;
+        };
+        let kind = hit.file.kind;
+        let path = hit.file.path.clone();
+        // A still image has no clip of its own, so nothing may linger over it.
+        if kind == Kind::Still {
+            self.preview = None;
+            self.schedule_preload(cx);
+            return;
+        }
+        self.preview_paused = !self.autoplay;
+
+        // The file opened ahead is already decoded, so it costs no wait at all.
+        if let Some(video) = self.take_preloaded(self.selected) {
+            video.set_muted(self.preview_muted);
+            video.set_paused(self.preview_paused);
+            self.preview = Some(video);
+            self.schedule_preload(cx);
+            cx.notify();
+            return;
+        }
+
+        if let Some(outgoing) = &self.preview {
+            outgoing.set_muted(true);
+        }
+        let index = self.selected;
+        self.preview_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PREVIEW_DELAY).await;
+            let opened = this
+                .update(cx, |this, _| {
+                    open_video(&path, PREVIEW_BUFFER).inspect(|video| {
+                        video.set_muted(this.preview_muted);
+                        video.set_paused(this.preview_paused);
+                    })
+                })
+                .ok()
+                .flatten();
+            let Some(video) = opened else {
+                // FFmpeg cannot open it, so the thumbnail is all there is.
+                this.update(cx, |this, cx| {
+                    if this.selected == index {
+                        this.preview = None;
+                        this.schedule_preload(cx);
+                        cx.notify();
+                    }
+                })
+                .ok();
+                return;
+            };
+            // A file that never decodes must not hold the old clip forever.
+            for _ in 0..FIRST_FRAME_TRIES {
+                if video.frame_seq() > 0 {
+                    break;
+                }
+                cx.background_executor().timer(FIRST_FRAME_POLL).await;
+            }
+            this.update(cx, |this, cx| {
+                if this.selected != index {
+                    return;
+                }
+                this.preview = Some(video);
+                this.schedule_preload(cx);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// The file one step ahead, if the grid holds one.
+    fn next_index(&self) -> Option<usize> {
+        let ahead = usize::try_from(self.selected as isize + self.step).ok()?;
+        (ahead < self.results.len()).then_some(ahead)
+    }
+
+    fn take_preloaded(&mut self, index: usize) -> Option<Video> {
+        match self.preloaded.take() {
+            Some((at, video)) if at == index => Some(video),
+            _ => None,
+        }
+    }
+
+    /// Open the next file in the direction of travel, so the arrow key that
+    /// reaches it has nothing to wait for. It stays silent and still until
+    /// then, which costs one decoder and a few frames.
+    fn schedule_preload(&mut self, cx: &mut Context<Self>) {
+        self.preload_task = None;
+        let Some(index) = self.next_index() else {
+            self.preloaded = None;
+            return;
+        };
+        if matches!(&self.preloaded, Some((at, _)) if *at == index) {
+            return;
+        }
+        self.preloaded = None;
+        let Some(hit) = self.results.get(index) else {
             return;
         };
         if hit.file.kind == Kind::Still {
             return;
         }
-        let index = self.selected;
         let path = hit.file.path.clone();
-        self.preview_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PREVIEW_DELAY).await;
-            this.update(cx, |this, cx| {
-                if this.selected != index {
+        self.preload_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PRELOAD_DELAY).await;
+            this.update(cx, |this, _| {
+                // The selection may have moved on while the timer ran.
+                if this.next_index() != Some(index) {
                     return;
                 }
-                this.preview = open_video(&path).inspect(|video| {
-                    video.set_muted(this.preview_muted);
-                    video.set_paused(this.preview_paused);
+                this.preloaded = open_video(&path, PRELOAD_BUFFER).map(|video| {
+                    video.set_muted(true);
+                    video.set_paused(true);
+                    (index, video)
                 });
-                cx.notify();
             })
             .ok();
         }));
@@ -255,8 +406,18 @@ impl FileBuddy {
         cx.notify();
     }
 
+    /// One clip only. The next selection follows the autoplay flag again.
     fn toggle_preview_paused(&mut self, cx: &mut Context<Self>) {
         self.preview_paused = !self.preview_paused;
+        if let Some(video) = &self.preview {
+            video.set_paused(self.preview_paused);
+        }
+        cx.notify();
+    }
+
+    fn toggle_autoplay(&mut self, cx: &mut Context<Self>) {
+        self.autoplay = !self.autoplay;
+        self.preview_paused = !self.autoplay;
         if let Some(video) = &self.preview {
             video.set_paused(self.preview_paused);
         }
@@ -281,7 +442,7 @@ impl FileBuddy {
         // A still image does not react to hover. A tile is always silent.
         self.hovered = match hit.file.kind {
             Kind::Still => None,
-            _ => open_video(&hit.file.path).map(|video| {
+            _ => open_video(&hit.file.path, PREVIEW_BUFFER).map(|video| {
                 video.set_muted(true);
                 video.set_paused(false);
                 (index, video)
@@ -314,12 +475,13 @@ impl FileBuddy {
 
 impl Render for FileBuddy {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.focus_query(window, cx);
+        self.hold_focus(window, cx);
         let width = self.grid_width(window, cx);
         self.columns = grid::columns(width);
 
         v_flex()
             .key_context("FileBuddy")
+            .track_focus(&self.focus)
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -327,7 +489,12 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &SelectRight, _, cx| this.move_selection(1, 0, cx)))
             .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.move_selection(0, -1, cx)))
             .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.move_selection(0, 1, cx)))
-            .on_action(cx.listener(|this, _: &ClearQuery, window, cx| this.clear_query(window, cx)))
+            .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleMuted, _, cx| this.toggle_preview_muted(cx)))
+            .on_action(cx.listener(|this, _: &TogglePaused, _, cx| this.toggle_preview_paused(cx)))
+            .on_action(cx.listener(|this, _: &ToggleAutoplay, _, cx| this.toggle_autoplay(cx)))
+            // The search box propagates the escape it does not need itself.
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.blur_query(window, cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -336,7 +503,14 @@ impl Render for FileBuddy {
                     .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(Input::new(&self.input)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .on_mouse_down_out(cx.listener(
+                                |this, _: &MouseDownEvent, window, cx| this.blur_query(window, cx),
+                            ))
+                            .child(Input::new(&self.input)),
+                    )
                     .child(chips::chips(self, cx))
                     .child(
                         div()
@@ -366,14 +540,17 @@ impl Render for FileBuddy {
 
 /// Open a file for playback in a tile or in the side pane. It loops; the caller
 /// decides about sound and about pausing. A file FFmpeg cannot open gives
-/// `None`, and the tile keeps its thumbnail.
-fn open_video(path: &Path) -> Option<Video> {
+/// `None`, and the tile keeps its thumbnail. `buffer` caps the decoded frames it
+/// holds, which matters because a frame is the full size of the clip.
+fn open_video(path: &Path, buffer: usize) -> Option<Video> {
     let uri = Url::from_file_path(path).ok()?;
-    match Video::new(&uri) {
-        Ok(video) => {
-            video.set_looping(true);
-            Some(video)
-        }
+    let options = VideoOptions {
+        frame_buffer_capacity: Some(buffer),
+        looping: Some(true),
+        ..VideoOptions::default()
+    };
+    match Video::new_with_options(&uri, options) {
+        Ok(video) => Some(video),
         Err(e) => {
             log::warn!("cannot play {}: {e}", path.display());
             None

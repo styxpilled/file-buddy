@@ -374,7 +374,9 @@ impl Element for VideoElement {
     ) -> Self::PrepaintState {
         // Only a playing video needs the next frame. A wall of paused thumbnails
         // would otherwise hold the window at the display refresh rate forever.
-        if !self.video.paused() {
+        // A video that starts paused is the exception: it must keep asking until
+        // the decoder presents its first frame, or it stays blank.
+        if !self.video.paused() || self.video.frame_seq() == 0 {
             window.request_animation_frame();
         }
     }

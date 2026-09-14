@@ -4,7 +4,9 @@
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Window, div, img, px};
 use gpui_kit::component::button::Button;
-use gpui_kit::component::{ActiveTheme, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme, Disableable, IconName, Selectable, Sizable, h_flex, v_flex,
+};
 use gpui_video::video as video_element;
 
 use crate::db::tags;
@@ -109,16 +111,28 @@ fn stage(this: &FileBuddy, hit: &Hit, width: f32, height: f32, cx: &App) -> AnyE
     }
 }
 
-/// Sound and pause, for the pane only. A tile stays silent whatever these say.
+/// Sound and pause, for the pane only. A tile stays silent whatever these say,
+/// and it plays whatever autoplay says. The row stays in place with no clip, so
+/// the pane below it does not move while a decoder opens.
 fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
-    if this.preview.is_none() {
-        return div().into_any_element();
-    }
+    let playable = this.preview.is_some();
     h_flex()
         .gap_2()
         .child(
+            Button::new("preview-autoplay")
+                .small()
+                .selected(this.autoplay)
+                .label(if this.autoplay {
+                    "Autoplay on"
+                } else {
+                    "Autoplay off"
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
+        )
+        .child(
             Button::new("preview-pause")
                 .small()
+                .disabled(!playable)
                 .icon(if this.preview_paused {
                     IconName::Play
                 } else {
@@ -130,6 +144,7 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .child(
             Button::new("preview-mute")
                 .small()
+                .disabled(!playable)
                 .label(if this.preview_muted { "Unmute" } else { "Mute" })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_preview_muted(cx))),
         )
