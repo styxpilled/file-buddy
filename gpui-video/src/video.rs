@@ -1264,6 +1264,13 @@ impl Video {
         self.0.write()
     }
 
+    /// Unique for the life of the handle. Anything that caches a frame must key
+    /// on this as well as on `frame_seq`, because the sequence starts at zero
+    /// again for every file.
+    pub fn id(&self) -> u64 {
+        self.read().id
+    }
+
     pub fn has_audio(&self) -> bool {
         self.read().has_audio
     }

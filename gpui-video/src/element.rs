@@ -19,6 +19,10 @@ use yuv::{yuv_nv12_to_bgra, YuvBiPlanarImage, YuvConversionMode, YuvRange, YuvSt
 /// A converted frame, held until the decoder presents the next one.
 #[derive(Clone)]
 struct CachedFrame {
+    /// The video the frame came from. An element id outlives the file it shows,
+    /// and every file starts its sequence at zero, so the sequence alone let a
+    /// paused clip keep the frame of the one before it.
+    video: u64,
     seq: u64,
     width: u32,
     height: u32,
@@ -125,8 +129,9 @@ impl VideoElement {
         use smallvec::SmallVec;
 
         let cache: gpui::Entity<Option<CachedFrame>> = window.use_state(cx, |_, _| None);
+        let id = self.video.id();
 
-        if let Some(hit) = cache.read(cx).clone().filter(|c| c.seq == seq) {
+        if let Some(hit) = cache.read(cx).clone().filter(|c| c.video == id && c.seq == seq) {
             return Some(hit);
         }
 
@@ -137,6 +142,7 @@ impl VideoElement {
         let frames: SmallVec<[image::Frame; 1]> =
             SmallVec::from_elem(image::Frame::new(image_buffer), 1);
         let fresh = CachedFrame {
+            video: id,
             seq,
             width: frame_width,
             height: frame_height,
