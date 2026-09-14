@@ -43,6 +43,8 @@ const PRELOAD_DELAY: Duration = Duration::from_millis(400);
 /// full buffer for a file the user may never reach.
 const PRELOAD_BUFFER: usize = 8;
 const PREVIEW_BUFFER: usize = 120;
+/// One notch of the wheel, or one press of `ctrl-up`.
+const VOLUME_STEP: f64 = 0.05;
 pub const SIDE_PANE_WIDTH: f32 = 380.;
 
 gpui_kit::actions!(
@@ -55,7 +57,9 @@ gpui_kit::actions!(
         FocusQuery,
         ToggleMuted,
         TogglePaused,
-        ToggleAutoplay
+        ToggleAutoplay,
+        VolumeUp,
+        VolumeDown
     ]
 );
 
@@ -73,6 +77,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("m", ToggleMuted, grid),
         KeyBinding::new("space", TogglePaused, grid),
         KeyBinding::new("ctrl-space", ToggleAutoplay, Some("FileBuddy")),
+        KeyBinding::new("ctrl-up", VolumeUp, Some("FileBuddy")),
+        KeyBinding::new("ctrl-down", VolumeDown, Some("FileBuddy")),
     ]);
 }
 
@@ -101,8 +107,10 @@ pub struct FileBuddy {
     preload_task: Option<Task<()>>,
     /// The last step through the grid, which says which file to open ahead.
     step: isize,
-    /// Kept across selections, so the sound does not come back by itself.
+    /// Both kept across selections, so the sound does not come back by itself
+    /// and does not return to full.
     preview_muted: bool,
+    volume: f64,
     /// Whether a new preview starts playing. Pausing one clip does not change
     /// it, and it never touches a tile.
     autoplay: bool,
@@ -147,6 +155,7 @@ impl FileBuddy {
             preload_task: None,
             step: 1,
             preview_muted: true,
+            volume: 1.,
             autoplay: false,
             preview_paused: true,
             status: "".into(),
@@ -295,6 +304,7 @@ impl FileBuddy {
         // The file opened ahead is already decoded, so it costs no wait at all.
         if let Some(video) = self.take_preloaded(self.selected) {
             video.set_muted(self.preview_muted);
+            video.set_volume(self.volume);
             video.set_paused(self.preview_paused);
             self.preview = Some(video);
             self.schedule_preload(cx);
@@ -312,6 +322,7 @@ impl FileBuddy {
                 .update(cx, |this, _| {
                     open_video(&path, PREVIEW_BUFFER).inspect(|video| {
                         video.set_muted(this.preview_muted);
+                        video.set_volume(this.volume);
                         video.set_paused(this.preview_paused);
                     })
                 })
@@ -406,6 +417,30 @@ impl FileBuddy {
         cx.notify();
     }
 
+    /// One step of the level, from the wheel over the pane or from `ctrl-up`.
+    /// Turning it up is a request to hear the clip, so it lifts the mute.
+    pub(super) fn nudge_volume(&mut self, up: bool, cx: &mut Context<Self>) {
+        let step = if up { VOLUME_STEP } else { -VOLUME_STEP };
+        self.volume = (self.volume + step).clamp(0., 1.);
+        if up && self.volume > 0. {
+            self.preview_muted = false;
+        }
+        if let Some(video) = &self.preview {
+            video.set_volume(self.volume);
+            video.set_muted(self.preview_muted);
+        }
+        cx.notify();
+    }
+
+    /// The level as the header shows it. A muted clip says so, because the
+    /// number alone would not explain the silence.
+    fn volume_label(&self) -> SharedString {
+        if self.preview_muted {
+            return "muted".into();
+        }
+        format!("{}%", (self.volume * 100.).round() as u32).into()
+    }
+
     /// One clip only. The next selection follows the autoplay flag again.
     fn toggle_preview_paused(&mut self, cx: &mut Context<Self>) {
         self.preview_paused = !self.preview_paused;
@@ -493,6 +528,8 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &ToggleMuted, _, cx| this.toggle_preview_muted(cx)))
             .on_action(cx.listener(|this, _: &TogglePaused, _, cx| this.toggle_preview_paused(cx)))
             .on_action(cx.listener(|this, _: &ToggleAutoplay, _, cx| this.toggle_autoplay(cx)))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.nudge_volume(true, cx)))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.nudge_volume(false, cx)))
             // The search box propagates the escape it does not need itself.
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.blur_query(window, cx)))
             .child(
@@ -512,6 +549,13 @@ impl Render for FileBuddy {
                             .child(Input::new(&self.input)),
                     )
                     .child(chips::chips(self, cx))
+                    .child(
+                        div()
+                            .min_w(px(56.))
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.volume_label()),
+                    )
                     .child(
                         div()
                             .min_w(px(90.))

@@ -2,7 +2,7 @@
 //! it, and shows what the index knows. The transcript arrives with issue 07.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Window, div, img, px};
+use gpui::{AnyElement, App, Context, ScrollDelta, ScrollWheelEvent, Window, div, img, px};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IconName, Selectable, Sizable, h_flex, v_flex,
@@ -79,7 +79,14 @@ fn stage_size(this: &FileBuddy, window: &Window, cx: &App) -> (f32, f32) {
 }
 
 /// The clip itself once the selection stops moving, the thumbnail until then.
-fn stage(this: &FileBuddy, hit: &Hit, width: f32, height: f32, cx: &App) -> AnyElement {
+/// The wheel over it sets the sound level.
+fn stage(
+    this: &FileBuddy,
+    hit: &Hit,
+    width: f32,
+    height: f32,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
     let frame = div()
         .w(px(width))
         .h(px(height))
@@ -87,7 +94,16 @@ fn stage(this: &FileBuddy, hit: &Hit, width: f32, height: f32, cx: &App) -> AnyE
         .bg(cx.theme().secondary)
         .flex()
         .items_center()
-        .justify_center();
+        .justify_center()
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            let up = match event.delta {
+                ScrollDelta::Lines(delta) => delta.y,
+                ScrollDelta::Pixels(delta) => f32::from(delta.y),
+            };
+            if up != 0. {
+                this.nudge_volume(up > 0., cx);
+            }
+        }));
 
     match &this.preview {
         Some(playing) => frame

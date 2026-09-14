@@ -9,6 +9,8 @@
 #   click:<x>,<y>            click at a point inside the window, measured from
 #                            its top left corner, which is where a picture of
 #                            the window measures from too
+#   scroll:<x>,<y>,<notches> turn the wheel over a point inside the window.
+#                            A positive count turns it away from the hand
 #   shot:<name>              save <OutDir>/<name>.png of the application window
 #   wait:<milliseconds>      wait longer than the settle time
 #
@@ -79,6 +81,17 @@ function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y) {
     [Drive.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
 }
 
+function Scroll-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$notches) {
+    $rect = New-Object Drive.Win+RECT
+    [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    [Drive.Win]::SetCursorPos($rect.Left + $x, $rect.Top + $y) | Out-Null
+    Start-Sleep -Milliseconds 120
+    # MOUSEEVENTF_WHEEL. One notch is WHEEL_DELTA, which is 120. The parameter
+    # is unsigned, so a turn towards the hand goes through as two's complement.
+    $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]($notches * 120)), 0)
+    [Drive.Win]::mouse_event(0x0800, 0, 0, $delta, [UIntPtr]::Zero)
+}
+
 function Save-WindowPicture([IntPtr]$hwnd, [string]$path) {
     $rect = New-Object Drive.Win+RECT
     [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
@@ -121,6 +134,11 @@ try {
             'click' {
                 $x, $y = $value -split ',', 2
                 Click-InWindow $application ([int]$x) ([int]$y)
+                Start-Sleep -Milliseconds $SettleMs
+            }
+            'scroll' {
+                $x, $y, $notches = $value -split ',', 3
+                Scroll-InWindow $application ([int]$x) ([int]$y) ([int]$notches)
                 Start-Sleep -Milliseconds $SettleMs
             }
             'wait' { Start-Sleep -Milliseconds ([int]$value) }

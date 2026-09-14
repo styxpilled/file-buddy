@@ -89,6 +89,11 @@ Keyboard first. The mouse is optional.
 - Arrow keys move the selection in a virtual grid.
 - Enter copies the file to the clipboard as `CF_HDROP` and as path text.
 - `m` mutes the side pane. `space` plays or pauses it, for that clip only.
+- The wheel over the side pane, and `ctrl-up` and `ctrl-down`, set the sound
+  level. Turning it up lifts the mute, because the press asks to hear the clip.
+  The header shows the level beside the chips, and says `muted` instead of a
+  number, which is the only thing that explains the silence. There is no
+  control to drag: the level has one place to read it and two ways to set it.
 - `ctrl-space` is the autoplay flag, off at the start, which decides whether a
   new selection starts playing in the side pane. It also plays or pauses the
   current clip. It works whether or not the search box holds focus, and it
