@@ -23,12 +23,12 @@ fn main() {
         return;
     }
 
-    // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out — the profile dir is three levels up.
+    // OUT_DIR is target/<profile>/build/<pkg>-<hash>/out, so the profile dir is three levels up.
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let Some(profile_dir) = out_dir.ancestors().nth(3) else {
         return;
     };
-    // Test and example binaries live in `deps/`, not the profile directory.
+    // Test binaries live in `deps/`, not the profile directory.
     let targets = [profile_dir.to_path_buf(), profile_dir.join("deps")];
 
     for entry in fs::read_dir(&bin_dir).unwrap() {
