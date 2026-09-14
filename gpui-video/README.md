@@ -85,6 +85,25 @@ seconds, to a third or less, then reset on every loop. Three faults compounded:
 present, skip and drop counts and both lead times. That is what made this
 legible, and it is worth reaching for first on any playback fault.
 
+### The race on re-hover
+
+Hovering a tile that had been hovered before sometimes played the whole clip at
+once, then restarted normally, with the audio rushing after a while.
+
+The stall fallback above measures wall time, and the audio device consumes
+nothing while paused, so an idle tile was indistinguishable from a ring that had
+run dry. The clock carried the entire idle gap on the first frame after a
+resume, the presenter passed every frame at once on its way to catch up, and the
+decoder ran flat out because the frames were all behind that clock. The decoder
+now restarts the stall timer when it resumes.
+
+It is a narrow race: if the audio device consumes a block before the decoder
+looks at the clock, the fallback never engages. `repeated_hover_cycles_never_race`
+runs the cycle 25 times with a varying idle, and samples the clock throughout
+the resume rather than counting presented frames, because a clock that leaps
+forward makes the decoder *skip* the frames it has passed, and a skip is not a
+present.
+
 ### Known remaining
 
 - Restarting a loop drains and refills both buffers, so a short clip hitches

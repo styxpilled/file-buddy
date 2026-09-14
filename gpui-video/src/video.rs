@@ -701,6 +701,7 @@ impl Video {
         let mut last_audio_clock = Duration::ZERO;
         let mut audio_clock_at = Instant::now();
         let mut last_master = Duration::ZERO;
+        let mut was_paused = false;
         let mut stats = LoopStats::default();
 
         log::info!("Decoder loop started");
@@ -833,8 +834,19 @@ impl Video {
                         frame_seq.fetch_add(1, Ordering::Release);
                     }
                 }
+                was_paused = true;
                 std::thread::sleep(Duration::from_millis(16));
                 continue;
+            }
+
+            if was_paused {
+                // The stall detector below measures wall time, and the audio
+                // device consumes nothing while paused, so an idle tile looks
+                // exactly like a ring that ran dry. Without this the clock
+                // carried the whole idle gap on the first frame after a resume
+                // and the clip raced to its end.
+                audio_clock_at = Instant::now();
+                was_paused = false;
             }
 
             // Calculate master clock
@@ -857,7 +869,12 @@ impl Video {
                 // ahead and snap back on every callback, which reads as jitter
                 // and makes the presenter skip and hold frames.
                 match audio_clock_at.elapsed().checked_sub(AUDIO_STALL_GRACE) {
-                    Some(over) => last_audio_clock + over,
+                    Some(over) => {
+                        if over > Duration::from_millis(400) {
+                            log::warn!("audio stall fallback carrying {:?}", over);
+                        }
+                        last_audio_clock + over
+                    }
                     None => last_audio_clock,
                 }
             } else {

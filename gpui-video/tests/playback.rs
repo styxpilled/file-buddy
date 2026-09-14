@@ -495,3 +495,134 @@ fn the_presented_frame_rate_holds() {
         );
     }
 }
+
+/// Hovering a tile, leaving, and coming back later. The clock must not count the
+/// idle time: a pause is not a stall, but the audio device consumes nothing
+/// while paused, so the two look alike from inside the decoder.
+#[test]
+fn resuming_after_a_long_pause_does_not_race() {
+    let Some(path) = fixture() else {
+        eprintln!("skipped: no fixture under test_videos/");
+        return;
+    };
+    let video = open(&path);
+    video.set_frame_buffer_capacity(30);
+    video.set_looping(true);
+
+    video.set_paused(false);
+    std::thread::sleep(Duration::from_millis(1200));
+    let paused_at = video.position();
+
+    video.set_paused(true);
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        video.position() < paused_at + Duration::from_millis(200),
+        "clock ran on while paused: {:?} to {:?}",
+        paused_at,
+        video.position()
+    );
+
+    let before = video.frame_seq();
+    video.set_paused(false);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let advanced = video.position().saturating_sub(paused_at);
+    assert!(
+        advanced < Duration::from_millis(1500),
+        "clock jumped {advanced:?} on resume, as if the idle time had played"
+    );
+
+    let presented = (video.frame_seq() - before) as f64;
+    assert!(
+        presented < video.framerate(),
+        "raced through {presented} frames in half a second at {:.1} fps",
+        video.framerate()
+    );
+}
+
+/// The exact sequence a hover tile performs: stop and rewind, idle, hover again.
+#[test]
+fn rehovering_after_an_idle_gap_plays_at_normal_speed() {
+    let Some(path) = fixture() else {
+        eprintln!("skipped: no fixture under test_videos/");
+        return;
+    };
+    let video = open(&path);
+    video.set_frame_buffer_capacity(30);
+    video.set_looping(true);
+
+    video.set_paused(false);
+    std::thread::sleep(Duration::from_millis(1200));
+
+    // Leaving the tile.
+    video.set_paused(true);
+    video.seek(Duration::ZERO, false).expect("seek failed");
+    std::thread::sleep(Duration::from_secs(3));
+
+    // Hovering it again.
+    let before = video.frame_seq();
+    video.set_paused(false);
+    std::thread::sleep(Duration::from_millis(500));
+
+    let presented = (video.frame_seq() - before) as f64;
+    assert!(
+        presented < video.framerate(),
+        "raced through {presented} frames in half a second at {:.1} fps ({})",
+        video.framerate(),
+        path.display()
+    );
+    assert!(
+        video.position() < Duration::from_millis(900),
+        "restarted at {:?} instead of the beginning",
+        video.position()
+    );
+}
+
+/// The race is narrow: it needs the decoder to look at the clock after a resume
+/// before the audio device has consumed anything, so it takes repetition.
+#[test]
+#[ignore = "stress, takes about a minute"]
+fn repeated_hover_cycles_never_race() {
+    let Some(path) = fixture() else {
+        eprintln!("skipped: no fixture under test_videos/");
+        return;
+    };
+    let video = open(&path);
+    video.set_frame_buffer_capacity(30);
+    video.set_looping(true);
+    let rate = video.framerate();
+
+    for attempt in 0..25 {
+        video.set_paused(false);
+        std::thread::sleep(Duration::from_millis(700));
+        video.set_paused(true);
+        video.seek(Duration::ZERO, false).expect("seek failed");
+        // Vary the idle, so the resume lands at different points of the audio
+        // device's own callback period.
+        std::thread::sleep(Duration::from_millis(900 + attempt * 7));
+
+        let before = video.frame_seq();
+        let resumed_at = Instant::now();
+        video.set_paused(false);
+
+        // Sampling throughout catches the jump itself. Counting presented frames
+        // alone does not: a clock that leaps forward makes the decoder *skip*
+        // the frames it has passed, and a skip is not a present.
+        while resumed_at.elapsed() < Duration::from_millis(400) {
+            std::thread::sleep(Duration::from_millis(20));
+            let position = video.position();
+            let allowed = resumed_at.elapsed() + Duration::from_millis(250);
+            assert!(
+                position <= allowed,
+                "attempt {attempt}: clock reached {position:?} after {:?} of playing",
+                resumed_at.elapsed()
+            );
+        }
+
+        let presented = (video.frame_seq() - before) as f64;
+        assert!(
+            presented < rate,
+            "attempt {attempt}: raced through {presented} frames in 400 ms at {rate:.1} fps"
+        );
+    }
+}

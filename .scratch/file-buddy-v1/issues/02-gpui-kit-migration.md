@@ -170,3 +170,21 @@ and sample rates, because the default fixture alone never showed this.
 - Stale audio on re-hover was reported again after the third round. The
   resampler fix changes what the ring holds, so it needs re-testing before
   chasing further.
+
+### 2026-09-14, agent, fifth round
+
+Hovering a tile that had been hovered before sometimes played the whole clip at
+once, then restarted normally, with the audio rushing after a while.
+
+The stall fallback measures wall time, and the audio device consumes nothing
+while paused, so an idle tile was indistinguishable from a ring that had run
+dry. The clock carried the whole idle gap on the first frame after a resume:
+measured at 796 ms of clock after 20 ms of playing. The presenter then passed
+every frame at once on its way to catch up, and the decoder ran flat out because
+every frame was behind that clock, which is the audio rush as well. The decoder
+now restarts the stall timer when it resumes.
+
+The first two tests written for this passed before the fix, because a clock that
+leaps forward makes the decoder skip the frames it has passed, and a skip is not
+a present. `repeated_hover_cycles_never_race` samples the clock throughout the
+resume instead, and was confirmed to fail with the fix removed.
