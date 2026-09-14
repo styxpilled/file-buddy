@@ -7,11 +7,21 @@ edition = "2024"
 exclude = ["spike/ocr"]
 
 [dependencies]
+anyhow = "=1.0.104"
+blake3 = "=1.8.7"
 env_logger = "=0.11.11"
+globset = "=0.4.20"
 gpui = { package = "gpui-pre", version = "=0.3.1" }
 gpui-kit = "=0.6.1"
 gpui-video = { path = "gpui-video" }
+log = "=0.4.34"
+rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
+rusqlite_migration = "=2.6.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+toml = "=1.1.6"
 url = "=2.5.8"
+walkdir = "=2.5.0"
 
 # Frame conversion and decoding are far too slow unoptimized, so the video path
 # and every dependency are built with optimization even in a debug build.
@@ -23,3 +33,7 @@ opt-level = 3
 
 [profile.dev.build-override]
 opt-level = 3
+
+[dev-dependencies]
+globset = "=0.4.20"
+tempfile = "=3.27.0"
