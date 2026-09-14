@@ -1,15 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-/// Copy the FFmpeg runtime DLLs next to the produced executable so it can be run
-/// straight out of `target/<profile>/` without putting `ffmpeg/bin` on PATH.
+/// Copy the FFmpeg runtime DLLs next to the produced executables so binaries and
+/// test binaries run without putting `ffmpeg/bin` on PATH.
 fn main() {
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-env-changed=FFMPEG_BIN_DIR");
+
+    let workspace_root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let bin_dir = env::var("FFMPEG_BIN_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| manifest_dir.join("ffmpeg").join("bin"));
-
-    println!("cargo:rerun-if-env-changed=FFMPEG_BIN_DIR");
+        .unwrap_or_else(|_| workspace_root.join("ffmpeg").join("bin"));
     println!("cargo:rerun-if-changed={}", bin_dir.display());
 
     if !bin_dir.is_dir() {
@@ -25,19 +28,29 @@ fn main() {
     let Some(profile_dir) = out_dir.ancestors().nth(3) else {
         return;
     };
+    // Test and example binaries live in `deps/`, not the profile directory.
+    let targets = [profile_dir.to_path_buf(), profile_dir.join("deps")];
 
     for entry in fs::read_dir(&bin_dir).unwrap() {
         let src = entry.unwrap().path();
-        if src.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase)
+        if src
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
             != Some("dll".to_string())
         {
             continue;
         }
-        let dst = profile_dir.join(src.file_name().unwrap());
-        if needs_copy(&src, &dst) {
-            fs::copy(&src, &dst).unwrap_or_else(|e| {
-                panic!("failed to copy {} to {}: {e}", src.display(), dst.display())
-            });
+        for target in &targets {
+            if fs::create_dir_all(target).is_err() {
+                continue;
+            }
+            let dst = target.join(src.file_name().unwrap());
+            if needs_copy(&src, &dst) {
+                fs::copy(&src, &dst).unwrap_or_else(|e| {
+                    panic!("failed to copy {} to {}: {e}", src.display(), dst.display())
+                });
+            }
         }
     }
 }

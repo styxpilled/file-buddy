@@ -3,8 +3,23 @@ name = "file-buddy"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+exclude = ["spike/ocr"]
+
 [dependencies]
-env_logger = "0.11.11"
-gpui = "0.2.2"
+env_logger = "=0.11.11"
+gpui = { package = "gpui-pre", version = "=0.3.1" }
+gpui-kit = "=0.6.1"
 gpui-video = { path = "gpui-video" }
-url = "2.5.8"
+url = "=2.5.8"
+
+# Frame conversion and decoding are far too slow unoptimized, so the video path
+# and every dependency are built with optimization even in a debug build.
+[profile.dev.package.gpui-video]
+opt-level = 3
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.dev.build-override]
+opt-level = 3

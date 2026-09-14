@@ -1,5 +1,4 @@
 /target
-/gpui-video
 /ffmpeg
 /whisper.cpp
 /spike/*/target
