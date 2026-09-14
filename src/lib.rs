@@ -1,5 +1,5 @@
-//! The data layer of file-buddy: the database, the scan and the stage pipeline.
-//! Nothing here knows about the user interface.
+//! file-buddy: the data layer, and the window that shows it. Everything except
+//! `ui` is free of GPUI, so the whole pipeline can be tested without a window.
 //!
 //! `docs/source-layout.md` says what each directory is for and where the work
 //! of the later issues goes.
@@ -11,6 +11,7 @@ pub mod index;
 pub mod media;
 pub mod paths;
 pub mod search;
+pub mod ui;
 
 // Re-exported so a test or a front end needs no direct dependency on it, and
 // so only one build of SQLite exists.
