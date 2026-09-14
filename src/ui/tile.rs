@@ -30,9 +30,11 @@ pub fn tile(
         .on_hover(
             cx.listener(move |this, hovered: &bool, _, cx| this.set_hovered(index, *hovered, cx)),
         )
+        .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
         .child(
             div()
+                .relative()
                 .w(px(TILE_WIDTH))
                 .h(px(TILE_HEIGHT))
                 .overflow_hidden()
@@ -47,14 +49,25 @@ pub fn tile(
                 .flex()
                 .items_center()
                 .justify_center()
-                .map(|container| match playing {
-                    Some((_, playing)) => container.child(
-                        video_element(playing.clone())
-                            .id(("video", index))
-                            .size(px(TILE_WIDTH - 4.), px(TILE_HEIGHT - 4.))
-                            .buffer_capacity(30),
-                    ),
-                    None => container.child(thumbnail(this, hit, cx)),
+                // The thumbnail stays behind the clip. The element paints
+                // nothing until the decoder presents a frame, so dropping the
+                // thumbnail on hover left the tile empty for a moment.
+                .child(thumbnail(this, hit, cx))
+                .when_some(playing, |container, (_, playing)| {
+                    container.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                video_element(playing.clone())
+                                    .id(("video", index))
+                                    .size(px(TILE_WIDTH - 4.), px(TILE_HEIGHT - 4.))
+                                    .buffer_capacity(30),
+                            ),
+                    )
                 }),
         )
         .child(
