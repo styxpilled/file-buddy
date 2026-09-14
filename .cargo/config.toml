@@ -1,0 +1,7 @@
+[env]
+FFMPEG_DIR = "C:\\Users\\styx\\dev\\file-buddy\\ffmpeg"
+FFMPEG_LIBS_DIR = "C:\\Users\\styx\\dev\\file-buddy\\ffmpeg\\lib"
+FFMPEG_INCLUDE_DIR = "C:\\Users\\styx\\dev\\file-buddy\\ffmpeg\\include"
+
+LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"
+BINDGEN_EXTRA_CLANG_ARGS = "-I C:\\Users\\styx\\dev\\file-buddy\\ffmpeg\\lib"

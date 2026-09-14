@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "ocr-spike"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage",
+    "Storage_Streams",
+] }
+pollster = "0.4"
