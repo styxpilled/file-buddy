@@ -4,6 +4,7 @@
 //! `docs/source-layout.md` says what each directory is for and where the work
 //! of the later issues goes.
 
+pub mod clipboard;
 pub mod config;
 pub mod db;
 pub mod ffmpeg;

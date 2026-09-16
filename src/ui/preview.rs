@@ -16,7 +16,7 @@ use crate::ui::{FileBuddy, SIDE_PANE_WIDTH};
 
 /// What the pane holds below the stage: the buttons, the name, the facts, the
 /// path and the note. The stage gets the rest of the window.
-const CHROME_HEIGHT: f32 = 260.;
+const CHROME_HEIGHT: f32 = 300.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
 
@@ -41,6 +41,7 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .border_color(cx.theme().border)
         .child(stage(this, hit, width, height, cx))
         .child(controls(this, cx))
+        .child(file_actions(cx))
         .child(div().w_full().text_sm().child(hit.file.filename.clone()))
         .child(facts(hit, cx))
         .child(tag_line(this, hit, cx))
@@ -163,6 +164,38 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .disabled(!playable)
                 .label(if this.preview_muted { "Unmute" } else { "Mute" })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_preview_muted(cx))),
+        )
+        .into_any_element()
+}
+
+/// What to do with the file. Each one has a key as well, because the point of
+/// the application is to copy a clip without reaching for the mouse.
+fn file_actions(cx: &mut Context<FileBuddy>) -> AnyElement {
+    h_flex()
+        .gap_2()
+        .child(
+            Button::new("file-copy")
+                .small()
+                .icon(IconName::Copy)
+                .label("Copy")
+                .tooltip("Enter")
+                .on_click(cx.listener(|this, _, _, cx| this.copy_selected(cx))),
+        )
+        .child(
+            Button::new("file-reveal")
+                .small()
+                .icon(IconName::FolderOpen)
+                .label("Reveal")
+                .tooltip("Ctrl+E")
+                .on_click(cx.listener(|this, _, _, cx| this.reveal_selected(cx))),
+        )
+        .child(
+            Button::new("file-open")
+                .small()
+                .icon(IconName::ExternalLink)
+                .label("Open")
+                .tooltip("Ctrl+O")
+                .on_click(cx.listener(|this, _, _, cx| this.open_selected(cx))),
         )
         .into_any_element()
 }

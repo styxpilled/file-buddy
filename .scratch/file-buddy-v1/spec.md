@@ -88,6 +88,8 @@ Keyboard first. The mouse is optional.
   box takes typed characters, which leaves the letters free for the window.
 - Arrow keys move the selection in a virtual grid.
 - Enter copies the file to the clipboard as `CF_HDROP` and as path text.
+  `ctrl-e` reveals it in Explorer, `ctrl-o` opens it in the default
+  application. The header confirms a copy for a couple of seconds.
 - `m` mutes the side pane. `space` plays or pauses it, for that clip only.
 - The wheel over the side pane, and `ctrl-up` and `ctrl-down`, set the sound
   level. Turning it up lifts the mute, because the press asks to hear the clip.

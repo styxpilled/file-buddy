@@ -22,6 +22,7 @@ use gpui_kit::component::{
 use gpui_video::{Video, VideoOptions};
 use url::Url;
 
+use crate::clipboard;
 use crate::config::{Config, Weights};
 use crate::db::Db;
 use crate::index;
@@ -45,6 +46,9 @@ const PRELOAD_BUFFER: usize = 8;
 const PREVIEW_BUFFER: usize = 120;
 /// One notch of the wheel, or one press of `ctrl-up`.
 const VOLUME_STEP: f64 = 0.05;
+/// How long a confirmation stays in the header before the result count comes
+/// back. Long enough to read, short enough that it never looks like the state.
+const NOTICE_LIFE: Duration = Duration::from_millis(2200);
 pub const SIDE_PANE_WIDTH: f32 = 380.;
 
 gpui_kit::actions!(
@@ -59,7 +63,10 @@ gpui_kit::actions!(
         TogglePaused,
         ToggleAutoplay,
         VolumeUp,
-        VolumeDown
+        VolumeDown,
+        CopyFile,
+        RevealFile,
+        OpenFile
     ]
 );
 
@@ -76,6 +83,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f", FocusQuery, grid),
         KeyBinding::new("m", ToggleMuted, grid),
         KeyBinding::new("space", TogglePaused, grid),
+        KeyBinding::new("enter", CopyFile, grid),
+        KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
+        KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
+        KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-space", ToggleAutoplay, Some("FileBuddy")),
         KeyBinding::new("ctrl-up", VolumeUp, Some("FileBuddy")),
         KeyBinding::new("ctrl-down", VolumeDown, Some("FileBuddy")),
@@ -116,6 +127,17 @@ pub struct FileBuddy {
     autoplay: bool,
     preview_paused: bool,
     status: SharedString,
+    /// A confirmation, shown in place of the result count until it expires. The
+    /// count is the state; this is the answer to the key that was just pressed.
+    notice: Option<Notice>,
+    notice_task: Option<Task<()>>,
+}
+
+/// What a file action did. The colour is the whole point: a copy that failed
+/// and a copy that worked must not read the same at a glance.
+pub(super) struct Notice {
+    text: SharedString,
+    failed: bool,
 }
 
 impl FileBuddy {
@@ -159,6 +181,8 @@ impl FileBuddy {
             autoplay: false,
             preview_paused: true,
             status: "".into(),
+            notice: None,
+            notice_task: None,
         };
         this.run_search(cx);
         this.rescan(config, db_path, cx);
@@ -486,6 +510,71 @@ impl FileBuddy {
         cx.notify();
     }
 
+    /// Say what just happened, for a couple of seconds. A second action
+    /// replaces the first, so the header never shows a stale answer.
+    fn flash(&mut self, text: impl Into<SharedString>, failed: bool, cx: &mut Context<Self>) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            failed,
+        });
+        self.notice_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_LIFE).await;
+            this.update(cx, |this, cx| {
+                this.notice = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
+    }
+
+    /// The selected file, if it is still on disk. The index is a snapshot, so a
+    /// file can be gone while its tile is still on screen, and every action
+    /// against a missing file fails silently in the platform call.
+    fn selected_file(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        let path = self.selected_hit()?.file.path.clone();
+        if !path.exists() {
+            self.flash("the file is gone", true, cx);
+            return None;
+        }
+        Some(path)
+    }
+
+    /// Enter. The file goes on the clipboard as a file and as its path, so the
+    /// next paste works in an upload box and in a text field alike.
+    pub(super) fn copy_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_file(cx) else {
+            return;
+        };
+        match clipboard::copy_file(&path) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.flash(format!("copied {name}"), false, cx);
+            }
+            Err(e) => {
+                log::error!("copy failed: {e:#}");
+                self.flash(format!("copy failed: {e}"), true, cx);
+            }
+        }
+    }
+
+    pub(super) fn reveal_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_file(cx) else {
+            return;
+        };
+        cx.reveal_path(&dunce::canonicalize(path).expect("cannot canonicalize path"));
+    }
+
+    pub(super) fn open_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.selected_file(cx) else {
+            return;
+        };
+        cx.open_with_system(&dunce::canonicalize(path).expect("cannot canonicalize path"));
+    }
+
     fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
         if let Some(at) = self.kinds.iter().position(|k| *k == kind) {
             // The last chip stays on. No chips would mean no results at all.
@@ -530,6 +619,9 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &ToggleAutoplay, _, cx| this.toggle_autoplay(cx)))
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.nudge_volume(true, cx)))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.nudge_volume(false, cx)))
+            .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
+            .on_action(cx.listener(|this, _: &RevealFile, _, cx| this.reveal_selected(cx)))
+            .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.open_selected(cx)))
             // The search box propagates the escape it does not need itself.
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.blur_query(window, cx)))
             .child(
@@ -556,13 +648,24 @@ impl Render for FileBuddy {
                             .text_color(cx.theme().muted_foreground)
                             .child(self.volume_label()),
                     )
-                    .child(
-                        div()
+                    .child(match &self.notice {
+                        Some(notice) => div()
+                            .min_w(px(90.))
+                            .max_w(px(260.))
+                            .truncate()
+                            .text_sm()
+                            .text_color(if notice.failed {
+                                cx.theme().danger
+                            } else {
+                                cx.theme().success
+                            })
+                            .child(notice.text.clone()),
+                        None => div()
                             .min_w(px(90.))
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(self.status.clone()),
-                    ),
+                    }),
             )
             .child(
                 h_resizable("panes")

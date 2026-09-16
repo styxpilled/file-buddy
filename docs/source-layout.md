@@ -22,6 +22,7 @@ Two things follow from that:
     src/
       lib.rs          the library: the data layer, and the window over it
       main.rs         the application. It opens the database and one window
+      clipboard.rs    the Windows clipboard, which GPUI cannot do
       config.rs       the TOML file, the ignore globs, the bm25 weights
       paths.rs        the data directory, the thumbnail cache, the config file
       bin/fb.rs       a headless front end: scan, search, status
