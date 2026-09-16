@@ -1,15 +1,4 @@
 use crate::video::Video;
-#[cfg(target_os = "macos")]
-use core_foundation::{
-    base::TCFType,
-    boolean::CFBoolean,
-    dictionary::{CFDictionary, CFMutableDictionary},
-    string::CFString,
-};
-#[cfg(target_os = "macos")]
-use core_video::pixel_buffer::{kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, CVPixelBuffer};
-#[cfg(target_os = "macos")]
-use core_video::r#return::kCVReturnSuccess;
 use gpui::{
     Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Window,
 };
@@ -131,13 +120,18 @@ impl VideoElement {
         let cache: gpui::Entity<Option<CachedFrame>> = window.use_state(cx, |_, _| None);
         let id = self.video.id();
 
-        if let Some(hit) = cache.read(cx).clone().filter(|c| c.video == id && c.seq == seq) {
+        if let Some(hit) = cache
+            .read(cx)
+            .clone()
+            .filter(|c| c.video == id && c.seq == seq)
+        {
             return Some(hit);
         }
 
         let (yuv_data, frame_width, frame_height) = self.video.current_frame_data()?;
         let rgb_data = self.yuv_to_rgb(&yuv_data, frame_width, frame_height);
-        let image_buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(frame_width, frame_height, rgb_data)?;
+        let image_buffer =
+            ImageBuffer::<Rgba<u8>, _>::from_raw(frame_width, frame_height, rgb_data)?;
 
         let frames: SmallVec<[image::Frame; 1]> =
             SmallVec::from_elem(image::Frame::new(image_buffer), 1);
@@ -155,106 +149,6 @@ impl VideoElement {
         }
 
         Some(fresh)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn try_paint_surface_macos(
-        &mut self,
-        window: &mut Window,
-        bounds: gpui::Bounds<gpui::Pixels>,
-        yuv_data: &[u8],
-        frame_width: u32,
-        frame_height: u32,
-    ) -> bool {
-        let width = frame_width as usize;
-        let height = frame_height as usize;
-        let y_size = width * height;
-        let uv_size = (width * height) / 2;
-        if yuv_data.len() < y_size + uv_size || width == 0 || height == 0 {
-            return false;
-        }
-
-        let mut attrs: CFMutableDictionary<CFString, core_foundation::base::CFType> =
-            CFMutableDictionary::new();
-        attrs.add(
-            &core_video::pixel_buffer::CVPixelBufferKeys::MetalCompatibility.into(),
-            &CFBoolean::true_value().as_CFType(),
-        );
-        let empty_iosurf: CFDictionary<CFString, core_foundation::base::CFType> =
-            CFDictionary::from_CFType_pairs(&[]);
-        attrs.add(
-            &core_video::pixel_buffer::CVPixelBufferKeys::IOSurfaceProperties.into(),
-            &empty_iosurf.as_CFType(),
-        );
-
-        let Ok(pixel_buffer) = CVPixelBuffer::new(
-            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-            width,
-            height,
-            Some(&attrs.to_immutable()),
-        ) else {
-            return false;
-        };
-
-        let pf = pixel_buffer.get_pixel_format();
-        if pf != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            || !pixel_buffer.is_planar()
-            || pixel_buffer.get_plane_count() != 2
-        {
-            return false;
-        }
-
-        let y_w = pixel_buffer.get_width_of_plane(0);
-        let y_h = pixel_buffer.get_height_of_plane(0);
-        let uv_w = pixel_buffer.get_width_of_plane(1);
-        let uv_h = pixel_buffer.get_height_of_plane(1);
-        let y_stride = pixel_buffer.get_bytes_per_row_of_plane(0);
-        let uv_stride = pixel_buffer.get_bytes_per_row_of_plane(1);
-
-        if !(y_w == width
-            && y_h == height
-            && uv_w == width / 2
-            && uv_h == height / 2
-            && y_stride >= width
-            && uv_stride >= width)
-        {
-            return false;
-        }
-
-        if pixel_buffer.lock_base_address(0) != kCVReturnSuccess {
-            return false;
-        }
-
-        unsafe {
-            let y_dst = pixel_buffer.get_base_address_of_plane(0) as *mut u8;
-            let uv_dst = pixel_buffer.get_base_address_of_plane(1) as *mut u8;
-
-            for row in 0..height {
-                let src_off = row * width;
-                let dst_off = row * y_stride;
-                std::ptr::copy_nonoverlapping(
-                    yuv_data.as_ptr().add(src_off),
-                    y_dst.add(dst_off),
-                    width,
-                );
-            }
-
-            for row in 0..(height / 2) {
-                let src_off = y_size + row * width;
-                let dst_off = row * uv_stride;
-                std::ptr::copy_nonoverlapping(
-                    yuv_data.as_ptr().add(src_off),
-                    uv_dst.add(dst_off),
-                    width,
-                );
-            }
-        }
-
-        let _ = pixel_buffer.unlock_base_address(0);
-
-        let dest_bounds = self.fitted_bounds(bounds, frame_width, frame_height);
-        window.paint_surface(dest_bounds, pixel_buffer);
-        true
     }
 
     fn yuv_to_rgb(&self, yuv_data: &[u8], width: u32, height: u32) -> Vec<u8> {
@@ -397,21 +291,6 @@ impl Element for VideoElement {
         window: &mut Window,
         cx: &mut gpui::App,
     ) {
-        #[cfg(target_os = "macos")]
-        {
-            if let Some((yuv_data, frame_width, frame_height)) = self.video.current_frame_data() {
-                if self.try_paint_surface_macos(
-                    window,
-                    bounds,
-                    &yuv_data,
-                    frame_width,
-                    frame_height,
-                ) {
-                    return;
-                }
-            }
-        }
-
         let seq = self.video.frame_seq();
         let Some(frame) = self.cached_image(window, cx, seq) else {
             return;

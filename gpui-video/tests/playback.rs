@@ -17,7 +17,9 @@ fn fixture() -> Option<PathBuf> {
     // Relative to the workspace root, so it reads the same as a shell path even
     // though the test's working directory is the crate.
     if let Ok(named) = std::env::var("FIXTURE") {
-        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .to_path_buf();
         return Some(workspace.join(named));
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -71,7 +73,11 @@ fn fixtures(count: usize) -> Vec<PathBuf> {
         return found;
     }
     let stride = found.len() / count;
-    found.into_iter().step_by(stride.max(1)).take(count).collect()
+    found
+        .into_iter()
+        .step_by(stride.max(1))
+        .take(count)
+        .collect()
 }
 
 fn open(path: &PathBuf) -> Video {
@@ -444,7 +450,6 @@ fn diagnose_playback_over_time() {
     }
     let _ = last_position;
 }
-
 
 /// The fault this catches took ten seconds to show, and only on a clip whose
 /// frame rate fills the frame buffer faster than the audio ring fills, so it

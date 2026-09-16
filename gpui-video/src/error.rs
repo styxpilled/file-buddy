@@ -10,12 +10,8 @@ pub enum Error {
     Uri,
     #[error("failed to get media capabilities")]
     Caps,
-    #[error("failed to query media duration or position")]
-    Duration,
     #[error("failed to sync with playback")]
     Sync,
-    #[error("failed to lock internal sync primitive")]
-    Lock,
     #[error("invalid framerate: {0}")]
     Framerate(f64),
 }

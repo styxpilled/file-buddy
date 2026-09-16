@@ -589,8 +589,8 @@ impl Render for FileBuddy {
 fn open_video(path: &Path, buffer: usize) -> Option<Video> {
     let uri = Url::from_file_path(path).ok()?;
     let options = VideoOptions {
-        frame_buffer_capacity: Some(buffer),
-        looping: Some(true),
+        frame_buffer_capacity: buffer,
+        looping: true,
         ..VideoOptions::default()
     };
     match Video::new_with_options(&uri, options) {

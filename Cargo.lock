@@ -1253,19 +1253,6 @@ dependencies = [
 
 [[package]]
 name = "core-graphics2"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e4583956b9806b69f73fcb23aee05eb3620efc282972f08f6a6db7504f8334d"
-dependencies = [
- "bitflags 2.13.2",
- "block",
- "cfg-if",
- "core-foundation 0.10.1",
- "libc",
-]
-
-[[package]]
-name = "core-graphics2"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4416167a69126e617f8d0a214af0e3c1dbdeffcb100ddf72dcd1a1ac9893c146"
@@ -1291,26 +1278,13 @@ dependencies = [
 
 [[package]]
 name = "core-video"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d45e71d5be22206bed53c3c3cb99315fc4c3d31b8963808c6bc4538168c4f8ef"
-dependencies = [
- "block",
- "core-foundation 0.10.1",
- "core-graphics2 0.4.1",
- "io-surface",
- "libc",
-]
-
-[[package]]
-name = "core-video"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "139679cc63eb9504bdbe37e37874b0247136177655f0008588781e90863afa62"
 dependencies = [
  "block",
  "core-foundation 0.10.1",
- "core-graphics2 0.5.2",
+ "core-graphics2",
  "io-surface",
  "libc",
  "metal",
@@ -2648,7 +2622,7 @@ dependencies = [
  "bindgen",
  "bitflags 2.13.2",
  "chrono",
- "core-video 0.5.2",
+ "core-video",
  "ctor",
  "derive_more",
  "embed-resource",
@@ -2716,7 +2690,7 @@ dependencies = [
  "cbindgen",
  "cocoa 0.26.0",
  "core-foundation 0.10.1",
- "core-video 0.5.2",
+ "core-video",
  "derive_more",
  "etagere",
  "foreign-types",
@@ -2888,7 +2862,7 @@ dependencies = [
  "anyhow",
  "bindgen",
  "core-foundation 0.10.1",
- "core-video 0.5.2",
+ "core-video",
  "foreign-types",
  "metal",
  "objc",
@@ -3156,8 +3130,6 @@ checksum = "3dcb57f0709f63c78b618b00b2a65a7df346ad827171ccc78e39ae18a0ced786"
 name = "gpui-video"
 version = "0.1.2"
 dependencies = [
- "core-foundation 0.10.1",
- "core-video 0.4.3",
  "cpal",
  "crossbeam-channel",
  "env_logger",
