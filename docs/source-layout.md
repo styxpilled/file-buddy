@@ -57,6 +57,7 @@ Two things follow from that:
         grid.rs       the virtual grid of results
         tile.rs       one result: thumbnail, hover video, badge, matched text
         preview.rs    the side pane
+        tagger.rs     the tag input and its autocomplete
         chips.rs      the media kind filters
 
 `config` and `paths` stay at the root because every directory uses them and they

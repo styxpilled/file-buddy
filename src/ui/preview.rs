@@ -106,7 +106,7 @@ fn stage(
             }
         }));
 
-    match &this.preview {
+    match this.preview_video() {
         Some(playing) => frame
             .child(
                 video_element(playing.clone())
@@ -132,7 +132,7 @@ fn stage(
 /// and it plays whatever autoplay says. The row stays in place with no clip, so
 /// the pane below it does not move while a decoder opens.
 fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
-    let playable = this.preview.is_some();
+    let playable = this.preview_video().is_some();
     h_flex()
         .gap_2()
         .child(
@@ -188,6 +188,14 @@ fn file_actions(cx: &mut Context<FileBuddy>) -> AnyElement {
                 .label("Reveal")
                 .tooltip("Ctrl+E")
                 .on_click(cx.listener(|this, _, _, cx| this.reveal_selected(cx))),
+        )
+        .child(
+            Button::new("file-tag")
+                .small()
+                .icon(IconName::Plus)
+                .label("Tag")
+                .tooltip("T")
+                .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
         )
         .child(
             Button::new("file-open")

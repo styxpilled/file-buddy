@@ -105,8 +105,14 @@ Keyboard first. The mouse is optional.
 - Each result shows the matched text and a badge: tag, filename, speech or
   screen text.
 - Chips filter by media kind. All are on by default.
-- A tag key opens an input with autocomplete over existing tags. Tags are
-  lowercase. Multiple selected files can be tagged at once.
+- `t` opens a tag input with autocomplete over the tags that already exist.
+  Tags are lowercase. `x` marks the selection and ctrl-click marks a tile, so
+  one tag can reach many files at once. Inside the input, `alt-up` and
+  `alt-down` pick a suggestion, because the plain arrows belong to the text.
+  Enter applies.
+- Escape undoes one thing at a time, the most recent first: it closes the tag
+  panel, or gives focus back from the search box, or clears the marks. A click
+  outside the tag panel closes it too.
 
 The Review screen collects every file that needs a person: duplicate groups,
 files over 5 minutes, files that cannot be indexed, and files with no proper

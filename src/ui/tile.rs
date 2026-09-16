@@ -1,7 +1,7 @@
 //! One result. A thumbnail until the pointer arrives, then the clip itself.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Window, div, img, px};
+use gpui::{AnyElement, App, ClickEvent, Context, Window, div, img, px};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_video::video as video_element;
 
@@ -21,6 +21,7 @@ pub fn tile(
         return div().into_any_element();
     };
     let selected = index == this.selected;
+    let marked = this.is_marked(hit);
     let playing = this.hovered.as_ref().filter(|(i, _)| *i == index);
 
     v_flex()
@@ -31,7 +32,14 @@ pub fn tile(
             cx.listener(move |this, hovered: &bool, _, cx| this.set_hovered(index, *hovered, cx)),
         )
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+        // Ctrl marks instead of selecting, the way a file manager does it.
+        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            if event.modifiers().control {
+                this.toggle_mark(index, cx)
+            } else {
+                this.select(index, cx)
+            }
+        }))
         .child(
             div()
                 .relative()
@@ -40,10 +48,10 @@ pub fn tile(
                 .overflow_hidden()
                 .rounded(px(4.))
                 .border_2()
-                .border_color(if selected {
-                    cx.theme().primary
-                } else {
-                    cx.theme().border
+                .border_color(match (selected, marked) {
+                    (true, _) => cx.theme().primary,
+                    (false, true) => cx.theme().success,
+                    (false, false) => cx.theme().border,
                 })
                 .bg(cx.theme().secondary)
                 .flex()
@@ -53,6 +61,23 @@ pub fn tile(
                 // nothing until the decoder presents a frame, so dropping the
                 // thumbnail on hover left the tile empty for a moment.
                 .child(thumbnail(this, hit, cx))
+                .when(marked, |container| {
+                    container.child(
+                        div()
+                            .absolute()
+                            .top(px(4.))
+                            .right(px(4.))
+                            .size(px(16.))
+                            .rounded(px(8.))
+                            .bg(cx.theme().success)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .text_color(cx.theme().background)
+                            .child("✓"),
+                    )
+                })
                 .when_some(playing, |container, (_, playing)| {
                     container.child(
                         div()

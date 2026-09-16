@@ -4,8 +4,10 @@
 mod chips;
 mod grid;
 mod preview;
+mod tagger;
 mod tile;
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -22,9 +24,10 @@ use gpui_kit::component::{
 use gpui_video::{Video, VideoOptions};
 use url::Url;
 
+use self::tagger::{MAX_SUGGESTIONS, Tagger};
 use crate::clipboard;
 use crate::config::{Config, Weights};
-use crate::db::Db;
+use crate::db::{Db, tags};
 use crate::index;
 use crate::media::Kind;
 use crate::search::{self, Hit};
@@ -66,7 +69,12 @@ gpui_kit::actions!(
         VolumeDown,
         CopyFile,
         RevealFile,
-        OpenFile
+        OpenFile,
+        TagFiles,
+        ToggleMark,
+        Dismiss,
+        NextSuggestion,
+        PreviousSuggestion
     ]
 );
 
@@ -87,6 +95,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
+        KeyBinding::new("t", TagFiles, grid),
+        KeyBinding::new("x", ToggleMark, grid),
+        // `input::Escape` reaches this view only while an input has focus, so
+        // escape needs a binding of its own for the rest of the time.
+        KeyBinding::new("escape", Dismiss, grid),
+        // Plain arrows belong to the text in the tag input, so the suggestion
+        // list takes the ones the input leaves alone.
+        KeyBinding::new("alt-down", NextSuggestion, Some("FileBuddy")),
+        KeyBinding::new("alt-up", PreviousSuggestion, Some("FileBuddy")),
         KeyBinding::new("ctrl-space", ToggleAutoplay, Some("FileBuddy")),
         KeyBinding::new("ctrl-up", VolumeUp, Some("FileBuddy")),
         KeyBinding::new("ctrl-down", VolumeDown, Some("FileBuddy")),
@@ -110,7 +127,7 @@ pub struct FileBuddy {
     columns: usize,
     /// The one tile that plays. Only one does.
     hovered: Option<(usize, Video)>,
-    preview: Option<Video>,
+    preview: Option<Preview>,
     preview_task: Option<Task<()>>,
     /// The next file in the direction of travel, opened silent and still, with
     /// the index it was opened for. A change of direction discards it.
@@ -131,6 +148,19 @@ pub struct FileBuddy {
     /// count is the state; this is the answer to the key that was just pressed.
     notice: Option<Notice>,
     notice_task: Option<Task<()>>,
+    /// Files marked for one bulk action, by hash. A hash survives a new search
+    /// and a rename; a grid index survives neither.
+    marked: HashSet<String>,
+    tagger: Option<Tagger>,
+}
+
+/// The clip in the side pane, with the identity of what it holds. Identity is
+/// the content hash, the same as everywhere else in the application, so two
+/// paths with the same bytes are one video and stepping between them does not
+/// start the clip again.
+pub(super) struct Preview {
+    hash: String,
+    video: Video,
 }
 
 /// What a file action did. The colour is the whole point: a copy that failed
@@ -183,6 +213,8 @@ impl FileBuddy {
             status: "".into(),
             notice: None,
             notice_task: None,
+            marked: HashSet::new(),
+            tagger: None,
         };
         this.run_search(cx);
         this.rescan(config, db_path, cx);
@@ -221,7 +253,7 @@ impl FileBuddy {
         .detach();
     }
 
-    fn run_search(&mut self, cx: &mut Context<Self>) {
+    fn fetch_results(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let request = search::Request::new(text).kinds(self.kinds.clone());
         match search::search(self.db.conn(), &request, &self.weights) {
@@ -239,17 +271,62 @@ impl FileBuddy {
                 self.results.clear();
             }
         }
+    }
+
+    /// A new query. Everything that was about the old results goes with them.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        self.fetch_results(cx);
         self.selected = 0;
         self.hovered = None;
         // The index it was opened for means nothing against new results.
         self.preloaded = None;
+        // A mark is a promise about a file the user can see. New results are a
+        // different set of files, so the promise cannot be kept.
+        self.marked.clear();
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.schedule_preview(cx);
+        cx.notify();
+    }
+
+    /// The same query again, after the index changed under it. A tag can move
+    /// a file up the ranking, and dropping the user back at the top of the
+    /// grid mid-tagging would lose their place.
+    fn rerun_search(&mut self, cx: &mut Context<Self>) {
+        let was = self.selected_hit().map(|hit| hit.file.hash.clone());
+        self.fetch_results(cx);
+
+        // Follow the file, not the row. A tag reorders the results, so the row
+        // the selection sat on can now hold something else, and taking the tag
+        // that found a file off it drops the file out of the results entirely.
+        self.selected = was
+            .and_then(|hash| self.results.iter().position(|hit| hit.file.hash == hash))
+            .unwrap_or_else(|| self.selected.min(self.results.len().saturating_sub(1)));
+
+        // Both of these are about files that were on screen a moment ago. A
+        // mark on a file that is no longer a result cannot be seen, so counting
+        // it in the header would be a lie, and the file opened ahead was opened
+        // for a row that now holds something else.
+        self.marked.retain(|hash| {
+            self.results
+                .iter()
+                .any(|hit| hit.file.hash.as_str() == hash.as_str())
+        });
+        self.preloaded = None;
+
+        // The selection can land on a different file even when the row number
+        // does not change, and the pane would otherwise keep playing the clip
+        // that is no longer selected. Clicking the tile could not fix that:
+        // `select` is right to do nothing when the row has not moved.
         self.schedule_preview(cx);
         cx.notify();
     }
 
     fn selected_hit(&self) -> Option<&Hit> {
         self.results.get(self.selected)
+    }
+
+    pub(super) fn preview_video(&self) -> Option<&Video> {
+        self.preview.as_ref().map(|preview| &preview.video)
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -300,7 +377,10 @@ impl FileBuddy {
     /// Focus given in the constructor is lost while the window finishes
     /// opening, so every frame takes it back for the window keys.
     fn hold_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus.is_focused(window) && !self.query_focused(window, cx) {
+        if !self.focus.is_focused(window)
+            && !self.query_focused(window, cx)
+            && self.tagger.is_none()
+        {
             window.focus(&self.focus, cx);
         }
     }
@@ -317,12 +397,29 @@ impl FileBuddy {
         };
         let kind = hit.file.kind;
         let path = hit.file.path.clone();
+        let hash = hit.file.hash.clone();
         // A still image has no clip of its own, so nothing may linger over it.
         if kind == Kind::Still {
             self.preview = None;
             self.schedule_preload(cx);
             return;
         }
+
+        // Already playing this one. A search runs on every keystroke and puts
+        // the same file back under the selection, and a step onto a duplicate
+        // lands on the same bytes, so reopening here would throw away a warm
+        // decoder and start the clip again from nothing for no reason at all.
+        // Whether it is playing and how loud it is are the user's answers to a
+        // question about this clip, so they stand too.
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.hash == hash)
+        {
+            self.schedule_preload(cx);
+            return;
+        }
+
         self.preview_paused = !self.autoplay;
 
         // The file opened ahead is already decoded, so it costs no wait at all.
@@ -330,14 +427,14 @@ impl FileBuddy {
             video.set_muted(self.preview_muted);
             video.set_volume(self.volume);
             video.set_paused(self.preview_paused);
-            self.preview = Some(video);
+            self.preview = Some(Preview { hash, video });
             self.schedule_preload(cx);
             cx.notify();
             return;
         }
 
         if let Some(outgoing) = &self.preview {
-            outgoing.set_muted(true);
+            outgoing.video.set_muted(true);
         }
         let index = self.selected;
         self.preview_task = Some(cx.spawn(async move |this, cx| {
@@ -375,7 +472,7 @@ impl FileBuddy {
                 if this.selected != index {
                     return;
                 }
-                this.preview = Some(video);
+                this.preview = Some(Preview { hash, video });
                 this.schedule_preload(cx);
                 cx.notify();
             })
@@ -435,7 +532,7 @@ impl FileBuddy {
 
     fn toggle_preview_muted(&mut self, cx: &mut Context<Self>) {
         self.preview_muted = !self.preview_muted;
-        if let Some(video) = &self.preview {
+        if let Some(video) = self.preview_video() {
             video.set_muted(self.preview_muted);
         }
         cx.notify();
@@ -449,7 +546,7 @@ impl FileBuddy {
         if up && self.volume > 0. {
             self.preview_muted = false;
         }
-        if let Some(video) = &self.preview {
+        if let Some(video) = self.preview_video() {
             video.set_volume(self.volume);
             video.set_muted(self.preview_muted);
         }
@@ -468,7 +565,7 @@ impl FileBuddy {
     /// One clip only. The next selection follows the autoplay flag again.
     fn toggle_preview_paused(&mut self, cx: &mut Context<Self>) {
         self.preview_paused = !self.preview_paused;
-        if let Some(video) = &self.preview {
+        if let Some(video) = self.preview_video() {
             video.set_paused(self.preview_paused);
         }
         cx.notify();
@@ -477,7 +574,7 @@ impl FileBuddy {
     fn toggle_autoplay(&mut self, cx: &mut Context<Self>) {
         self.autoplay = !self.autoplay;
         self.preview_paused = !self.autoplay;
-        if let Some(video) = &self.preview {
+        if let Some(video) = self.preview_video() {
             video.set_paused(self.preview_paused);
         }
         cx.notify();
@@ -575,6 +672,215 @@ impl FileBuddy {
         cx.open_with_system(&dunce::canonicalize(path).expect("cannot canonicalize path"));
     }
 
+    /// The files a bulk action works on: everything marked, or the selection
+    /// when nothing is marked. Acting on the selection while marks exist would
+    /// be a quiet way to tag the wrong file.
+    fn action_targets(&self) -> Vec<String> {
+        if !self.marked.is_empty() {
+            let mut hashes: Vec<String> = self.marked.iter().cloned().collect();
+            hashes.sort();
+            return hashes;
+        }
+        self.selected_hit()
+            .map(|hit| vec![hit.file.hash.clone()])
+            .unwrap_or_default()
+    }
+
+    pub(super) fn toggle_mark(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(hit) = self.results.get(index) else {
+            return;
+        };
+        let hash = hit.file.hash.clone();
+        if !self.marked.remove(&hash) {
+            self.marked.insert(hash);
+        }
+        cx.notify();
+    }
+
+    fn clear_marks(&mut self, cx: &mut Context<Self>) {
+        if self.marked.is_empty() {
+            return;
+        }
+        self.marked.clear();
+        cx.notify();
+    }
+
+    pub(super) fn is_marked(&self, hit: &Hit) -> bool {
+        self.marked.contains(&hit.file.hash)
+    }
+
+    /// Open the tag input on the marked files, or on the selection.
+    fn open_tagger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let subject: SharedString = match (self.marked.len(), self.selected_hit()) {
+            (0, Some(hit)) => format!("Tag {}", hit.file.filename).into(),
+            (1, _) => "Tag 1 marked file".into(),
+            (n, _) => format!("Tag {n} marked files").into(),
+        };
+
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("a tag, lowercase"));
+        let subscriptions = vec![cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => this.refresh_suggestions(cx),
+                InputEvent::PressEnter { .. } => {
+                    let typed = input.read(cx).value().to_string();
+                    let chosen = this
+                        .tagger
+                        .as_ref()
+                        .and_then(|tagger| tagger.chosen(&typed));
+                    if let Some(name) = chosen {
+                        this.apply_tag(name, window, cx);
+                    }
+                }
+                _ => {}
+            },
+        )];
+
+        let handle = input.read(cx).focus_handle(cx);
+        self.tagger = Some(Tagger {
+            input,
+            subject,
+            current: self.common_tags(&targets),
+            targets,
+            suggestions: Vec::new(),
+            highlighted: None,
+            _subscriptions: subscriptions,
+        });
+        self.refresh_suggestions(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Escape, wherever it comes from. It undoes one thing at a time, the most
+    /// recent first, so a person leaning on it ends up back at a plain grid.
+    fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tagger.is_some() {
+            self.close_tagger(window, cx);
+        } else if self.query_focused(window, cx) {
+            self.blur_query(window, cx);
+        } else {
+            self.clear_marks(cx);
+        }
+    }
+
+    fn close_tagger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tagger.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    fn common_tags(&self, targets: &[String]) -> Vec<SharedString> {
+        tags::common_to(self.db.conn(), targets)
+            .unwrap_or_else(|e| {
+                log::error!("reading the tags failed: {e:#}");
+                Vec::new()
+            })
+            .into_iter()
+            .map(SharedString::from)
+            .collect()
+    }
+
+    /// The existing tags that match what is typed. The first is highlighted, so
+    /// a tag that is already there is what Enter applies, not a near miss of it.
+    fn refresh_suggestions(&mut self, cx: &mut Context<Self>) {
+        let Some(tagger) = &self.tagger else { return };
+        let typed = tagger.input.read(cx).value().trim().to_lowercase();
+        let found = tags::matching(self.db.conn(), &typed, MAX_SUGGESTIONS).unwrap_or_default();
+        let exact = found.contains(&typed);
+
+        let Some(tagger) = &mut self.tagger else {
+            return;
+        };
+        tagger.suggestions = found.into_iter().map(SharedString::from).collect();
+        // Nothing typed is a list to browse, not an answer. A name that is
+        // already a tag needs no suggestion either: Enter would do the same.
+        tagger.highlighted =
+            (!typed.is_empty() && !tagger.suggestions.is_empty() && !exact).then_some(0);
+        cx.notify();
+    }
+
+    fn move_highlight(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(tagger) = &mut self.tagger else {
+            return;
+        };
+        let count = tagger.suggestions.len();
+        if count == 0 {
+            return;
+        }
+        // Off either end is what was typed, so a new tag is always reachable.
+        tagger.highlighted = match (tagger.highlighted, forward) {
+            (None, true) => Some(0),
+            (None, false) => Some(count - 1),
+            (Some(at), true) if at + 1 < count => Some(at + 1),
+            (Some(_), true) => None,
+            (Some(0), false) => None,
+            (Some(at), false) => Some(at - 1),
+        };
+        cx.notify();
+    }
+
+    /// Apply one tag to every target. The panel stays open with an empty box,
+    /// because a file usually wants more than one tag.
+    pub(super) fn apply_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = name.trim().to_lowercase();
+        let Some(tagger) = &self.tagger else { return };
+        let targets = tagger.targets.clone();
+        if name.is_empty() {
+            return;
+        }
+
+        if let Err(e) = tags::attach_many(self.db.conn_mut(), &targets, &name) {
+            log::error!("tagging failed: {e:#}");
+            self.flash(format!("tagging failed: {e}"), true, cx);
+            return;
+        }
+        self.flash(
+            format!("tagged {} with {name}", counted(targets.len())),
+            false,
+            cx,
+        );
+        self.after_tag_change(window, cx);
+    }
+
+    pub(super) fn remove_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tagger) = &self.tagger else { return };
+        let targets = tagger.targets.clone();
+
+        if let Err(e) = tags::detach_many(self.db.conn_mut(), &targets, &name) {
+            log::error!("untagging failed: {e:#}");
+            self.flash(format!("untagging failed: {e}"), true, cx);
+            return;
+        }
+        self.flash(
+            format!("took {name} off {}", counted(targets.len())),
+            false,
+            cx,
+        );
+        self.after_tag_change(window, cx);
+    }
+
+    /// The index changed under the results, so run the query again. The panel
+    /// keeps its targets and empties its box for the next tag.
+    fn after_tag_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tagger) = &self.tagger else { return };
+        let input = tagger.input.clone();
+        let targets = tagger.targets.clone();
+
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        let current = self.common_tags(&targets);
+        if let Some(tagger) = &mut self.tagger {
+            tagger.current = current;
+        }
+        self.rerun_search(cx);
+        self.refresh_suggestions(cx);
+    }
+
     fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
         if let Some(at) = self.kinds.iter().position(|k| *k == kind) {
             // The last chip stays on. No chips would mean no results at all.
@@ -606,6 +912,7 @@ impl Render for FileBuddy {
         v_flex()
             .key_context("FileBuddy")
             .track_focus(&self.focus)
+            .relative()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -622,8 +929,18 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
             .on_action(cx.listener(|this, _: &RevealFile, _, cx| this.reveal_selected(cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.open_selected(cx)))
+            .on_action(cx.listener(|this, _: &TagFiles, window, cx| this.open_tagger(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleMark, _, cx| {
+                let selected = this.selected;
+                this.toggle_mark(selected, cx)
+            }))
+            .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
+            .on_action(cx.listener(|this, _: &NextSuggestion, _, cx| this.move_highlight(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousSuggestion, _, cx| this.move_highlight(false, cx)),
+            )
             // The search box propagates the escape it does not need itself.
-            .on_action(cx.listener(|this, _: &Escape, window, cx| this.blur_query(window, cx)))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| this.dismiss(window, cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -641,6 +958,17 @@ impl Render for FileBuddy {
                             .child(Input::new(&self.input)),
                     )
                     .child(chips::chips(self, cx))
+                    .when(!self.marked.is_empty(), |header| {
+                        header.child(
+                            div()
+                                .px_1()
+                                .rounded(px(3.))
+                                .bg(cx.theme().success.opacity(0.18))
+                                .text_color(cx.theme().success)
+                                .text_xs()
+                                .child(format!("{} marked", self.marked.len())),
+                        )
+                    })
                     .child(
                         div()
                             .min_w(px(56.))
@@ -682,6 +1010,7 @@ impl Render for FileBuddy {
                             .child(preview::pane(self, window, cx)),
                     ),
             )
+            .child(tagger::panel(self, cx))
     }
 }
 
@@ -702,5 +1031,13 @@ fn open_video(path: &Path, buffer: usize) -> Option<Video> {
             log::warn!("cannot play {}: {e}", path.display());
             None
         }
+    }
+}
+
+/// `1 file` or `3 files`, for a confirmation that says what it touched.
+fn counted(files: usize) -> String {
+    match files {
+        1 => "1 file".to_string(),
+        n => format!("{n} files"),
     }
 }
