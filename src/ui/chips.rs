@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Selectable, Sizable, h_flex};
 
 use crate::media::Kind;
-use crate::ui::FileBuddy;
+use crate::ui::{FileBuddy, with_pointer};
 
 const CHIPS: [(Kind, &str); 3] = [
     (Kind::Video, "Video"),
@@ -20,12 +20,15 @@ pub fn chips(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .gap_1()
         .children(CHIPS.map(|(kind, label)| {
             let on = this.kinds.contains(&kind);
-            Button::new(kind.as_str())
-                .xsmall()
-                .label(label)
-                .selected(on)
-                .when(on, |button| button.primary())
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_kind(kind, cx)))
+            with_pointer(
+                Button::new(kind.as_str())
+                    .xsmall()
+                    .label(label)
+                    .selected(on)
+                    .when(on, |button| button.primary())
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_kind(kind, cx))),
+                true,
+            )
         }))
         .into_any_element()
 }

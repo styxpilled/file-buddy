@@ -12,7 +12,7 @@ use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 
 use crate::config::Config;
 use crate::paths;
-use crate::ui::FileBuddy;
+use crate::ui::{FileBuddy, with_pointer};
 
 const PAGE_WIDTH: f32 = 720.;
 const WEIGHT_WIDTH: f32 = 120.;
@@ -115,20 +115,22 @@ fn folders(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
                     .truncate()
                     .child(root.display().to_string()),
             )
-            .child(
+            .child(with_pointer(
                 Button::new(("remove-root", at))
                     .small()
                     .label("Remove")
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_root(at, cx))),
-            )
+                true,
+            ))
     }))
     .child(
-        h_flex().child(
+        h_flex().child(with_pointer(
             Button::new("add-root")
                 .small()
                 .label("Add folder")
                 .on_click(cx.listener(|this, _, _, cx| this.add_roots(cx))),
-        ),
+            true,
+        )),
     )
     .into_any_element()
 }
@@ -162,20 +164,22 @@ fn footer(cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
         .gap_2()
         .items_center()
-        .child(
+        .child(with_pointer(
             Button::new("save-settings")
                 .small()
                 .primary()
                 .label("Save")
                 .tooltip("Ctrl+S")
                 .on_click(cx.listener(|this, _, _, cx| this.save_settings(cx))),
-        )
-        .child(
+            true,
+        ))
+        .child(with_pointer(
             Button::new("revert-settings")
                 .small()
                 .label("Revert")
                 .on_click(cx.listener(|this, _, window, cx| this.revert_settings(window, cx))),
-        )
+            true,
+        ))
         .child(
             div()
                 .text_xs()

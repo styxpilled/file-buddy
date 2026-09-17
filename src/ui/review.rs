@@ -7,7 +7,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{Selectable, Sizable, h_flex};
 
 use crate::db::review::Group;
-use crate::ui::{FileBuddy, Review};
+use crate::ui::{FileBuddy, Review, with_pointer};
 
 pub fn tabs(review: &Review, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
@@ -16,15 +16,18 @@ pub fn tabs(review: &Review, cx: &mut Context<FileBuddy>) -> AnyElement {
         .children(Group::ALL.into_iter().zip(review.counts).enumerate().map(
             |(at, (group, count))| {
                 let on = review.group == group;
-                Button::new(group.label())
-                    .small()
-                    .label(format!("{}  {count}", group.label()))
-                    .tooltip(format!("Alt+{}", at + 1))
-                    .selected(on)
-                    .when(on, |button| button.primary())
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.show_group(group, window, cx)),
-                    )
+                with_pointer(
+                    Button::new(group.label())
+                        .small()
+                        .label(format!("{}  {count}", group.label()))
+                        .tooltip(format!("Alt+{}", at + 1))
+                        .selected(on)
+                        .when(on, |button| button.primary())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_group(group, window, cx)
+                        })),
+                    true,
+                )
             },
         ))
         .into_any_element()

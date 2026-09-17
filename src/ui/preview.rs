@@ -5,7 +5,8 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, img, px,
 };
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IconName, Selectable, Sizable, h_flex, v_flex,
 };
@@ -16,11 +17,13 @@ use crate::db::{segments, tags};
 use crate::index::jobs::{self, Stage};
 use crate::paths;
 use crate::search::Hit;
-use crate::ui::{FileBuddy, SIDE_PANE_WIDTH, renamer};
+use crate::ui::{
+    CopyFile, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer, with_pointer,
+};
 
-/// What the pane holds below the stage: the buttons, the name, the facts, the
-/// tags and the transcript. The stage gets the rest of the window.
-const CHROME_HEIGHT: f32 = 460.;
+/// What the pane holds besides the stage: the controls above it, and the name,
+/// the facts, the tags and the transcript below. The stage gets the rest.
+const CHROME_HEIGHT: f32 = 440.;
 const TRANSCRIPT_HEIGHT: f32 = 200.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
@@ -44,9 +47,8 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .p(px(PADDING))
         .border_l_1()
         .border_color(cx.theme().border)
-        .child(stage(this, hit, width, height, cx))
         .child(controls(this, cx))
-        .child(file_actions(cx))
+        .child(stage(this, hit, width, height, cx))
         .child(renamer::name_line(this, hit, cx))
         .child(facts(hit, cx))
         .child(review_line(this, hit, cx))
@@ -181,25 +183,24 @@ fn stage(
     }
 }
 
-/// Sound and pause, for the pane only. A tile stays silent whatever these say,
-/// and it plays whatever autoplay says. The row stays in place with no clip, so
-/// the pane below it does not move while a decoder opens.
+/// Sound and pause, for the pane only, and the menu of file actions. A tile
+/// stays silent whatever these say. The row stays in place with no clip, so the
+/// stage below it does not move while a decoder opens.
 fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let playable = this.preview_video().is_some();
     h_flex()
         .gap_2()
-        .child(
+        .child(with_pointer(
             Button::new("preview-autoplay")
                 .small()
+                .label("Autoplay")
+                .tooltip("Ctrl+Space")
                 .selected(this.autoplay)
-                .label(if this.autoplay {
-                    "Autoplay on"
-                } else {
-                    "Autoplay off"
-                })
+                .when(this.autoplay, |button| button.primary())
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
-        )
-        .child(
+            true,
+        ))
+        .child(with_pointer(
             Button::new("preview-pause")
                 .small()
                 .disabled(!playable)
@@ -210,63 +211,42 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 })
                 .label(if this.preview_paused { "Play" } else { "Pause" })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_preview_paused(cx))),
-        )
-        .child(
+            playable,
+        ))
+        .child(with_pointer(
             Button::new("preview-mute")
                 .small()
                 .disabled(!playable)
                 .label(if this.preview_muted { "Unmute" } else { "Mute" })
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_preview_muted(cx))),
-        )
+            playable,
+        ))
+        .child(file_menu(this, cx))
         .into_any_element()
 }
 
-/// What to do with the file. Each one has a key as well, because the point of
-/// the application is to copy a clip without reaching for the mouse.
-fn file_actions(cx: &mut Context<FileBuddy>) -> AnyElement {
-    h_flex()
-        .gap_2()
-        .child(
-            Button::new("file-copy")
-                .small()
-                .icon(IconName::Copy)
-                .label("Copy")
-                .tooltip("Enter")
-                .on_click(cx.listener(|this, _, _, cx| this.copy_selected(cx))),
-        )
-        .child(
-            Button::new("file-reveal")
-                .small()
-                .icon(IconName::FolderOpen)
-                .label("Reveal")
-                .tooltip("Ctrl+E")
-                .on_click(cx.listener(|this, _, _, cx| this.reveal_selected(cx))),
-        )
-        .child(
-            Button::new("file-tag")
-                .small()
-                .icon(IconName::Plus)
-                .label("Tag")
-                .tooltip("T")
-                .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
-        )
-        .child(
-            Button::new("file-rename")
-                .small()
-                .icon(IconName::Replace)
-                .label("Rename")
-                .tooltip("R")
-                .on_click(cx.listener(|this, _, window, cx| this.open_renamer(window, cx))),
-        )
-        .child(
-            Button::new("file-open")
-                .small()
-                .icon(IconName::ExternalLink)
-                .label("Open")
-                .tooltip("Ctrl+O")
-                .on_click(cx.listener(|this, _, _, cx| this.open_selected(cx))),
-        )
-        .into_any_element()
+/// Copy, reveal, rename and open. Each item dispatches the same action as its
+/// key, to the window, so the menu shows the key beside it.
+fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let focus = this.focus.clone();
+    let view = cx.entity().downgrade();
+    let button = Button::new("file-menu")
+        .small()
+        .icon(IconName::Ellipsis)
+        .tooltip("File actions")
+        .dropdown_menu(move |menu, _, _| {
+            menu.action_context(focus.clone())
+                .menu_with_icon("Copy", IconName::Copy, Box::new(CopyFile))
+                .menu_with_icon("Reveal", IconName::FolderOpen, Box::new(RevealFile))
+                .menu_with_icon("Rename", IconName::Replace, Box::new(RenameFile))
+                .menu_with_icon("Open", IconName::ExternalLink, Box::new(OpenFile))
+        })
+        // The window takes focus back on every frame, which would close the
+        // menu the moment it opened.
+        .on_open_change(move |open, _, cx| {
+            view.update(cx, |this, _| this.menu_open = *open).ok();
+        });
+    with_pointer(button, true).into_any_element()
 }
 
 fn facts(hit: &Hit, cx: &App) -> AnyElement {
@@ -313,14 +293,13 @@ fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-fn tag_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
+/// The tags of the file, and the button that opens the tag panel beside them.
+fn tag_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let names = tags::of_hash(this.db.conn(), &hit.file.hash).unwrap_or_default();
-    if names.is_empty() {
-        return div().into_any_element();
-    }
     h_flex()
         .gap_1()
         .flex_wrap()
+        .items_center()
         .children(names.into_iter().map(|name| {
             div()
                 .px_1()
@@ -330,5 +309,14 @@ fn tag_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
                 .text_xs()
                 .child(name)
         }))
+        .child(with_pointer(
+            Button::new("file-tag")
+                .xsmall()
+                .icon(IconName::Plus)
+                .label("Tag")
+                .tooltip("T")
+                .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
+            true,
+        ))
         .into_any_element()
 }

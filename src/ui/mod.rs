@@ -200,6 +200,8 @@ pub struct FileBuddy {
     rename_task: Option<Task<()>>,
     /// The Review page, when it is open. Its group replaces the results.
     review: Option<Review>,
+    /// The file menu in the side pane is open and holds focus.
+    menu_open: bool,
     /// The Settings page, when it is open. It holds the unsaved form.
     settings: Option<Settings>,
     scanning: bool,
@@ -287,6 +289,7 @@ impl FileBuddy {
             renamer: None,
             rename_task: None,
             review: None,
+            menu_open: false,
             settings: None,
             scanning: false,
             rescan_after: false,
@@ -568,6 +571,7 @@ impl FileBuddy {
             && self.tagger.is_none()
             && self.renamer.is_none()
             && self.settings.is_none()
+            && !self.menu_open
         {
             window.focus(&self.focus, cx);
         }
@@ -1710,6 +1714,20 @@ impl Render for FileBuddy {
             })
             .child(tagger::panel(self, cx))
     }
+}
+
+/// gpui-kit's `Button` sets the arrow cursor on itself as it renders, so a
+/// cursor set on the button is lost. The window takes the cursor of the last
+/// element painted under the pointer, so a layer painted over the button wins,
+/// and it takes no clicks from it. A disabled button keeps the arrow.
+pub(super) fn with_pointer(button: impl IntoElement, enabled: bool) -> gpui::Div {
+    div()
+        .relative()
+        .flex_none()
+        .child(button)
+        .when(enabled, |wrapper| {
+            wrapper.child(div().absolute().inset_0().cursor_pointer())
+        })
 }
 
 /// Open a file for playback in a tile or in the side pane. It loops; the caller
