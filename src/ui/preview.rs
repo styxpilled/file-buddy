@@ -1,9 +1,11 @@
 //! The side pane. It plays the selection whole, with sound if the user asks for
-//! it, and shows what the index knows, the transcript included.
+//! it, and shows what the index knows under three tabs: the facts of the file,
+//! the speech that was heard and the text that was read.
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, img, px,
+    AnyElement, App, Context, Div, ScrollDelta, ScrollWheelEvent, SharedString, Stateful, Window,
+    div, img, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::menu::DropdownMenu;
@@ -13,20 +15,28 @@ use gpui_kit::component::{
 use gpui_video::video as video_element;
 
 use crate::db::review::Group;
-use crate::db::{segments, tags};
+use crate::db::{ocr as ocr_rows, segments, tags};
 use crate::index::jobs::{self, Stage};
+use crate::ocr::noise;
 use crate::paths;
 use crate::search::Hit;
 use crate::ui::{
-    CopyFile, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer, with_pointer,
+    CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
+    with_pointer,
 };
 
-/// What the pane holds besides the stage: the controls above it, and the name,
-/// the facts, the tags and the transcript below. The stage gets the rest.
-const CHROME_HEIGHT: f32 = 440.;
-const TRANSCRIPT_HEIGHT: f32 = 200.;
+/// What the pane holds besides the stage: the controls above it, and the tabs
+/// and the panel below. The stage gets the rest.
+const CHROME_HEIGHT: f32 = 380.;
+const DETAIL_HEIGHT: f32 = 200.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
+
+const DETAILS: [(Detail, &str); 3] = [
+    (Detail::File, "File"),
+    (Detail::Speech, "Speech"),
+    (Detail::Text, "Text"),
+];
 
 pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> AnyElement {
     let Some(hit) = this.selected_hit() else {
@@ -49,33 +59,113 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .border_color(cx.theme().border)
         .child(controls(this, cx))
         .child(stage(this, hit, width, height, cx))
-        .child(renamer::name_line(this, hit, cx))
-        .child(facts(hit, cx))
-        .child(review_line(this, hit, cx))
-        .child(tag_line(this, hit, cx))
-        .child(transcript(this, hit, cx))
+        .child(tabs(this, cx))
+        .child(match this.detail {
+            Detail::File => file_details(this, hit, cx),
+            Detail::Speech => transcript(this, hit, cx),
+            Detail::Text => screen_text(this, hit, cx),
+        })
         .into_any_element()
 }
 
-/// The speech of the file, one segment per line, in a box of fixed height that
-/// scrolls. Without segments it says why.
-fn transcript(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
-    let conn = this.db.conn();
-    let lines = segments::of_hash(conn, &hit.file.hash).unwrap_or_default();
-    let frame = div()
-        // Keyed by the file, so a new selection starts at the top.
-        .id(SharedString::from(format!("transcript-{}", hit.file.hash)))
+/// The three tabs under the clip.
+fn tabs(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .children(DETAILS.map(|(detail, label)| {
+            let on = detail == this.detail;
+            with_pointer(
+                Button::new(label)
+                    .xsmall()
+                    .label(label)
+                    .selected(on)
+                    .when(on, |button| button.primary())
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_detail(detail, cx))),
+                true,
+            )
+        }))
+        .into_any_element()
+}
+
+/// The box a tab fills. Fixed height, so the stage above it never moves, and
+/// keyed by the tab and the file, so new contents start at the top.
+fn panel(this: &FileBuddy, hit: &Hit, cx: &App) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!(
+            "detail-{:?}-{}",
+            this.detail, hit.file.hash
+        )))
         .w_full()
-        .h(px(TRANSCRIPT_HEIGHT))
+        .h(px(DETAIL_HEIGHT))
         .flex_shrink_0()
         .overflow_y_scroll()
         .p_2()
         .rounded(px(4.))
         .bg(cx.theme().secondary)
-        .text_sm();
+        .text_sm()
+}
 
+/// What a tab says when it has nothing to show.
+fn note(this: &FileBuddy, hit: &Hit, text: String, cx: &App) -> AnyElement {
+    panel(this, hit, cx)
+        .text_color(cx.theme().muted_foreground)
+        .child(text)
+        .into_any_element()
+}
+
+/// The name, the facts and the tags of the file. The name is an input while
+/// this file is being renamed.
+fn file_details(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+    panel(this, hit, cx)
+        .child(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .child(renamer::name_line(this, hit, cx))
+                .child(facts(hit, cx))
+                .child(review_line(this, hit, cx))
+                .child(tag_line(this, hit, cx)),
+        )
+        .into_any_element()
+}
+
+/// What the recognizer read, line by line. A line the index leaves out is
+/// struck through, so the pane shows what was found and what can be searched.
+fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let conn = this.db.conn();
+    let lines = ocr_rows::of_hash(conn, &hit.file.hash).unwrap_or_default();
     if lines.is_empty() {
-        let note = match jobs::state(conn, &hit.file.hash, Stage::Whisper) {
+        let text = match jobs::state(conn, &hit.file.hash, Stage::Ocr) {
+            Ok(Some((state, error))) => match state.as_str() {
+                "done" => "No text found".to_string(),
+                "skipped" => format!("Not read: {}", error.unwrap_or_default()),
+                "failed" => format!("Reading failed: {}", error.unwrap_or_default()),
+                _ => "Not read yet".to_string(),
+            },
+            _ => "Not read yet".to_string(),
+        };
+        return note(this, hit, text, cx);
+    }
+
+    panel(this, hit, cx)
+        .children(lines.into_iter().map(|line| {
+            let dropped = noise::is_noise(&line);
+            div()
+                .w_full()
+                .when(dropped, |row| {
+                    row.text_color(cx.theme().muted_foreground).line_through()
+                })
+                .child(line)
+        }))
+        .into_any_element()
+}
+
+/// The speech of the file, one segment per line. Without segments it says why.
+fn transcript(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
+    let conn = this.db.conn();
+    let lines = segments::of_hash(conn, &hit.file.hash).unwrap_or_default();
+    if lines.is_empty() {
+        let text = match jobs::state(conn, &hit.file.hash, Stage::Whisper) {
             Ok(Some((state, error))) => match state.as_str() {
                 "done" => "No speech found".to_string(),
                 "skipped" => format!("Not transcribed: {}", error.unwrap_or_default()),
@@ -84,13 +174,10 @@ fn transcript(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
             },
             _ => "No transcript for this kind of file".to_string(),
         };
-        return frame
-            .text_color(cx.theme().muted_foreground)
-            .child(note)
-            .into_any_element();
+        return note(this, hit, text, cx);
     }
 
-    frame
+    panel(this, hit, cx)
         .children(lines.into_iter().map(|segment| {
             h_flex()
                 .w_full()

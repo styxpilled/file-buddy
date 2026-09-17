@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use rusqlite::Connection;
-use windows_sys::Win32::Foundation::{
+use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
-    ERROR_SHARING_VIOLATION,
+    ERROR_SHARING_VIOLATION, WIN32_ERROR,
 };
-use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+use windows::core::PCWSTR;
 
 use crate::db::files::{self, FileRow};
 use crate::media::filename;
@@ -71,8 +72,8 @@ fn exists(name: &str) -> anyhow::Error {
     anyhow!("a file named {name} already exists")
 }
 
-fn code(e: &io::Error) -> u32 {
-    e.raw_os_error().unwrap_or_default() as u32
+fn code(e: &io::Error) -> WIN32_ERROR {
+    WIN32_ERROR(e.raw_os_error().unwrap_or_default() as u32)
 }
 
 /// `std::fs::rename` replaces an existing target on Windows. Without
@@ -80,10 +81,16 @@ fn code(e: &io::Error) -> u32 {
 fn move_no_replace(from: &Path, to: &Path) -> io::Result<()> {
     let from = wide(from);
     let to = wide(to);
-    if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
+    let moved = unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVE_FILE_FLAGS(0),
+        )
+    };
+    // The error of the `windows` crate holds the same code, but the rest of
+    // this file reads an `io::Error`, which is what `is_in_use` downcasts to.
+    moved.map_err(|_| io::Error::last_os_error())
 }
 
 fn wide(path: &Path) -> Vec<u16> {

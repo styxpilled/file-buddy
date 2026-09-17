@@ -1991,6 +1991,7 @@ dependencies = [
  "gpui-pre",
  "gpui-video",
  "log",
+ "pollster 0.4.0",
  "rusqlite",
  "rusqlite_migration",
  "serde",
@@ -1999,7 +2000,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "url",
  "walkdir",
- "windows-sys 0.61.2",
+ "windows 0.62.2",
 ]
 
 [[package]]

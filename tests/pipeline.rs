@@ -109,6 +109,10 @@ impl Harness {
         index::transcribe(&self.db_path, &self.cache).unwrap();
     }
 
+    fn read_text(&self) {
+        index::read_text(&self.db_path, &self.cache).unwrap();
+    }
+
     fn job(&self, path: &Path, stage: Stage) -> (String, i64) {
         let db = self.db();
         let row = files::by_path(db.conn(), path).unwrap().unwrap();
@@ -410,4 +414,59 @@ fn a_video_with_no_audio_track_skips_whisper() {
     ]);
     harness.scan();
     assert_eq!(harness.job(&silent, Stage::Whisper).0, "skipped");
+}
+
+#[test]
+fn on_screen_text_is_read_once_and_found() {
+    let harness = Harness::new();
+    let captioned = harness.clips.join("caption clip.mp4");
+    // White on black at a readable size. The recognizer is good at an overlay
+    // caption and poor at small script, which is what issue 01 measured.
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:size=640x360:rate=10:duration=4",
+        "-vf",
+        r"drawtext=fontfile='C\:/Windows/Fonts/arial.ttf':text='the marmalade badger':fontcolor=white:fontsize=48:x=40:y=150",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        captioned.to_str().unwrap(),
+    ]);
+    harness.scan();
+    harness.read_text();
+
+    assert_eq!(harness.job(&captioned, Stage::Ocr), ("done".into(), 1));
+    let db = harness.db();
+    let row = files::by_path(db.conn(), &captioned).unwrap().unwrap();
+    let lines = file_buddy::db::ocr::of_hash(db.conn(), &row.hash).unwrap();
+    // Ten frames of the same caption give one line.
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    drop(db);
+
+    assert_eq!(harness.find("marmalade badger"), vec!["caption clip.mp4"]);
+
+    // A rescan does not read it again.
+    harness.scan();
+    harness.read_text();
+    assert_eq!(harness.job(&captioned, Stage::Ocr), ("done".into(), 1));
+}
+
+#[test]
+fn a_still_with_no_text_is_read_and_records_nothing() {
+    let harness = Harness::new();
+    harness.scan();
+    harness.read_text();
+
+    let still = harness.clips.join(STILL);
+    assert_eq!(harness.job(&still, Stage::Ocr), ("done".into(), 1));
+    let db = harness.db();
+    let row = files::by_path(db.conn(), &still).unwrap().unwrap();
+    assert!(
+        file_buddy::db::ocr::of_hash(db.conn(), &row.hash)
+            .unwrap()
+            .is_empty()
+    );
 }

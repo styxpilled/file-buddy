@@ -25,7 +25,7 @@ Two things follow from that:
       config.rs       the TOML file, the ignore globs, the bm25 weights
       paths.rs        the data directory, the thumbnail cache, the config file,
                       the speech model
-      bin/fb.rs       a headless front end: scan, search, status
+      bin/fb.rs       a headless front end: scan, search, reindex, status
       actions/        what the user does to a file on disk
         clipboard.rs  the Windows clipboard, which GPUI cannot do
         rename.rs     a new name on disk and in the index, never over a file
@@ -37,15 +37,24 @@ Two things follow from that:
         mod.rs        open, pragmas, migrations
         migrations.rs the schema
         files.rs      rows in `files`
-        fts.rs        the search index, rebuilt from the tables that own the text
+        fts.rs        the search index, rebuilt from the tables that own the text.
+                      A rule that shapes a column belongs here, not in the stage
+                      that fills the table: `fb reindex` is seconds, and reading
+                      every file again is not
         tags.rs       tags and `file_tags`
         review.rs     the four Review groups, each file with its reason
         segments.rs   speech segments
+        ocr.rs        the on-screen text of a file
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
+        frames.rs     the frames OCR reads, spread over the duration
         probe.rs      ffprobe and its JSON
         thumbnail.rs  the `thumbnail` filter
         whisper.rs    the `whisper` filter and its output
+      ocr/            the recognizer, behind one interface
+        mod.rs        the `Engine` trait and the recognizer of this machine
+        windows.rs    `Windows.Media.Ocr` through `windows-rs`
+        noise.rs      text many files hold that nobody searches for
       index/          filling the database from the files on disk
         mod.rs
         jobs.rs       the durable queue
@@ -56,6 +65,7 @@ Two things follow from that:
           probe.rs
           thumbnail.rs
           whisper.rs  the rules that drop hallucinated text
+          ocr.rs      the line filter and the deduplication
       search/         the ranked query
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
@@ -63,7 +73,7 @@ Two things follow from that:
         mod.rs        the view that owns the state, the keys and the layout
         grid.rs       the virtual grid of results
         tile.rs       one result: thumbnail, hover video, badge, matched text
-        preview.rs    the side pane
+        preview.rs    the side pane and its three tabs
         tagger.rs     the tag input and its autocomplete
         renamer.rs    the rename input in the side pane
         review.rs     the Review group tabs
@@ -86,7 +96,6 @@ FFmpeg into a temporary directory, so it needs nothing from the repository.
 | 06 tags | The tag input and its autocomplete | `ui/tag_input.rs`. The queries are in `db/tags.rs` already |
 | 08 rename | Sanitizing a name the user typed | `media/filename.rs`. The rename itself, which moves the file and updates the row: `src/actions/rename.rs` |
 | 09 review screen | The queries for duplicate groups, long files, failures and poor names | `db/review.rs`. The screen and the bulk rename walk: `ui/review.rs` |
-| 10 OCR | `Windows.Media.Ocr` through `windows-rs` | `src/ocr/`. Frame sampling: `ffmpeg/frames.rs`. The stage: `index/stages/ocr.rs` and `db/ocr.rs` |
 | 11 file watching | The watcher and the incremental scan it starts | `index/watch.rs` |
 
 ## The window

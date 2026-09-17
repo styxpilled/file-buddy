@@ -6,5 +6,5 @@ pub mod pipeline;
 pub mod scan;
 pub mod stages;
 
-pub use pipeline::{PipelineStats, StageStats, run, transcribe};
+pub use pipeline::{PipelineStats, StageStats, read_text, run, transcribe};
 pub use scan::ScanStats;

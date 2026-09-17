@@ -2,8 +2,10 @@
 //! without the user interface.
 //!
 //!     fb scan            walk the roots, then run every stage that has a worker,
-//!                        whisper last
+//!                        text and speech last
 //!     fb search <query>  print the ranked results
+//!     fb reindex         rebuild the search index from the tables that own
+//!                        the text, after a rule that shapes it changed
 //!     fb status          counts per state and per stage
 
 use anyhow::{Context, Result};
@@ -38,12 +40,23 @@ fn main() -> Result<()> {
                 stages.thumbnail.done,
                 stages.thumbnail.failed
             );
+            match index::read_text(&db_path, &cache) {
+                Ok(ocr) => println!("ocr: {} done, {} failed", ocr.done, ocr.failed),
+                Err(e) => println!("ocr: {e:#}"),
+            }
             match index::transcribe(&db_path, &cache) {
                 Ok(whisper) => {
                     println!("whisper: {} done, {} failed", whisper.done, whisper.failed)
                 }
                 Err(e) => println!("whisper: {e:#}"),
             }
+        }
+        "reindex" => {
+            let db = Db::open(&db_path)?;
+            println!(
+                "reindexed {} files",
+                file_buddy::db::fts::rebuild(db.conn())?
+            );
         }
         "search" => {
             let query = args.collect::<Vec<_>>().join(" ");

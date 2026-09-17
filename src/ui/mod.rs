@@ -66,8 +66,8 @@ const NOTICE_LIFE: Duration = Duration::from_millis(2200);
 pub const SIDE_PANE_WIDTH: f32 = 380.;
 const HEADER_HEIGHT: f32 = 58.;
 const PROGRESS_POLL: Duration = Duration::from_secs(2);
-/// How often transcripts that finished meanwhile reach the results.
-const SPEECH_REFRESH: Duration = Duration::from_secs(30);
+/// How often text that a stage found meanwhile reaches the results.
+const INDEX_REFRESH: Duration = Duration::from_secs(30);
 /// A decoder closes its file on its own thread, a moment after the clip is
 /// dropped, and the rename fails until it has. `RENAME_TRIES * RENAME_RETRY`
 /// is how long the rename waits for it.
@@ -190,7 +190,7 @@ pub struct FileBuddy {
     /// count is the state; this is the answer to the key that was just pressed.
     notice: Option<Notice>,
     notice_task: Option<Task<()>>,
-    /// Transcription progress, or why it cannot run.
+    /// Indexing progress, or why a stage cannot run.
     indexing: Option<Notice>,
     /// Files marked for one bulk action, by hash. A hash survives a new search
     /// and a rename; a grid index survives neither.
@@ -207,7 +207,11 @@ pub struct FileBuddy {
     scanning: bool,
     /// Settings saved new folders while a scan ran, so another scan follows it.
     rescan_after: bool,
-    transcribing: bool,
+    /// The expensive stage that runs in the background, if one does.
+    indexing_stage: Option<Stage>,
+    /// The tab under the preview stage. It stays as the selection moves, so
+    /// stepping through the results keeps reading the same kind of thing.
+    detail: Detail,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +219,15 @@ pub(super) enum Page {
     Browse,
     Review,
     Settings,
+}
+
+/// What the side pane shows under the clip: the facts of the file, the speech
+/// the transcriber heard, or the text the recognizer read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Detail {
+    File,
+    Speech,
+    Text,
 }
 
 pub(super) struct Review {
@@ -230,6 +243,14 @@ pub(super) struct Review {
 pub(super) struct Preview {
     hash: String,
     video: Video,
+}
+
+/// What the header calls a stage while it runs.
+fn stage_label(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Ocr => "text",
+        _ => "speech",
+    }
 }
 
 /// What a file action did. The colour is the whole point: a copy that failed
@@ -293,7 +314,8 @@ impl FileBuddy {
             settings: None,
             scanning: false,
             rescan_after: false,
-            transcribing: false,
+            indexing_stage: None,
+            detail: Detail::File,
         };
         this.run_search(cx);
         this.rescan(cx);
@@ -336,7 +358,7 @@ impl FileBuddy {
                 this.run_search(cx);
                 match &scanned {
                     Err(e) => this.status = format!("scan failed: {e:#}").into(),
-                    Ok(_) => this.transcribe(db_path, cx),
+                    Ok(_) => this.index_text(Stage::Ocr, db_path, cx),
                 }
                 if std::mem::take(&mut this.rescan_after) {
                     this.rescan(cx);
@@ -347,14 +369,17 @@ impl FileBuddy {
         .detach();
     }
 
-    /// Transcribe in the background and show how far it is. The first run is
-    /// hours of work. The queue is durable, so a restart continues it.
-    /// A run that is already going picks up the jobs a later scan queues.
-    fn transcribe(&mut self, db_path: PathBuf, cx: &mut Context<Self>) {
-        if self.transcribing {
+    /// Run one expensive stage in the background and show how far it is. OCR
+    /// comes first and speech follows it, because OCR is minutes of work where
+    /// speech is hours. The queue is durable, so a restart continues it, and a
+    /// run that is already going picks up the jobs a later scan queues.
+    fn index_text(&mut self, stage: Stage, db_path: PathBuf, cx: &mut Context<Self>) {
+        if self.indexing_stage.is_some() {
             return;
         }
-        if let Err(e) = paths::whisper_model() {
+        if stage == Stage::Whisper
+            && let Err(e) = paths::whisper_model()
+        {
             log::error!("{e:#}");
             self.indexing = Some(Notice {
                 text: format!(
@@ -369,13 +394,17 @@ impl FileBuddy {
             return;
         }
 
-        self.transcribing = true;
+        self.indexing_stage = Some(stage);
         let finished = Arc::new(AtomicBool::new(false));
         let work = cx.background_spawn({
             let cache = self.cache.clone();
+            let db_path = db_path.clone();
             let finished = finished.clone();
             async move {
-                let result = index::transcribe(&db_path, &cache);
+                let result = match stage {
+                    Stage::Ocr => index::read_text(&db_path, &cache),
+                    _ => index::transcribe(&db_path, &cache),
+                };
                 finished.store(true, Ordering::Relaxed);
                 result
             }
@@ -385,20 +414,25 @@ impl FileBuddy {
             let mut refreshed_count = None;
             while !finished.load(Ordering::Relaxed) {
                 let alive = this.update(cx, |this, cx| {
-                    let Ok(progress) = jobs::progress(this.db.conn(), Stage::Whisper) else {
+                    let Ok(progress) = jobs::progress(this.db.conn(), stage) else {
                         return;
                     };
                     if progress.finished < progress.total {
                         this.indexing = Some(Notice {
-                            text: format!("speech {} / {}", progress.finished, progress.total)
-                                .into(),
+                            text: format!(
+                                "{} {} / {}",
+                                stage_label(stage),
+                                progress.finished,
+                                progress.total
+                            )
+                            .into(),
                             failed: false,
                         });
                     }
-                    // New transcripts reach the results now and then, not on
-                    // every file, so the grid does not keep moving.
+                    // New text reaches the results now and then, not on every
+                    // file, so the grid does not keep moving.
                     if refreshed_count != Some(progress.finished)
-                        && refreshed_at.elapsed() >= SPEECH_REFRESH
+                        && refreshed_at.elapsed() >= INDEX_REFRESH
                     {
                         refreshed_at = Instant::now();
                         refreshed_count = Some(progress.finished);
@@ -413,18 +447,21 @@ impl FileBuddy {
             }
             let result = work.await;
             this.update(cx, |this, cx| {
-                this.transcribing = false;
+                this.indexing_stage = None;
                 this.indexing = match result {
                     Ok(_) => None,
                     Err(e) => {
-                        log::error!("transcription failed: {e:#}");
+                        log::error!("{} failed: {e:#}", stage.as_str());
                         Some(Notice {
-                            text: format!("transcription failed: {e:#}").into(),
+                            text: format!("{} failed: {e:#}", stage_label(stage)).into(),
                             failed: true,
                         })
                     }
                 };
                 this.rerun_search(cx);
+                if stage == Stage::Ocr {
+                    this.index_text(Stage::Whisper, db_path, cx);
+                }
             })
             .ok();
         })
@@ -1096,6 +1133,8 @@ impl FileBuddy {
         }
         let file = hit.file.clone();
         self.tagger = None;
+        // The input takes the place of the name, which only the File tab shows.
+        self.detail = Detail::File;
 
         let input =
             cx.new(|cx| InputState::new(window, cx).default_value(rename::stem(&file.path)));
@@ -1386,6 +1425,11 @@ impl FileBuddy {
         self.hovered = None;
         self.count_groups();
         self.schedule_preview(cx);
+        cx.notify();
+    }
+
+    pub(super) fn show_detail(&mut self, detail: Detail, cx: &mut Context<Self>) {
+        self.detail = detail;
         cx.notify();
     }
 

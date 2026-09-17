@@ -10,6 +10,7 @@ pub mod db;
 pub mod ffmpeg;
 pub mod index;
 pub mod media;
+pub mod ocr;
 pub mod paths;
 pub mod search;
 pub mod ui;

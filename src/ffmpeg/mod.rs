@@ -1,6 +1,7 @@
 //! Every call out to the FFmpeg command line tools. The application never
 //! links FFmpeg itself: a subprocess that crashes cannot stop the window.
 
+pub mod frames;
 pub mod probe;
 pub mod thumbnail;
 pub mod whisper;

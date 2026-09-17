@@ -5,7 +5,14 @@
 use rusqlite_migration::{M, Migrations};
 
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(INITIAL), M::up(SKIP_WHISPER_WITHOUT_AUDIO)])
+    Migrations::new(vec![
+        M::up(INITIAL),
+        M::up(SKIP_WHISPER_WITHOUT_AUDIO),
+        M::up(RETRY_OCR_WITHOUT_A_WORKER),
+        M::up(FLATTEN_THE_OCR_INDEX),
+        M::up(REREAD_TEXT_WITHOUT_THE_WATERMARK),
+        M::up(RESTORE_EVERY_OCR_LINE),
+    ])
 }
 
 /// The probe queued whisper for every video before issue 07. A file with no
@@ -14,6 +21,39 @@ const SKIP_WHISPER_WITHOUT_AUDIO: &str = r#"
 UPDATE jobs SET state = 'skipped', error = 'no audio track'
 WHERE stage = 'whisper' AND state = 'pending'
   AND hash IN (SELECT hash FROM files WHERE state = 'ready' AND audio_codec IS NULL);
+"#;
+
+/// Issue 10 gave `ocr` a worker. Until it did, every OCR job failed twice with
+/// "has no worker yet" and marked its file failed, which put it in Review.
+const RETRY_OCR_WITHOUT_A_WORKER: &str = r#"
+UPDATE files SET state = 'ready', error = NULL
+WHERE state = 'failed' AND error LIKE '%has no worker yet%';
+
+UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
+WHERE stage = 'ocr' AND error LIKE '%has no worker yet%';
+"#;
+
+/// The first OCR index held one line per line of text, and the snippet of a
+/// result carried the line breaks into the tile that shows it on one row.
+const FLATTEN_THE_OCR_INDEX: &str = r#"
+UPDATE fts SET ocr = replace(ocr, char(10), ' ')
+WHERE ocr LIKE '%' || char(10) || '%';
+"#;
+
+/// The TikTok watermark was first dropped as a file was read, which left it in
+/// every file already read. The rule has since moved to where the index is
+/// built, and this migration is kept only because it ran.
+const REREAD_TEXT_WITHOUT_THE_WATERMARK: &str = r#"
+UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
+WHERE stage = 'ocr' AND state = 'done';
+"#;
+
+/// The `ocr` table now keeps every line the recognizer read, because the noise
+/// rule moved to the index. A file read under the old rule is missing the lines
+/// that rule dropped, so it is read once more.
+const RESTORE_EVERY_OCR_LINE: &str = r#"
+UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
+WHERE stage = 'ocr' AND state = 'done';
 "#;
 
 const INITIAL: &str = r#"

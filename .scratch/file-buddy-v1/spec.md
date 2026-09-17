@@ -57,9 +57,11 @@ recreate the tags table.
 A durable job queue in SQLite. One row per file per stage, so a failure in one
 stage does not discard the result of another.
 
-Stages: `probe` -> `thumbnail` -> `whisper` -> `ocr`
+Stages: `probe` -> `thumbnail` -> `ocr` -> `whisper`. OCR comes before speech
+because it is minutes of work where speech is hours, so the first run shows text
+results the same evening.
 
-- Probe and thumbnail run 8 at a time. Whisper runs 1 or 2 at a time.
+- Probe and thumbnail run 8 at a time, OCR 4, whisper 1 or 2.
 - After 2 failed attempts, the job records the error and stops.
 - Files longer than 5 minutes get probe, thumbnail and filename indexing only.
   They appear in Review as candidates for the user to delete outside the app.
@@ -78,6 +80,15 @@ OCR samples 10 frames spread over the duration of the file (`fps = 10/duration`,
 limited to 4 fps), and removes duplicate lines before it indexes them. Scene
 detection was measured against this and lost the text in 6 of 15 test clips. See
 `issues/01-ocr-spike.md`.
+
+A line the recognizer reads in many files and nobody searches for is left out of
+the index. The TikTok watermark is the first of these, the word mark and the
+handle under it. This reverses the "no stoplist for v1" of issue 01, which held
+for ranking but not for the snippet a tile shows.
+
+The rule runs where the index is built, not where a file is read, so the `ocr`
+table keeps every line. Changing it costs `fb reindex`, which is seconds, and
+not another pass over every file with the recognizer.
 
 Every FFmpeg call must pass `-nostdin`. FFmpeg reads standard input, which
 corrupts any loop that feeds it file names.
@@ -104,7 +115,11 @@ Keyboard first. The mouse is optional.
   current clip. It works whether or not the search box holds focus, and it
   never touches a tile.
 - Hover starts one live video in the tile. Only one plays at a time.
-- A resizable side pane plays the selection and shows its transcript.
+- A resizable side pane plays the selection. Under the clip, three tabs: File,
+  which holds the name, the kind, the length, the size and the tags and is the
+  one that opens; Speech, the transcript; and Text, what the recognizer read,
+  with the lines the index leaves out struck through. The tab stays as the
+  selection moves.
 - Each result shows the matched text and a badge: tag, filename, speech or
   screen text.
 - Chips filter by media kind. All are on by default.

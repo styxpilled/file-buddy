@@ -39,6 +39,12 @@ pub fn run(db_path: &Path, cache: &Path) -> Result<PipelineStats> {
     })
 }
 
+/// Read the on-screen text of every file that waits for it. Minutes of work on
+/// a first run where speech is hours, so it runs first and separately.
+pub fn read_text(db_path: &Path, cache: &Path) -> Result<StageStats> {
+    run_stage(db_path, cache, Stage::Ocr)
+}
+
 /// Transcribe every file that waits for it. Hours of work on a first run, so it
 /// is separate from `run` and the window can show results before it starts.
 /// Without the model it stops here, before a job can fail for that reason.

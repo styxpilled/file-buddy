@@ -17,6 +17,7 @@ gpui = { package = "gpui-pre", version = "=0.3.1" }
 gpui-kit = "=0.6.1"
 gpui-video = { path = "gpui-video" }
 log = "=0.4.34"
+pollster = "=0.4.0"
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 rusqlite_migration = "=2.6.0"
 serde = { version = "=1.0.229", features = ["derive"] }
@@ -24,7 +25,7 @@ serde_json = "=1.0.151"
 toml = "=1.1.6"
 url = "=2.5.8"
 walkdir = "=2.5.0"
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows = { version = "=0.62.2", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 # Frame conversion and decoding are far too slow unoptimized, so the video path
 # and every dependency are built with optimization even in a debug build.

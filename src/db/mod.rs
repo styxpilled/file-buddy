@@ -3,6 +3,7 @@
 pub mod files;
 pub mod fts;
 mod migrations;
+pub mod ocr;
 pub mod review;
 pub mod segments;
 pub mod tags;
