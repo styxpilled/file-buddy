@@ -4,7 +4,7 @@
 use std::str::FromStr;
 
 use anyhow::Result;
-use rusqlite::{Connection, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::db::now;
 use crate::media::Kind;
@@ -153,6 +153,45 @@ pub fn pending_count(conn: &Connection, stage: Stage) -> Result<i64> {
         "SELECT count(*) FROM jobs WHERE stage = ?1 AND state = 'pending' AND attempts < ?2",
         params![stage.as_str(), MAX_ATTEMPTS],
         |row| row.get(0),
+    )?)
+}
+
+/// The state of one stage for one file, with its error or skip reason. `None`
+/// when the stage was never queued.
+pub fn state(
+    conn: &Connection,
+    hash: &str,
+    stage: Stage,
+) -> Result<Option<(String, Option<String>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT state, error FROM jobs WHERE hash = ?1 AND stage = ?2",
+            params![hash, stage.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// How far a stage is: jobs finished, failed or waiting, of every job it has.
+/// Skipped jobs do not count.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub finished: i64,
+    pub total: i64,
+}
+
+pub fn progress(conn: &Connection, stage: Stage) -> Result<Progress> {
+    Ok(conn.query_row(
+        "SELECT count(*) FILTER (WHERE state IN ('done', 'failed')),
+                count(*) FILTER (WHERE state <> 'skipped')
+         FROM jobs WHERE stage = ?1",
+        [stage.as_str()],
+        |row| {
+            Ok(Progress {
+                finished: row.get(0)?,
+                total: row.get(1)?,
+            })
+        },
     )?)
 }
 

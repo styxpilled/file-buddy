@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow};
 use crate::db::{Db, files};
 use crate::index::jobs::{self, MAX_ATTEMPTS, Stage};
 use crate::index::stages;
+use crate::paths;
 
 #[derive(Debug, Default)]
 pub struct StageStats {
@@ -36,6 +37,14 @@ pub fn run(db_path: &Path, cache: &Path) -> Result<PipelineStats> {
         probe: run_stage(db_path, cache, Stage::Probe)?,
         thumbnail: run_stage(db_path, cache, Stage::Thumbnail)?,
     })
+}
+
+/// Transcribe every file that waits for it. Hours of work on a first run, so it
+/// is separate from `run` and the window can show results before it starts.
+/// Without the model it stops here, before a job can fail for that reason.
+pub fn transcribe(db_path: &Path, cache: &Path) -> Result<StageStats> {
+    paths::whisper_model()?;
+    run_stage(db_path, cache, Stage::Whisper)
 }
 
 /// Drain one stage with as many workers as the stage allows.

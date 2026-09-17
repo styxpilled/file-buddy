@@ -3,6 +3,7 @@
 
 pub mod probe;
 pub mod thumbnail;
+pub mod whisper;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

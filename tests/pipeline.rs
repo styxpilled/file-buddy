@@ -105,6 +105,22 @@ impl Harness {
         stats
     }
 
+    fn transcribe(&self) {
+        index::transcribe(&self.db_path, &self.cache).unwrap();
+    }
+
+    fn job(&self, path: &Path, stage: Stage) -> (String, i64) {
+        let db = self.db();
+        let row = files::by_path(db.conn(), path).unwrap().unwrap();
+        db.conn()
+            .query_row(
+                "SELECT state, attempts FROM jobs WHERE hash = ?1 AND stage = ?2",
+                file_buddy::rusqlite::params![&row.hash, stage.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    }
+
     fn db(&self) -> Db {
         Db::open(&self.db_path).unwrap()
     }
@@ -342,4 +358,56 @@ fn a_long_file_skips_the_expensive_stages() {
     // It still has a thumbnail and is still findable by name.
     assert!(thumbnail::exists(&row.hash, &harness.cache));
     assert_eq!(harness.find("very long talk"), vec!["a very long talk.mp4"]);
+}
+
+#[test]
+fn speech_is_transcribed_once_and_found() {
+    let harness = Harness::new();
+    let speech = harness.clips.join("fox clip.mp4");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=160x120:rate=10:duration=4",
+        "-f",
+        "lavfi",
+        "-i",
+        "flite=text='the quick brown fox jumps over the lazy dog'",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-shortest",
+        speech.to_str().unwrap(),
+    ]);
+    harness.scan();
+    harness.transcribe();
+
+    assert_eq!(harness.job(&speech, Stage::Whisper), ("done".into(), 1));
+    assert_eq!(harness.find("brown fox"), vec!["fox clip.mp4"]);
+
+    harness.scan();
+    harness.transcribe();
+    assert_eq!(harness.job(&speech, Stage::Whisper), ("done".into(), 1));
+}
+
+#[test]
+fn a_video_with_no_audio_track_skips_whisper() {
+    let harness = Harness::new();
+    let silent = harness.clips.join("silent.mp4");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=64x64:rate=10:duration=1",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        silent.to_str().unwrap(),
+    ]);
+    harness.scan();
+    assert_eq!(harness.job(&silent, Stage::Whisper).0, "skipped");
 }

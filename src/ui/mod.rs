@@ -9,7 +9,9 @@ mod tile;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
@@ -29,7 +31,9 @@ use crate::clipboard;
 use crate::config::{Config, Weights};
 use crate::db::{Db, tags};
 use crate::index;
+use crate::index::jobs::{self, Stage};
 use crate::media::Kind;
+use crate::paths;
 use crate::search::{self, Hit};
 
 /// How long the selection must rest before the side pane opens a decoder. Held
@@ -53,6 +57,9 @@ const VOLUME_STEP: f64 = 0.05;
 /// back. Long enough to read, short enough that it never looks like the state.
 const NOTICE_LIFE: Duration = Duration::from_millis(2200);
 pub const SIDE_PANE_WIDTH: f32 = 380.;
+const PROGRESS_POLL: Duration = Duration::from_secs(2);
+/// How often transcripts that finished meanwhile reach the results.
+const SPEECH_REFRESH: Duration = Duration::from_secs(30);
 
 gpui_kit::actions!(
     file_buddy,
@@ -148,6 +155,8 @@ pub struct FileBuddy {
     /// count is the state; this is the answer to the key that was just pressed.
     notice: Option<Notice>,
     notice_task: Option<Task<()>>,
+    /// Transcription progress, or why it cannot run.
+    indexing: Option<Notice>,
     /// Files marked for one bulk action, by hash. A hash survives a new search
     /// and a rename; a grid index survives neither.
     marked: HashSet<String>,
@@ -213,6 +222,7 @@ impl FileBuddy {
             status: "".into(),
             notice: None,
             notice_task: None,
+            indexing: None,
             marked: HashSet::new(),
             tagger: None,
         };
@@ -234,19 +244,101 @@ impl FileBuddy {
         self.status = "scanning".into();
         cx.spawn(async move |this, cx| {
             let scanned = cx
-                .background_spawn(async move {
-                    let mut db = Db::open(&db_path)?;
-                    let stats = index::scan::scan(&mut db, &roots, &ignore, &cache)?;
-                    drop(db);
-                    index::run(&db_path, &cache)?;
-                    anyhow::Ok(stats)
+                .background_spawn({
+                    let db_path = db_path.clone();
+                    async move {
+                        let mut db = Db::open(&db_path)?;
+                        let stats = index::scan::scan(&mut db, &roots, &ignore, &cache)?;
+                        drop(db);
+                        index::run(&db_path, &cache)?;
+                        anyhow::Ok(stats)
+                    }
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if let Err(e) = &scanned {
-                    this.status = format!("scan failed: {e:#}").into();
-                }
                 this.run_search(cx);
+                match &scanned {
+                    Err(e) => this.status = format!("scan failed: {e:#}").into(),
+                    Ok(_) => this.transcribe(db_path, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Transcribe in the background and show how far it is. The first run is
+    /// hours of work. The queue is durable, so a restart continues it.
+    fn transcribe(&mut self, db_path: PathBuf, cx: &mut Context<Self>) {
+        if let Err(e) = paths::whisper_model() {
+            log::error!("{e:#}");
+            self.indexing = Some(Notice {
+                text: format!(
+                    "speech model missing: {}\\{}",
+                    paths::MODEL_DIR,
+                    paths::WHISPER_MODEL
+                )
+                .into(),
+                failed: true,
+            });
+            cx.notify();
+            return;
+        }
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let work = cx.background_spawn({
+            let cache = self.cache.clone();
+            let finished = finished.clone();
+            async move {
+                let result = index::transcribe(&db_path, &cache);
+                finished.store(true, Ordering::Relaxed);
+                result
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let mut refreshed_at = Instant::now();
+            let mut refreshed_count = None;
+            while !finished.load(Ordering::Relaxed) {
+                let alive = this.update(cx, |this, cx| {
+                    let Ok(progress) = jobs::progress(this.db.conn(), Stage::Whisper) else {
+                        return;
+                    };
+                    if progress.finished < progress.total {
+                        this.indexing = Some(Notice {
+                            text: format!("speech {} / {}", progress.finished, progress.total)
+                                .into(),
+                            failed: false,
+                        });
+                    }
+                    // New transcripts reach the results now and then, not on
+                    // every file, so the grid does not keep moving.
+                    if refreshed_count != Some(progress.finished)
+                        && refreshed_at.elapsed() >= SPEECH_REFRESH
+                    {
+                        refreshed_at = Instant::now();
+                        refreshed_count = Some(progress.finished);
+                        this.rerun_search(cx);
+                    }
+                    cx.notify();
+                });
+                if alive.is_err() {
+                    return;
+                }
+                cx.background_executor().timer(PROGRESS_POLL).await;
+            }
+            let result = work.await;
+            this.update(cx, |this, cx| {
+                this.indexing = match result {
+                    Ok(_) => None,
+                    Err(e) => {
+                        log::error!("transcription failed: {e:#}");
+                        Some(Notice {
+                            text: format!("transcription failed: {e:#}").into(),
+                            failed: true,
+                        })
+                    }
+                };
+                this.rerun_search(cx);
             })
             .ok();
         })
@@ -976,6 +1068,20 @@ impl Render for FileBuddy {
                             .text_color(cx.theme().muted_foreground)
                             .child(self.volume_label()),
                     )
+                    .when_some(self.indexing.as_ref(), |header, indexing| {
+                        header.child(
+                            div()
+                                .max_w(px(320.))
+                                .truncate()
+                                .text_sm()
+                                .text_color(if indexing.failed {
+                                    cx.theme().danger
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(indexing.text.clone()),
+                        )
+                    })
                     .child(match &self.notice {
                         Some(notice) => div()
                             .min_w(px(90.))

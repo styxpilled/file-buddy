@@ -2,10 +2,11 @@
 //! what a failure means. These decide what the stage produces.
 //!
 //! A new stage is a new file here, a new arm in `run` and a new variant in
-//! `jobs::Stage`. Issue 07 adds `whisper`, issue 10 adds `ocr`.
+//! `jobs::Stage`. Issue 10 adds `ocr`.
 
 mod probe;
 mod thumbnail;
+mod whisper;
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,8 @@ pub fn run(conn: &Connection, cache: &Path, job: &Job) -> Result<()> {
     match job.stage {
         Stage::Probe => probe::run(conn, &job.hash, &source),
         Stage::Thumbnail => thumbnail::run(&job.hash, &source, cache),
-        Stage::Whisper | Stage::Ocr => Err(anyhow!("{} has no worker yet", job.stage.as_str())),
+        Stage::Whisper => whisper::run(conn, &job.hash, &source),
+        Stage::Ocr => Err(anyhow!("{} has no worker yet", job.stage.as_str())),
     }
 }
 

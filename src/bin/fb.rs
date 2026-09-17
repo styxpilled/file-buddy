@@ -1,7 +1,8 @@
 //! A headless front end for the index, so the pipeline can be run and checked
 //! without the user interface.
 //!
-//!     fb scan            walk the roots, then run every stage that has a worker
+//!     fb scan            walk the roots, then run every stage that has a worker,
+//!                        whisper last
 //!     fb search <query>  print the ranked results
 //!     fb status          counts per state and per stage
 
@@ -37,6 +38,12 @@ fn main() -> Result<()> {
                 stages.thumbnail.done,
                 stages.thumbnail.failed
             );
+            match index::transcribe(&db_path, &cache) {
+                Ok(whisper) => {
+                    println!("whisper: {} done, {} failed", whisper.done, whisper.failed)
+                }
+                Err(e) => println!("whisper: {e:#}"),
+            }
         }
         "search" => {
             let query = args.collect::<Vec<_>>().join(" ");

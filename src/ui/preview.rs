@@ -1,22 +1,26 @@
 //! The side pane. It plays the selection whole, with sound if the user asks for
-//! it, and shows what the index knows. The transcript arrives with issue 07.
+//! it, and shows what the index knows, the transcript included.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, ScrollDelta, ScrollWheelEvent, Window, div, img, px};
+use gpui::{
+    AnyElement, App, Context, ScrollDelta, ScrollWheelEvent, SharedString, Window, div, img, px,
+};
 use gpui_kit::component::button::Button;
 use gpui_kit::component::{
     ActiveTheme, Disableable, IconName, Selectable, Sizable, h_flex, v_flex,
 };
 use gpui_video::video as video_element;
 
-use crate::db::tags;
+use crate::db::{segments, tags};
+use crate::index::jobs::{self, Stage};
 use crate::paths;
 use crate::search::Hit;
 use crate::ui::{FileBuddy, SIDE_PANE_WIDTH};
 
 /// What the pane holds below the stage: the buttons, the name, the facts, the
-/// path and the note. The stage gets the rest of the window.
-const CHROME_HEIGHT: f32 = 300.;
+/// tags and the transcript. The stage gets the rest of the window.
+const CHROME_HEIGHT: f32 = 460.;
+const TRANSCRIPT_HEIGHT: f32 = 200.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
 
@@ -45,20 +49,67 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .child(div().w_full().text_sm().child(hit.file.filename.clone()))
         .child(facts(hit, cx))
         .child(tag_line(this, hit, cx))
-        .child(
-            div()
-                .w_full()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(hit.file.path.display().to_string()),
-        )
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("The transcript arrives with the whisper stage."),
-        )
+        .child(transcript(this, hit, cx))
         .into_any_element()
+}
+
+/// The speech of the file, one segment per line, in a box of fixed height that
+/// scrolls. Without segments it says why.
+fn transcript(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
+    let conn = this.db.conn();
+    let lines = segments::of_hash(conn, &hit.file.hash).unwrap_or_default();
+    let frame = div()
+        // Keyed by the file, so a new selection starts at the top.
+        .id(SharedString::from(format!("transcript-{}", hit.file.hash)))
+        .w_full()
+        .h(px(TRANSCRIPT_HEIGHT))
+        .flex_shrink_0()
+        .overflow_y_scroll()
+        .p_2()
+        .rounded(px(4.))
+        .bg(cx.theme().secondary)
+        .text_sm();
+
+    if lines.is_empty() {
+        let note = match jobs::state(conn, &hit.file.hash, Stage::Whisper) {
+            Ok(Some((state, error))) => match state.as_str() {
+                "done" => "No speech found".to_string(),
+                "skipped" => format!("Not transcribed: {}", error.unwrap_or_default()),
+                "failed" => format!("Transcription failed: {}", error.unwrap_or_default()),
+                _ => "Not transcribed yet".to_string(),
+            },
+            _ => "No transcript for this kind of file".to_string(),
+        };
+        return frame
+            .text_color(cx.theme().muted_foreground)
+            .child(note)
+            .into_any_element();
+    }
+
+    frame
+        .children(lines.into_iter().map(|segment| {
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_start()
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(timestamp(segment.start_ms)),
+                )
+                // Without a zero minimum width a long line pushes past the pane
+                // instead of wrapping.
+                .child(div().flex_1().min_w_0().child(segment.text))
+        }))
+        .into_any_element()
+}
+
+/// `0:07` or `1:42`.
+fn timestamp(ms: i64) -> String {
+    let seconds = ms / 1000;
+    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// The box the video fits inside. The element letterboxes the frame in the size

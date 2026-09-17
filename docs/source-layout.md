@@ -24,7 +24,8 @@ Two things follow from that:
       main.rs         the application. It opens the database and one window
       clipboard.rs    the Windows clipboard, which GPUI cannot do
       config.rs       the TOML file, the ignore globs, the bm25 weights
-      paths.rs        the data directory, the thumbnail cache, the config file
+      paths.rs        the data directory, the thumbnail cache, the config file,
+                      the speech model
       bin/fb.rs       a headless front end: scan, search, status
       media/          what a file is
         mod.rs        the three kinds
@@ -36,10 +37,12 @@ Two things follow from that:
         files.rs      rows in `files`
         fts.rs        the search index, rebuilt from the tables that own the text
         tags.rs       tags and `file_tags`
+        segments.rs   speech segments
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
         probe.rs      ffprobe and its JSON
         thumbnail.rs  the `thumbnail` filter
+        whisper.rs    the `whisper` filter and its output
       index/          filling the database from the files on disk
         mod.rs
         jobs.rs       the durable queue
@@ -49,6 +52,7 @@ Two things follow from that:
           mod.rs      one arm per stage
           probe.rs
           thumbnail.rs
+          whisper.rs  the rules that drop hallucinated text
       search/         the ranked query
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
@@ -73,7 +77,6 @@ FFmpeg into a temporary directory, so it needs nothing from the repository.
 | --- | --- | --- |
 | 05 file actions | `CF_HDROP` through `clipboard-win`, reveal in Explorer | `src/actions/` |
 | 06 tags | The tag input and its autocomplete | `ui/tag_input.rs`. The queries are in `db/tags.rs` already |
-| 07 whisper | Running the FFmpeg whisper filter and reading its output | `ffmpeg/whisper.rs`. Dropping bad segments and storing them: `index/stages/whisper.rs` and `db/segments.rs` |
 | 08 rename | Sanitizing a name the user typed | `media/filename.rs`. The rename itself, which moves the file and updates the row: `src/actions/rename.rs` |
 | 09 review screen | The queries for duplicate groups, long files, failures and poor names | `db/review.rs`. The screen and the bulk rename walk: `ui/review.rs` |
 | 10 OCR | `Windows.Media.Ocr` through `windows-rs` | `src/ocr/`. Frame sampling: `ffmpeg/frames.rs`. The stage: `index/stages/ocr.rs` and `db/ocr.rs` |

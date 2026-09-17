@@ -5,8 +5,16 @@
 use rusqlite_migration::{M, Migrations};
 
 pub fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(INITIAL)])
+    Migrations::new(vec![M::up(INITIAL), M::up(SKIP_WHISPER_WITHOUT_AUDIO)])
 }
+
+/// The probe queued whisper for every video before issue 07. A file with no
+/// audio track has nothing to transcribe.
+const SKIP_WHISPER_WITHOUT_AUDIO: &str = r#"
+UPDATE jobs SET state = 'skipped', error = 'no audio track'
+WHERE stage = 'whisper' AND state = 'pending'
+  AND hash IN (SELECT hash FROM files WHERE state = 'ready' AND audio_codec IS NULL);
+"#;
 
 const INITIAL: &str = r#"
 CREATE TABLE files (

@@ -3,6 +3,7 @@
 pub mod files;
 pub mod fts;
 mod migrations;
+pub mod segments;
 pub mod tags;
 
 use std::path::Path;

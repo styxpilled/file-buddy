@@ -8,6 +8,8 @@ use anyhow::{Context, Result};
 pub const CONFIG_FILE: &str = "file-buddy.toml";
 pub const DATABASE_FILE: &str = "file-buddy.db";
 pub const THUMBNAIL_DIR: &str = "thumbnails";
+pub const MODEL_DIR: &str = "models";
+pub const WHISPER_MODEL: &str = "ggml-large-v3-turbo.bin";
 
 /// The directory that holds the executable. Both the configuration file and the
 /// default data directory sit next to it.
@@ -37,6 +39,27 @@ pub fn database_path() -> Result<PathBuf> {
 
 pub fn thumbnail_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join(THUMBNAIL_DIR))
+}
+
+/// The speech model. The user supplies it in `models` next to the executable. A
+/// development build also looks in `models` at the repository root.
+pub fn whisper_model() -> Result<PathBuf> {
+    let beside_exe = executable_dir()?.join(MODEL_DIR).join(WHISPER_MODEL);
+    let candidates = [
+        beside_exe.clone(),
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(MODEL_DIR)
+            .join(WHISPER_MODEL),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .with_context(|| {
+            format!(
+                "the speech model is missing. Put it at {}",
+                beside_exe.display()
+            )
+        })
 }
 
 /// The thumbnail of one file, in a directory named after the first two

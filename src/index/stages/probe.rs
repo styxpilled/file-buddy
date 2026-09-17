@@ -28,6 +28,8 @@ fn queue_later_stages(conn: &Connection, hash: &str, probe: &Probe) -> Result<()
     for stage in Stage::after_probe(probe.kind) {
         if long {
             jobs::skip(conn, hash, *stage, "longer than five minutes")?;
+        } else if *stage == Stage::Whisper && probe.audio_codec.is_none() {
+            jobs::skip(conn, hash, *stage, "no audio track")?;
         } else {
             jobs::enqueue(conn, hash, *stage)?;
         }

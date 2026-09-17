@@ -66,10 +66,13 @@ Stages: `probe` -> `thumbnail` -> `whisper` -> `ocr`
 - Files that FFmpeg cannot open are recorded with their error. A rescan does not
   retry them.
 
-Transcription uses the FFmpeg whisper filter with `ggml-large-v3-turbo.bin`.
-Content is 98% English, but the model stays multilingual. The application drops
-segments with a high `no_speech_prob` or a low average logprob, drops known
-hallucination phrases, and stores a confidence value for each segment.
+Transcription uses the FFmpeg whisper filter with `ggml-large-v3-turbo.bin`, on
+the GPU. Content is 98% English, but the model stays multilingual. The filter
+gives start, end and text only, with no probabilities, so the application drops
+text by rules: known hallucination phrases, sound tags such as `*music*`, and the
+segments of a last window shorter than 2 seconds. `segments.confidence` stays
+NULL. whisper-rs is the path to real probabilities if the rules are not enough.
+See `issues/07-whisper-stage.md`.
 
 OCR samples 10 frames spread over the duration of the file (`fps = 10/duration`,
 limited to 4 fps), and removes duplicate lines before it indexes them. Scene
