@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-use crate::db::now;
+use crate::db::{fts, now};
 use crate::ffmpeg::probe::Probe;
 use crate::media::Kind;
 use crate::media::filename;
@@ -40,6 +40,15 @@ pub struct FileRow {
     pub size: u64,
     pub duration: Option<f64>,
     pub state: String,
+}
+
+impl FileRow {
+    /// The last part of a path, which is what the `filename` column holds.
+    pub fn name_of(path: &Path) -> String {
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
 }
 
 /// What an upsert changed, which decides whether the scan queues work.
@@ -187,6 +196,16 @@ pub fn all(conn: &Connection) -> Result<Vec<FileRow>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Point a row at its new path. The hash does not change, so every stage
+/// result and every tag stays. Only the filename column of the index changes.
+pub fn set_path(conn: &Connection, id: i64, path: &Path) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET path = ?2, filename = ?3 WHERE id = ?1",
+        params![id, path.to_string_lossy(), FileRow::name_of(path)],
+    )?;
+    fts::refresh(conn, id)
+}
+
 /// Paths that no longer exist on disk, removed with everything keyed to them.
 pub fn remove_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -225,9 +244,10 @@ pub fn indexed_filename(filename: &str) -> String {
     filename::index_form(filename)
 }
 
-const SELECT: &str = "SELECT id, path, hash, filename, kind, size, duration, state FROM files";
+pub(crate) const SELECT: &str =
+    "SELECT id, path, hash, filename, kind, size, duration, state FROM files";
 
-fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
+pub(crate) fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     let kind: String = row.get(4)?;
     Ok(FileRow {
         id: row.get(0)?,

@@ -76,6 +76,45 @@ impl Config {
         std::fs::write(path, text).with_context(|| format!("write {}", path.display()))
     }
 
+    /// A configuration from the Settings page, checked before it can be written.
+    /// `ignore` holds one glob per line; `weights` are in column order.
+    pub fn edited(roots: Vec<PathBuf>, ignore: &str, weights: [&str; 4]) -> Result<Self> {
+        if roots.is_empty() {
+            anyhow::bail!("add at least one folder");
+        }
+        let mut parsed = [0.0; 4];
+        for ((slot, text), name) in
+            parsed
+                .iter_mut()
+                .zip(weights)
+                .zip(["tags", "filename", "speech", "screen text"])
+        {
+            *slot = text
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .with_context(|| format!("the {name} weight must be a number of 0 or more"))?;
+        }
+        let config = Self {
+            roots,
+            ignore: ignore
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(String::from)
+                .collect(),
+            weights: Weights {
+                tags: parsed[0],
+                filename: parsed[1],
+                speech: parsed[2],
+                ocr: parsed[3],
+            },
+        };
+        config.ignore_set()?;
+        Ok(config)
+    }
+
     /// The compiled ignore globs. Matching is case insensitive, and a backslash
     /// in a Windows path is matched as a separator.
     pub fn ignore_set(&self) -> Result<GlobSet> {
@@ -122,6 +161,39 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         let read = Config::load_or_create(&path).unwrap();
         assert_eq!(written.roots, read.roots);
         assert_eq!(written.weights.speech, read.weights.speech);
+    }
+
+    #[test]
+    fn an_edited_configuration_is_checked() {
+        let roots = vec![PathBuf::from("D:/clips")];
+        let config = Config::edited(
+            roots.clone(),
+            "**/thumbs/**\n\n  **/.git/**  \n",
+            ["20", "10.5", " 3 ", "0"],
+        )
+        .unwrap();
+        assert_eq!(config.ignore, ["**/thumbs/**", "**/.git/**"]);
+        assert_eq!(config.weights.filename, 10.5);
+        assert_eq!(config.weights.ocr, 0.0);
+
+        let error = |roots, ignore, weights| {
+            Config::edited(roots, ignore, weights)
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(
+            error(vec![], "", ["1", "1", "1", "1"]),
+            "add at least one folder"
+        );
+        assert_eq!(
+            error(roots.clone(), "", ["1", "-1", "1", "1"]),
+            "the filename weight must be a number of 0 or more"
+        );
+        assert_eq!(
+            error(roots.clone(), "", ["1", "1", "1", "lots"]),
+            "the screen text weight must be a number of 0 or more"
+        );
+        assert!(error(roots, "a/{b", ["1", "1", "1", "1"]).starts_with("bad ignore glob"));
     }
 
     #[test]

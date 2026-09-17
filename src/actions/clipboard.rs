@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use clipboard_win::options::NoClear;
 use clipboard_win::{Clipboard, raw};
 
@@ -30,7 +30,7 @@ pub fn copy_file(path: &Path) -> Result<()> {
     // Each writer must leave what the other wrote, so the clipboard is emptied
     // once here and both writes use the form that does not empty it again.
     raw::empty().map_err(|e| anyhow!("cannot empty the clipboard: {e}"))?;
-    raw::set_string_with(&path, NoClear).map_err(|e| anyhow!("cannot write the path: {e}"))?;
+    raw::set_string_with(path, NoClear).map_err(|e| anyhow!("cannot write the path: {e}"))?;
     raw::set_file_list_with(&[&path], NoClear)
         .map_err(|e| anyhow!("cannot write the file: {e}"))?;
 

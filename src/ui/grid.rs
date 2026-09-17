@@ -30,7 +30,11 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             .items_center()
             .justify_center()
             .text_color(cx.theme().muted_foreground)
-            .child("Nothing here. Check the roots in file-buddy.toml.")
+            .child(if this.review.is_some() {
+                "Nothing to review in this group."
+            } else {
+                "Nothing here. Check the roots in file-buddy.toml."
+            })
             .into_any_element();
     }
 

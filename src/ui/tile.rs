@@ -33,11 +33,12 @@ pub fn tile(
         )
         .cursor_pointer()
         // Ctrl marks instead of selecting, the way a file manager does it.
-        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
             if event.modifiers().control {
                 this.toggle_mark(index, cx)
             } else {
-                this.select(index, cx)
+                this.select(index, cx);
+                this.renamer_follows(window, cx)
             }
         }))
         .child(
@@ -108,7 +109,11 @@ pub fn tile(
                 .w_full()
                 .gap_1()
                 .items_center()
-                .child(badge(hit.signal, cx))
+                // In Review the second line is why the file is there, not a
+                // match, so it has no signal to show.
+                .when(this.review.is_none(), |line| {
+                    line.child(badge(hit.signal, cx))
+                })
                 .child(
                     div()
                         .flex_1()

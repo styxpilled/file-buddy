@@ -22,21 +22,24 @@ Two things follow from that:
     src/
       lib.rs          the library: the data layer, and the window over it
       main.rs         the application. It opens the database and one window
-      clipboard.rs    the Windows clipboard, which GPUI cannot do
       config.rs       the TOML file, the ignore globs, the bm25 weights
       paths.rs        the data directory, the thumbnail cache, the config file,
                       the speech model
       bin/fb.rs       a headless front end: scan, search, status
+      actions/        what the user does to a file on disk
+        clipboard.rs  the Windows clipboard, which GPUI cannot do
+        rename.rs     a new name on disk and in the index, never over a file
       media/          what a file is
         mod.rs        the three kinds
         hash.rs       blake3 over the size and both ends
-        filename.rs   the split for the index
+        filename.rs   the split for the index, sanitizing, poor names
       db/             the database and every query against it
         mod.rs        open, pragmas, migrations
         migrations.rs the schema
         files.rs      rows in `files`
         fts.rs        the search index, rebuilt from the tables that own the text
         tags.rs       tags and `file_tags`
+        review.rs     the four Review groups, each file with its reason
         segments.rs   speech segments
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
@@ -62,6 +65,10 @@ Two things follow from that:
         tile.rs       one result: thumbnail, hover video, badge, matched text
         preview.rs    the side pane
         tagger.rs     the tag input and its autocomplete
+        renamer.rs    the rename input in the side pane
+        review.rs     the Review group tabs
+        pages.rs      the Browse, Review and Settings tabs
+        settings.rs   the Settings form
         chips.rs      the media kind filters
 
 `config` and `paths` stay at the root because every directory uses them and they

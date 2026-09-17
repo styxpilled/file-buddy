@@ -3,7 +3,11 @@
 
 mod chips;
 mod grid;
+mod pages;
 mod preview;
+mod renamer;
+mod review;
+mod settings;
 mod tagger;
 mod tile;
 
@@ -15,8 +19,8 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseDownEvent, ScrollStrategy,
-    SharedString, Task, Window, div, px,
+    App, Context, Entity, FocusHandle, Focusable, KeyBinding, MouseDownEvent, PathPromptOptions,
+    ScrollStrategy, SharedString, Task, Window, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::component::{
@@ -26,15 +30,18 @@ use gpui_kit::component::{
 use gpui_video::{Video, VideoOptions};
 use url::Url;
 
+use self::renamer::Renamer;
+use self::settings::Settings;
 use self::tagger::{MAX_SUGGESTIONS, Tagger};
-use crate::clipboard;
-use crate::config::{Config, Weights};
-use crate::db::{Db, tags};
+use crate::actions::{clipboard, rename};
+use crate::config::Config;
+use crate::db::review::{self as groups, Group};
+use crate::db::{Db, files, tags};
 use crate::index;
 use crate::index::jobs::{self, Stage};
 use crate::media::Kind;
 use crate::paths;
-use crate::search::{self, Hit};
+use crate::search::{self, Hit, Signal};
 
 /// How long the selection must rest before the side pane opens a decoder. Held
 /// arrow keys would otherwise open one file per keystroke.
@@ -57,9 +64,15 @@ const VOLUME_STEP: f64 = 0.05;
 /// back. Long enough to read, short enough that it never looks like the state.
 const NOTICE_LIFE: Duration = Duration::from_millis(2200);
 pub const SIDE_PANE_WIDTH: f32 = 380.;
+const HEADER_HEIGHT: f32 = 58.;
 const PROGRESS_POLL: Duration = Duration::from_secs(2);
 /// How often transcripts that finished meanwhile reach the results.
 const SPEECH_REFRESH: Duration = Duration::from_secs(30);
+/// A decoder closes its file on its own thread, a moment after the clip is
+/// dropped, and the rename fails until it has. `RENAME_TRIES * RENAME_RETRY`
+/// is how long the rename waits for it.
+const RENAME_RETRY: Duration = Duration::from_millis(50);
+const RENAME_TRIES: usize = 20;
 
 gpui_kit::actions!(
     file_buddy,
@@ -81,7 +94,16 @@ gpui_kit::actions!(
         ToggleMark,
         Dismiss,
         NextSuggestion,
-        PreviousSuggestion
+        PreviousSuggestion,
+        RenameFile,
+        ShowBrowse,
+        ShowReview,
+        ShowSettings,
+        SaveSettings,
+        ReviewDuplicates,
+        ReviewLong,
+        ReviewFailed,
+        ReviewPoorNames
     ]
 );
 
@@ -104,6 +126,17 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
         KeyBinding::new("t", TagFiles, grid),
         KeyBinding::new("x", ToggleMark, grid),
+        KeyBinding::new("r", RenameFile, grid),
+        KeyBinding::new("ctrl-r", RenameFile, Some("FileBuddy")),
+        KeyBinding::new("f2", RenameFile, Some("FileBuddy")),
+        KeyBinding::new("ctrl-1", ShowBrowse, Some("FileBuddy")),
+        KeyBinding::new("ctrl-2", ShowReview, Some("FileBuddy")),
+        KeyBinding::new("ctrl-3", ShowSettings, Some("FileBuddy")),
+        KeyBinding::new("ctrl-s", SaveSettings, Some("FileBuddy")),
+        KeyBinding::new("alt-1", ReviewDuplicates, Some("FileBuddy")),
+        KeyBinding::new("alt-2", ReviewLong, Some("FileBuddy")),
+        KeyBinding::new("alt-3", ReviewFailed, Some("FileBuddy")),
+        KeyBinding::new("alt-4", ReviewPoorNames, Some("FileBuddy")),
         // `input::Escape` reaches this view only while an input has focus, so
         // escape needs a binding of its own for the rest of the time.
         KeyBinding::new("escape", Dismiss, grid),
@@ -119,7 +152,9 @@ pub fn bind_keys(cx: &mut App) {
 
 pub struct FileBuddy {
     db: Db,
-    weights: Weights,
+    db_path: PathBuf,
+    /// As it was last read or saved.
+    config: Config,
     cache: PathBuf,
     input: Entity<InputState>,
     /// Held while the search box is not focused, so the window keys arrive.
@@ -161,6 +196,29 @@ pub struct FileBuddy {
     /// and a rename; a grid index survives neither.
     marked: HashSet<String>,
     tagger: Option<Tagger>,
+    renamer: Option<Renamer>,
+    rename_task: Option<Task<()>>,
+    /// The Review page, when it is open. Its group replaces the results.
+    review: Option<Review>,
+    /// The Settings page, when it is open. It holds the unsaved form.
+    settings: Option<Settings>,
+    scanning: bool,
+    /// Settings saved new folders while a scan ran, so another scan follows it.
+    rescan_after: bool,
+    transcribing: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Page {
+    Browse,
+    Review,
+    Settings,
+}
+
+pub(super) struct Review {
+    group: Group,
+    /// Files in each group, in the order of `Group::ALL`.
+    counts: [usize; 4],
 }
 
 /// The clip in the side pane, with the identity of what it holds. Identity is
@@ -199,7 +257,8 @@ impl FileBuddy {
 
         let mut this = Self {
             db,
-            weights: config.weights,
+            db_path: db_path.to_path_buf(),
+            config: config.clone(),
             cache: cache.to_path_buf(),
             input,
             focus: cx.focus_handle(),
@@ -225,22 +284,36 @@ impl FileBuddy {
             indexing: None,
             marked: HashSet::new(),
             tagger: None,
+            renamer: None,
+            rename_task: None,
+            review: None,
+            settings: None,
+            scanning: false,
+            rescan_after: false,
+            transcribing: false,
         };
         this.run_search(cx);
-        this.rescan(config, db_path, cx);
+        this.rescan(cx);
         this
     }
 
     /// Bring the collection up to date in the background, then show it. Without
     /// this the window shows what the last run indexed.
-    fn rescan(&mut self, config: &Config, db_path: &Path, cx: &mut Context<Self>) {
-        let roots = config.roots.clone();
+    /// A second scan at the same time would walk the same files twice, so a
+    /// request during a scan waits for it to end.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        if self.scanning {
+            self.rescan_after = true;
+            return;
+        }
+        let roots = self.config.roots.clone();
         let cache = self.cache.clone();
-        let db_path = db_path.to_path_buf();
-        let Ok(ignore) = config.ignore_set() else {
+        let db_path = self.db_path.clone();
+        let Ok(ignore) = self.config.ignore_set() else {
             self.status = "the ignore globs are not valid".into();
             return;
         };
+        self.scanning = true;
         self.status = "scanning".into();
         cx.spawn(async move |this, cx| {
             let scanned = cx
@@ -256,10 +329,14 @@ impl FileBuddy {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                this.scanning = false;
                 this.run_search(cx);
                 match &scanned {
                     Err(e) => this.status = format!("scan failed: {e:#}").into(),
                     Ok(_) => this.transcribe(db_path, cx),
+                }
+                if std::mem::take(&mut this.rescan_after) {
+                    this.rescan(cx);
                 }
             })
             .ok();
@@ -269,7 +346,11 @@ impl FileBuddy {
 
     /// Transcribe in the background and show how far it is. The first run is
     /// hours of work. The queue is durable, so a restart continues it.
+    /// A run that is already going picks up the jobs a later scan queues.
     fn transcribe(&mut self, db_path: PathBuf, cx: &mut Context<Self>) {
+        if self.transcribing {
+            return;
+        }
         if let Err(e) = paths::whisper_model() {
             log::error!("{e:#}");
             self.indexing = Some(Notice {
@@ -285,6 +366,7 @@ impl FileBuddy {
             return;
         }
 
+        self.transcribing = true;
         let finished = Arc::new(AtomicBool::new(false));
         let work = cx.background_spawn({
             let cache = self.cache.clone();
@@ -328,6 +410,7 @@ impl FileBuddy {
             }
             let result = work.await;
             this.update(cx, |this, cx| {
+                this.transcribing = false;
                 this.indexing = match result {
                     Ok(_) => None,
                     Err(e) => {
@@ -348,7 +431,7 @@ impl FileBuddy {
     fn fetch_results(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
         let request = search::Request::new(text).kinds(self.kinds.clone());
-        match search::search(self.db.conn(), &request, &self.weights) {
+        match search::search(self.db.conn(), &request, &self.config.weights) {
             Ok(hits) => {
                 self.status = match hits.len() {
                     0 => "nothing found".into(),
@@ -366,7 +449,12 @@ impl FileBuddy {
     }
 
     /// A new query. Everything that was about the old results goes with them.
+    /// Review holds its own results, which a background refresh must not
+    /// replace.
     fn run_search(&mut self, cx: &mut Context<Self>) {
+        if self.review.is_some() {
+            return;
+        }
         self.fetch_results(cx);
         self.selected = 0;
         self.hovered = None;
@@ -384,6 +472,9 @@ impl FileBuddy {
     /// a file up the ranking, and dropping the user back at the top of the
     /// grid mid-tagging would lose their place.
     fn rerun_search(&mut self, cx: &mut Context<Self>) {
+        if self.review.is_some() {
+            return;
+        }
         let was = self.selected_hit().map(|hit| hit.file.hash.clone());
         self.fetch_results(cx);
 
@@ -454,6 +545,9 @@ impl FileBuddy {
     }
 
     fn focus_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page() != Page::Browse {
+            return;
+        }
         let handle = self.input.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
         cx.notify();
@@ -472,6 +566,8 @@ impl FileBuddy {
         if !self.focus.is_focused(window)
             && !self.query_focused(window, cx)
             && self.tagger.is_none()
+            && self.renamer.is_none()
+            && self.settings.is_none()
         {
             window.focus(&self.focus, cx);
         }
@@ -512,7 +608,8 @@ impl FileBuddy {
             return;
         }
 
-        self.preview_paused = !self.autoplay;
+        // The walk asks the user to name what they see, so the clip plays.
+        self.preview_paused = !(self.autoplay || self.walking());
 
         // The file opened ahead is already decoded, so it costs no wait at all.
         if let Some(video) = self.take_preloaded(self.selected) {
@@ -853,6 +950,13 @@ impl FileBuddy {
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tagger.is_some() {
             self.close_tagger(window, cx);
+        } else if self.renamer.is_some() {
+            self.close_renamer(window, cx);
+        } else if self.settings.is_some() && !self.focus.is_focused(window) {
+            // A field of the form has focus. Leaving would drop what was typed.
+            window.focus(&self.focus, cx);
+        } else if self.page() != Page::Browse {
+            self.show_page(Page::Browse, window, cx);
         } else if self.query_focused(window, cx) {
             self.blur_query(window, cx);
         } else {
@@ -973,6 +1077,442 @@ impl FileBuddy {
         self.refresh_suggestions(cx);
     }
 
+    /// Open the rename input on the selection, prefilled with its stem and all
+    /// of it selected, so typing replaces the name and an arrow key edits it.
+    pub(super) fn open_renamer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hit) = self.selected_hit() else {
+            return;
+        };
+        if self
+            .renamer
+            .as_ref()
+            .is_some_and(|renamer| renamer.file.id == hit.file.id)
+        {
+            return;
+        }
+        let file = hit.file.clone();
+        self.tagger = None;
+
+        let input =
+            cx.new(|cx| InputState::new(window, cx).default_value(rename::stem(&file.path)));
+        input.update(cx, |input, cx| input.select_all(window, cx));
+        let subscriptions =
+            vec![
+                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    if matches!(event, InputEvent::PressEnter { .. }) {
+                        this.save_rename(window, cx);
+                    }
+                }),
+            ];
+
+        let handle = input.read(cx).focus_handle(cx);
+        self.renamer = Some(Renamer {
+            input,
+            extension: file
+                .path
+                .extension()
+                .map(|extension| format!(".{}", extension.to_string_lossy()).into())
+                .unwrap_or_default(),
+            file,
+            saving: false,
+            _subscriptions: subscriptions,
+        });
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// Escape, or a click on another tile outside the walk.
+    fn close_renamer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renamer = None;
+        self.rename_task = None;
+        window.focus(&self.focus, cx);
+        // A save that was cut short released the clip.
+        self.schedule_preview(cx);
+        cx.notify();
+    }
+
+    /// The renamer belongs to one file. A click on another tile takes the walk
+    /// to that file, and closes a single rename.
+    pub(super) fn renamer_follows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renamer) = &self.renamer else {
+            return;
+        };
+        if self
+            .selected_hit()
+            .is_some_and(|hit| hit.file.id == renamer.file.id)
+        {
+            return;
+        }
+        if self.walking() {
+            self.open_renamer(window, cx);
+        } else {
+            self.close_renamer(window, cx);
+        }
+    }
+
+    /// Every clip that has these bytes open. FFmpeg opens a file without
+    /// delete sharing, so Windows refuses the rename while one of them plays.
+    fn release_videos(&mut self, hash: &str) {
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.hash == hash)
+        {
+            self.preview = None;
+            self.preview_task = None;
+        }
+        let results = &self.results;
+        let holds = |index: &usize| results.get(*index).is_some_and(|hit| hit.file.hash == hash);
+        if self.hovered.as_ref().is_some_and(|(at, _)| holds(at)) {
+            self.hovered = None;
+        }
+        if self.preloaded.as_ref().is_some_and(|(at, _)| holds(at)) {
+            self.preloaded = None;
+        }
+    }
+
+    fn save_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(renamer) = &mut self.renamer else {
+            return;
+        };
+        if renamer.saving {
+            return;
+        }
+        renamer.saving = true;
+        let typed = renamer.input.read(cx).value().to_string();
+        let file = renamer.file.clone();
+        self.release_videos(&file.hash);
+        cx.notify();
+
+        self.rename_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let mut tries = 0;
+            loop {
+                let Ok(result) = this.update(cx, |this, _| {
+                    rename::rename(this.db.conn_mut(), &file, &typed)
+                }) else {
+                    return;
+                };
+                tries += 1;
+                match result {
+                    Err(e) if rename::is_in_use(&e) && tries < RENAME_TRIES => {
+                        cx.background_executor().timer(RENAME_RETRY).await;
+                    }
+                    result => {
+                        this.update_in(cx, |this, window, cx| {
+                            this.finish_rename(&file, result, window, cx)
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            }
+        }));
+    }
+
+    fn finish_rename(
+        &mut self,
+        file: &files::FileRow,
+        result: anyhow::Result<Option<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = match result {
+            Ok(target) => target,
+            Err(e) => {
+                log::error!("rename of {} failed: {e:#}", file.path.display());
+                if let Some(renamer) = &mut self.renamer {
+                    renamer.saving = false;
+                }
+                self.flash(e.to_string(), true, cx);
+                self.schedule_preview(cx);
+                return;
+            }
+        };
+        if let Some(target) = &target {
+            let name = files::FileRow::name_of(target);
+            self.flash(format!("renamed to {name}"), false, cx);
+        }
+
+        if !self.walking() {
+            self.renamer = None;
+            window.focus(&self.focus, cx);
+            if self.review.is_some() {
+                self.reload_review(cx);
+            } else {
+                self.rerun_search(cx);
+            }
+            return;
+        }
+        self.count_groups();
+        if let (Some(target), Some(hit)) = (
+            target,
+            self.results.iter_mut().find(|hit| hit.file.id == file.id),
+        ) {
+            hit.file.filename = files::FileRow::name_of(&target);
+            hit.file.path = target;
+        }
+        // A click may have taken the walk to another file while this one saved.
+        if self
+            .selected_hit()
+            .is_some_and(|hit| hit.file.id == file.id)
+        {
+            self.walk_on(window, cx);
+        }
+    }
+
+    /// The Poor names group is the rename walk: the clip plays, and a saved
+    /// name moves the renamer on to the next file.
+    fn walking(&self) -> bool {
+        self.review
+            .as_ref()
+            .is_some_and(|review| review.group == Group::PoorNames)
+    }
+
+    /// `ctrl-shift-r`. Review opens on the first group that holds a file.
+    /// Review opens on the first group that holds a file.
+    fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.review = Some(Review {
+            group: Group::Duplicates,
+            counts: [0; 4],
+        });
+        self.count_groups();
+        let counts = self
+            .review
+            .as_ref()
+            .map(|review| review.counts)
+            .unwrap_or_default();
+        let group = Group::ALL
+            .into_iter()
+            .zip(counts)
+            .find(|(_, count)| *count > 0)
+            .map_or(Group::Duplicates, |(group, _)| group);
+        self.show_group(group, window, cx);
+    }
+
+    pub(super) fn review_group(&self) -> Option<Group> {
+        self.review.as_ref().map(|review| review.group)
+    }
+
+    fn count_groups(&mut self) {
+        let Some(review) = &mut self.review else {
+            return;
+        };
+        for (at, group) in Group::ALL.into_iter().enumerate() {
+            match groups::items(self.db.conn(), group) {
+                Ok(items) => review.counts[at] = items.len(),
+                Err(e) => log::error!("counting {} failed: {e:#}", group.label()),
+            }
+        }
+    }
+
+    fn group_hits(&mut self, group: Group, cx: &mut Context<Self>) -> Vec<Hit> {
+        match groups::items(self.db.conn(), group) {
+            Ok(items) => items
+                .into_iter()
+                .map(|item| Hit {
+                    file: item.file,
+                    matched: item.note,
+                    score: 0.0,
+                    signal: Signal::Filename,
+                })
+                .collect(),
+            Err(e) => {
+                log::error!("reading {} failed: {e:#}", group.label());
+                self.flash(format!("reading {} failed: {e}", group.label()), true, cx);
+                Vec::new()
+            }
+        }
+    }
+
+    /// A tab of Review, from a click or `ctrl-1` to `ctrl-4`. It opens Review
+    /// when it is closed.
+    pub(super) fn show_group(&mut self, group: Group, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings = None;
+        if self.review.is_none() {
+            self.review = Some(Review {
+                group,
+                counts: [0; 4],
+            });
+        }
+        if let Some(review) = &mut self.review {
+            review.group = group;
+        }
+        self.count_groups();
+        self.tagger = None;
+        self.renamer = None;
+        self.rename_task = None;
+        self.results = self.group_hits(group, cx);
+        self.selected = 0;
+        self.step = 1;
+        self.hovered = None;
+        self.preloaded = None;
+        self.marked.clear();
+        self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        window.focus(&self.focus, cx);
+
+        if self.walking() && !self.results.is_empty() {
+            // The clip on screen may already be the first file, and the
+            // preview keeps that one as it is.
+            self.preview_paused = false;
+            if let Some(preview) = &self.preview
+                && preview.hash == self.results[0].file.hash
+            {
+                preview.video.set_paused(false);
+            }
+            self.schedule_preview(cx);
+            self.open_renamer(window, cx);
+        } else {
+            self.schedule_preview(cx);
+        }
+        cx.notify();
+    }
+
+    /// The group again, after a rename changed it. The selection follows the
+    /// file, as it does in a search.
+    fn reload_review(&mut self, cx: &mut Context<Self>) {
+        let Some(group) = self.review.as_ref().map(|review| review.group) else {
+            return;
+        };
+        let was = self.selected_hit().map(|hit| hit.file.id);
+        self.results = self.group_hits(group, cx);
+        self.selected = was
+            .and_then(|id| self.results.iter().position(|hit| hit.file.id == id))
+            .unwrap_or_else(|| self.selected.min(self.results.len().saturating_sub(1)));
+        self.preloaded = None;
+        self.hovered = None;
+        self.count_groups();
+        self.schedule_preview(cx);
+        cx.notify();
+    }
+
+    pub(super) fn page(&self) -> Page {
+        if self.review.is_some() {
+            Page::Review
+        } else if self.settings.is_some() {
+            Page::Settings
+        } else {
+            Page::Browse
+        }
+    }
+
+    /// A page tab, or `ctrl-1` to `ctrl-3`.
+    pub(super) fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        if page == self.page() {
+            return;
+        }
+        self.tagger = None;
+        self.renamer = None;
+        self.rename_task = None;
+        window.focus(&self.focus, cx);
+        match page {
+            Page::Browse => {
+                self.review = None;
+                self.settings = None;
+                self.run_search(cx);
+            }
+            Page::Review => {
+                self.settings = None;
+                self.open_review(window, cx);
+            }
+            Page::Settings => {
+                self.review = None;
+                self.settings = Some(Settings::new(&self.config, window, cx));
+                // Nothing plays behind the form, and no key acts on a file that
+                // cannot be seen.
+                self.results.clear();
+                self.selected = 0;
+                self.marked.clear();
+                self.hovered = None;
+                self.preloaded = None;
+                self.preview = None;
+                self.preview_task = None;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Check the form, write the file, and use it. New weights reach the next
+    /// search; new folders or globs start a scan.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        let Some(settings) = &self.settings else {
+            return;
+        };
+        let config = match settings.edited(cx) {
+            Ok(config) => config,
+            Err(e) => {
+                self.flash(e.to_string(), true, cx);
+                return;
+            }
+        };
+        if let Err(e) = paths::config_path().and_then(|path| config.write(&path)) {
+            log::error!("saving the settings failed: {e:#}");
+            self.flash(format!("saving failed: {e}"), true, cx);
+            return;
+        }
+        let rescan = config.roots != self.config.roots || config.ignore != self.config.ignore;
+        self.config = config;
+        if rescan {
+            self.flash("saved, scanning the folders", false, cx);
+            self.rescan(cx);
+        } else {
+            self.flash("saved", false, cx);
+        }
+    }
+
+    fn revert_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() {
+            self.settings = Some(Settings::new(&self.config, window, cx));
+            cx.notify();
+        }
+    }
+
+    fn add_roots(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Add".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(folders))) = chosen.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                let Some(settings) = &mut this.settings else {
+                    return;
+                };
+                for folder in folders {
+                    if !settings.roots.contains(&folder) {
+                        settings.roots.push(folder);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn remove_root(&mut self, at: usize, cx: &mut Context<Self>) {
+        if let Some(settings) = &mut self.settings
+            && at < settings.roots.len()
+        {
+            settings.roots.remove(at);
+            cx.notify();
+        }
+    }
+
+    fn walk_on(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = self.selected + 1;
+        if next < self.results.len() {
+            self.select(next, cx);
+            self.open_renamer(window, cx);
+        } else {
+            self.close_renamer(window, cx);
+            self.flash("the walk is done", false, cx);
+        }
+    }
+
     fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
         if let Some(at) = self.kinds.iter().position(|k| *k == kind) {
             // The last chip stays on. No chips would mean no results at all.
@@ -1027,6 +1567,31 @@ impl Render for FileBuddy {
                 this.toggle_mark(selected, cx)
             }))
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &RenameFile, window, cx| this.open_renamer(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowBrowse, window, cx| {
+                this.show_page(Page::Browse, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowReview, window, cx| {
+                this.show_page(Page::Review, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowSettings, window, cx| {
+                this.show_page(Page::Settings, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SaveSettings, _, cx| this.save_settings(cx)))
+            .on_action(cx.listener(|this, _: &ReviewDuplicates, window, cx| {
+                this.show_group(Group::Duplicates, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ReviewLong, window, cx| {
+                this.show_group(Group::Long, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ReviewFailed, window, cx| {
+                this.show_group(Group::Failed, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ReviewPoorNames, window, cx| {
+                this.show_group(Group::PoorNames, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &NextSuggestion, _, cx| this.move_highlight(true, cx)))
             .on_action(
                 cx.listener(|this, _: &PreviousSuggestion, _, cx| this.move_highlight(false, cx)),
@@ -1036,20 +1601,32 @@ impl Render for FileBuddy {
             .child(
                 h_flex()
                     .w_full()
+                    // One height for every page, so the body does not jump when
+                    // the search box comes and goes.
+                    .h(px(HEADER_HEIGHT))
+                    .flex_none()
                     .gap_3()
-                    .p_3()
+                    .px_3()
                     .items_center()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .on_mouse_down_out(cx.listener(
-                                |this, _: &MouseDownEvent, window, cx| this.blur_query(window, cx),
-                            ))
-                            .child(Input::new(&self.input)),
-                    )
-                    .child(chips::chips(self, cx))
+                    .child(pages::tabs(self, cx))
+                    .map(|header| match (&self.review, &self.settings) {
+                        (Some(review), _) => header.child(review::tabs(review, cx)),
+                        (None, Some(_)) => header.child(div().flex_1()),
+                        (None, None) => header
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .on_mouse_down_out(cx.listener(
+                                        |this, _: &MouseDownEvent, window, cx| {
+                                            this.blur_query(window, cx)
+                                        },
+                                    ))
+                                    .child(Input::new(&self.input)),
+                            )
+                            .child(chips::chips(self, cx)),
+                    })
                     .when(!self.marked.is_empty(), |header| {
                         header.child(
                             div()
@@ -1061,13 +1638,15 @@ impl Render for FileBuddy {
                                 .child(format!("{} marked", self.marked.len())),
                         )
                     })
-                    .child(
-                        div()
-                            .min_w(px(56.))
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(self.volume_label()),
-                    )
+                    .when(self.settings.is_none(), |header| {
+                        header.child(
+                            div()
+                                .min_w(px(56.))
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(self.volume_label()),
+                        )
+                    })
                     .when_some(self.indexing.as_ref(), |header, indexing| {
                         header.child(
                             div()
@@ -1098,24 +1677,37 @@ impl Render for FileBuddy {
                             .min_w(px(90.))
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(self.status.clone()),
+                            .child(match &self.review {
+                                Some(_) if self.walking() && !self.results.is_empty() => {
+                                    format!("naming {} / {}", self.selected + 1, self.results.len())
+                                        .into()
+                                }
+                                Some(_) => counted(self.results.len()).into(),
+                                None if self.settings.is_some() => SharedString::default(),
+                                None => self.status.clone(),
+                            }),
                     }),
             )
-            .child(
-                h_resizable("panes")
-                    .with_state(&self.panes)
-                    .child(
-                        resizable_panel()
-                            .size(px(width))
-                            .child(grid::grid(self, cx)),
-                    )
-                    .child(
-                        resizable_panel()
-                            .size(px(SIDE_PANE_WIDTH))
-                            .size_range(px(260.)..px(900.))
-                            .child(preview::pane(self, window, cx)),
-                    ),
-            )
+            .when_some(self.settings.as_ref(), |page, _| {
+                page.child(settings::page(self, cx))
+            })
+            .when(self.settings.is_none(), |page| {
+                page.child(
+                    h_resizable("panes")
+                        .with_state(&self.panes)
+                        .child(
+                            resizable_panel()
+                                .size(px(width))
+                                .child(grid::grid(self, cx)),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(SIDE_PANE_WIDTH))
+                                .size_range(px(260.)..px(900.))
+                                .child(preview::pane(self, window, cx)),
+                        ),
+                )
+            })
             .child(tagger::panel(self, cx))
     }
 }

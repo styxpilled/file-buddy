@@ -113,14 +113,32 @@ Keyboard first. The mouse is optional.
   one tag can reach many files at once. Inside the input, `alt-up` and
   `alt-down` pick a suggestion, because the plain arrows belong to the text.
   Enter applies.
+- `r`, `ctrl-r` or `F2` renames the selection in the side pane. The input holds
+  the stem only; the extension stays. Enter saves.
 - Escape undoes one thing at a time, the most recent first: it closes the tag
-  panel, or gives focus back from the search box, or clears the marks. A click
-  outside the tag panel closes it too.
+  panel, or closes the rename input, or takes focus out of a Settings field, or
+  goes back to Browse, or gives focus back from the search box, or clears the
+  marks. A click outside the tag panel closes it
+  too.
 
-The Review screen collects every file that needs a person: duplicate groups,
+The window has three pages, with tabs at the start of the header: Browse,
+Review and Settings. `ctrl-1` to `ctrl-3` switch between them.
+
+The Review page collects every file that needs a person: duplicate groups,
 files over 5 minutes, files that cannot be indexed, and files with no proper
-name. The bulk rename walk lives here. The clip plays, the user types a name,
-Enter moves to the next file.
+name. It opens on the first group that holds a file, and `alt-1` to `alt-4`
+pick a group. The group tabs take the place of the search box and the chips;
+the grid and the side pane stay. Each tile says why the file
+is there, and the side pane shows its folder and, for a failure, the error.
+
+A name is poor when its stem holds `_`, `-`, a bracket, a character outside
+ASCII or a number longer than 4 digits. The Poor names group is the bulk rename
+walk. The clip plays, the user types a name, Enter moves to the next file.
+
+The Settings page edits `file-buddy.toml`: the folders to index, the ignore
+globs and the four weights. `ctrl-s` saves. A form that does not check out is
+not written. New weights apply to the next search, and new folders or globs
+start a scan.
 
 ## Non-goals for v1
 
@@ -129,7 +147,8 @@ Enter moves to the next file.
   same job in one keystroke.
 - No name suggestions from the transcript. Names come from the user.
 - No semantic or vector search. No typo tolerance.
-- No settings screen. Roots and ignore globs live in a TOML file.
+- The Settings page edits the TOML file and nothing else. There are no settings
+  that live only in the database.
 - No moment-level results.
 
 ## Stack

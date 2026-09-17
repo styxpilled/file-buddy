@@ -11,11 +11,12 @@ use gpui_kit::component::{
 };
 use gpui_video::video as video_element;
 
+use crate::db::review::Group;
 use crate::db::{segments, tags};
 use crate::index::jobs::{self, Stage};
 use crate::paths;
 use crate::search::Hit;
-use crate::ui::{FileBuddy, SIDE_PANE_WIDTH};
+use crate::ui::{FileBuddy, SIDE_PANE_WIDTH, renamer};
 
 /// What the pane holds below the stage: the buttons, the name, the facts, the
 /// tags and the transcript. The stage gets the rest of the window.
@@ -46,8 +47,9 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .child(stage(this, hit, width, height, cx))
         .child(controls(this, cx))
         .child(file_actions(cx))
-        .child(div().w_full().text_sm().child(hit.file.filename.clone()))
+        .child(renamer::name_line(this, hit, cx))
         .child(facts(hit, cx))
+        .child(review_line(this, hit, cx))
         .child(tag_line(this, hit, cx))
         .child(transcript(this, hit, cx))
         .into_any_element()
@@ -249,6 +251,14 @@ fn file_actions(cx: &mut Context<FileBuddy>) -> AnyElement {
                 .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
         )
         .child(
+            Button::new("file-rename")
+                .small()
+                .icon(IconName::Replace)
+                .label("Rename")
+                .tooltip("R")
+                .on_click(cx.listener(|this, _, window, cx| this.open_renamer(window, cx))),
+        )
+        .child(
             Button::new("file-open")
                 .small()
                 .icon(IconName::ExternalLink)
@@ -273,6 +283,33 @@ fn facts(hit: &Hit, cx: &App) -> AnyElement {
         .text_xs()
         .text_color(cx.theme().muted_foreground)
         .child(parts.join("  ·  "))
+        .into_any_element()
+}
+
+/// In Review, where the file is, and the whole error of a file that could not
+/// be indexed. The tile has room for the first words only.
+fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
+    let Some(group) = this.review_group() else {
+        return div().into_any_element();
+    };
+    let folder = hit
+        .file
+        .path
+        .parent()
+        .map(|parent| parent.display().to_string())
+        .unwrap_or_default();
+    v_flex()
+        .w_full()
+        .gap_1()
+        .text_xs()
+        .child(div().text_color(cx.theme().muted_foreground).child(folder))
+        .when(group == Group::Failed, |line| {
+            line.child(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(hit.matched.clone()),
+            )
+        })
         .into_any_element()
 }
 
