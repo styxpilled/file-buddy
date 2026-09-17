@@ -19,8 +19,10 @@ const ATTEMPTS: usize = 10;
 
 /// Put one file on the clipboard, as a file and as its path.
 pub fn copy_file(path: &Path) -> Result<()> {
-    let path = dunce::canonicalize(path).expect("cannot canonicalize path");
-    let path = path.to_str().expect("cannot convert copy path to str");
+    let path = dunce::canonicalize(path).map_err(|e| anyhow!("cannot canonicalize path: {e}"))?;
+    let Some(path) = path.to_str() else {
+        return Err(anyhow!("cannot convert copy path to str"));
+    };
 
     let _clipboard = Clipboard::new_attempts(ATTEMPTS)
         .map_err(|e| anyhow!("another application is holding the clipboard: {e}"))?;
