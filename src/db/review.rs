@@ -8,7 +8,7 @@ use rusqlite::Connection;
 
 use crate::db::files::{self, COLUMNS, FileRow, PRESENT, read_row};
 use crate::index::jobs::LONG_FILE_SECONDS;
-use crate::media::filename;
+use crate::media::{self, filename};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
@@ -89,7 +89,7 @@ fn long(conn: &Connection) -> Result<Vec<Item>> {
     rows.map(|row| {
         let file = row?;
         Ok(Item {
-            note: clock(file.duration.unwrap_or_default()),
+            note: media::duration(file.duration.unwrap_or_default()),
             file,
         })
     })
@@ -136,17 +136,6 @@ fn folder(path: &Path) -> String {
         .and_then(Path::file_name)
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// `12:04`, or `1:02:30` past an hour.
-fn clock(seconds: f64) -> String {
-    let total = seconds.round() as u64;
-    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
 }
 
 #[cfg(test)]

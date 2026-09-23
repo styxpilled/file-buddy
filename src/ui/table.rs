@@ -11,7 +11,7 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 
 use super::tile;
 use crate::db::files::{FileRow, State};
-use crate::media::Kind;
+use crate::media;
 use crate::search::folder::Entry;
 use crate::ui::FileBuddy;
 
@@ -81,7 +81,7 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
         ),
         Entry::File(hit) => (
             text(&hit.file.filename, theme.foreground).into_any_element(),
-            text(kind_label(hit.file.kind), muted),
+            text(hit.file.kind.label(), muted),
         ),
         Entry::Stray { path, why, .. } => {
             let color = tile::stray_color(*why, cx);
@@ -94,7 +94,7 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
     let hit = entry.hit();
     let length = hit
         .and_then(|hit| hit.file.duration)
-        .map(clock)
+        .map(media::duration)
         .unwrap_or_default();
     let last = match hit {
         Some(hit) if this.review().is_some() => text(&hit.matched, muted),
@@ -150,21 +150,6 @@ fn text(text: &str, color: Hsla) -> Div {
     div().truncate().text_color(color).child(text.to_string())
 }
 
-fn kind_label(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Video => "video",
-        Kind::Animated => "gif",
-        Kind::Still => "image",
-    }
-}
-
-/// `0:07` or `12:40`. The clips are short, so hours are rare enough to show as
-/// minutes.
-fn clock(seconds: f64) -> String {
-    let seconds = seconds.round() as u64;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
 fn bytes(size: u64) -> String {
     const KB: f64 = 1024.;
     const MB: f64 = KB * 1024.;
@@ -211,8 +196,6 @@ mod tests {
 
     #[test]
     fn the_numbers_are_short() {
-        assert_eq!(clock(7.4), "0:07");
-        assert_eq!(clock(760.), "12:40");
         assert_eq!(bytes(1), "1 KB");
         assert_eq!(bytes(350_000), "342 KB");
         assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");

@@ -16,6 +16,7 @@ use crate::db::files::{FileRow, State};
 use crate::db::review::Group;
 use crate::db::{ocr as ocr_rows, segments, tags};
 use crate::index::jobs::{self, Stage};
+use crate::media;
 use crate::ocr::noise;
 use crate::paths;
 use crate::search::Hit;
@@ -360,9 +361,9 @@ fn facts(hit: &Hit, cx: &App) -> AnyElement {
 
 /// The kind, the length, the size, and the state when it is not ready.
 pub(super) fn facts_text(file: &FileRow) -> String {
-    let mut parts = vec![file.kind.as_str().to_string()];
+    let mut parts = vec![file.kind.label().to_string()];
     if let Some(duration) = file.duration {
-        parts.push(format!("{duration:.1}s"));
+        parts.push(media::duration(duration));
     }
     parts.push(format!("{:.1} MB", file.size as f64 / 1_048_576.));
     if file.state != State::Ready {

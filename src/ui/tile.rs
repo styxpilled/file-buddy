@@ -10,7 +10,6 @@ use gpui_video::video as video_element;
 use super::grid::{TILE_HEIGHT, TILE_WIDTH};
 use super::preview;
 use crate::db::files::{FileRow, State};
-use crate::media::Kind;
 use crate::paths;
 use crate::search::folder::{Entry, Stray};
 use crate::search::{Hit, Signal};
@@ -214,14 +213,7 @@ fn thumbnail(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
             .max_h(px(TILE_HEIGHT - 4.))
             .into_any_element();
     }
-    placeholder(
-        match hit.file.kind {
-            Kind::Video => "video",
-            Kind::Animated => "animation",
-            Kind::Still => "image",
-        },
-        cx,
-    )
+    placeholder(hit.file.kind.label(), cx)
 }
 
 fn placeholder(text: &str, cx: &App) -> AnyElement {

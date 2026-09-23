@@ -21,6 +21,15 @@ impl Kind {
         }
     }
 
+    /// What the window calls the kind. `as_str` is what the database holds.
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Video => "video",
+            Kind::Animated => "gif",
+            Kind::Still => "image",
+        }
+    }
+
     /// The first guess, from the extension. A probe can move a file from
     /// `Still` to `Animated`, because an animated WebP has a still extension.
     pub fn from_path(path: &Path) -> Option<Self> {
@@ -31,6 +40,22 @@ impl Kind {
             "png" | "jpg" | "jpeg" | "webp" | "bmp" | "avif" | "jfif" => Kind::Still,
             _ => return None,
         })
+    }
+}
+
+/// A length as the window shows it: `9.4s` under a minute, `5:01` from there,
+/// and `1:02:30` from an hour.
+pub fn duration(seconds: f64) -> String {
+    let tenths = (seconds * 10.).round();
+    if tenths < 600. {
+        return format!("{:.1}s", tenths / 10.);
+    }
+    let total = seconds.round() as u64;
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
     }
 }
 
@@ -50,6 +75,16 @@ impl FromStr for Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duration_keeps_its_tenths_under_a_minute() {
+        assert_eq!(duration(9.44), "9.4s");
+        assert_eq!(duration(59.94), "59.9s");
+        // Rounds up to a whole minute, so it reads as one.
+        assert_eq!(duration(59.96), "1:00");
+        assert_eq!(duration(301.0), "5:01");
+        assert_eq!(duration(3750.0), "1:02:30");
+    }
 
     #[test]
     fn extension_decides_the_first_guess() {
