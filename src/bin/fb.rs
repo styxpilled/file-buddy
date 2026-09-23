@@ -29,8 +29,8 @@ fn main() -> Result<()> {
             let stats = scan::scan(&mut db, &config.roots, &config.ignore_set()?, &cache)?;
             drop(db);
             println!(
-                "scanned: {} added, {} changed, {} unchanged, {} removed, {} unreadable",
-                stats.added, stats.changed, stats.unchanged, stats.removed, stats.unreadable
+                "scanned: {} added, {} changed, {} unchanged, {} missing, {} unreadable",
+                stats.added, stats.changed, stats.unchanged, stats.missing, stats.unreadable
             );
             let stages = index::run(&db_path, &cache)?;
             println!(

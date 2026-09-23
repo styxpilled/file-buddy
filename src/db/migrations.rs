@@ -12,6 +12,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(FLATTEN_THE_OCR_INDEX),
         M::up(REREAD_TEXT_WITHOUT_THE_WATERMARK),
         M::up(RESTORE_EVERY_OCR_LINE),
+        M::up(MARK_A_GONE_FILE_MISSING),
     ])
 }
 
@@ -54,6 +55,13 @@ WHERE stage = 'ocr' AND state = 'done';
 const RESTORE_EVERY_OCR_LINE: &str = r#"
 UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
 WHERE stage = 'ocr' AND state = 'done';
+"#;
+
+/// Issue 11. A file that is gone keeps its row, so its tags and its finished
+/// stages come back with it. Everything that shows files hides the missing ones.
+const MARK_A_GONE_FILE_MISSING: &str = r#"
+ALTER TABLE files ADD COLUMN missing_at INTEGER;
+CREATE INDEX files_missing ON files (missing_at);
 "#;
 
 const INITIAL: &str = r#"

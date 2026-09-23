@@ -17,7 +17,8 @@ pub struct ScanStats {
     pub added: usize,
     pub changed: usize,
     pub unchanged: usize,
-    pub removed: usize,
+    /// Paths that are gone from disk. The row stays, marked missing.
+    pub missing: usize,
     /// Files that could not be read at all, so they are not in the database.
     pub unreadable: usize,
 }
@@ -61,11 +62,18 @@ pub fn scan(db: &mut Db, roots: &[PathBuf], ignore: &GlobSet, cache: &Path) -> R
         }
     }
 
-    stats.removed = files::remove_missing(db.conn_mut(), &seen_ids)?;
+    stats.missing = files::mark_missing(db.conn_mut(), &seen_ids)?;
     Ok(stats)
 }
 
-fn visit(db: &Db, path: &Path, kind: Kind, cache: &Path) -> Result<(i64, files::Upsert)> {
+/// Bring one path up to date and queue the cheap stages it needs. The watcher
+/// calls this for a single file where the scan calls it for every one.
+pub(crate) fn visit(
+    db: &Db,
+    path: &Path,
+    kind: Kind,
+    cache: &Path,
+) -> Result<(i64, files::Upsert)> {
     let metadata = std::fs::metadata(path)?;
     let size = metadata.len();
     let mtime = metadata

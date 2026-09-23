@@ -39,6 +39,7 @@ use crate::db::review::{self as groups, Group};
 use crate::db::{Db, files, tags};
 use crate::index;
 use crate::index::jobs::{self, Stage};
+use crate::index::watch::{self, WatchStats};
 use crate::media::Kind;
 use crate::paths;
 use crate::search::{self, Hit, Signal};
@@ -63,9 +64,12 @@ const VOLUME_STEP: f64 = 0.05;
 /// How long a confirmation stays in the header before the result count comes
 /// back. Long enough to read, short enough that it never looks like the state.
 const NOTICE_LIFE: Duration = Duration::from_millis(2200);
-pub const SIDE_PANE_WIDTH: f32 = 380.;
+pub const SIDE_PANE_WIDTH: f32 = 340.;
 const HEADER_HEIGHT: f32 = 58.;
 const PROGRESS_POLL: Duration = Duration::from_secs(2);
+/// How often the window asks the watcher what changed. The batch it gets has
+/// already waited for the roots to go quiet.
+const WATCH_POLL: Duration = Duration::from_millis(500);
 /// How often text that a stage found meanwhile reaches the results.
 const INDEX_REFRESH: Duration = Duration::from_secs(30);
 /// A decoder closes its file on its own thread, a moment after the clip is
@@ -103,7 +107,8 @@ gpui_kit::actions!(
         ReviewDuplicates,
         ReviewLong,
         ReviewFailed,
-        ReviewPoorNames
+        ReviewPoorNames,
+        Rescan
     ]
 );
 
@@ -145,6 +150,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-down", NextSuggestion, Some("FileBuddy")),
         KeyBinding::new("alt-up", PreviousSuggestion, Some("FileBuddy")),
         KeyBinding::new("ctrl-space", ToggleAutoplay, Some("FileBuddy")),
+        KeyBinding::new("f5", Rescan, Some("FileBuddy")),
         KeyBinding::new("ctrl-up", VolumeUp, Some("FileBuddy")),
         KeyBinding::new("ctrl-down", VolumeDown, Some("FileBuddy")),
     ]);
@@ -207,6 +213,12 @@ pub struct FileBuddy {
     scanning: bool,
     /// Settings saved new folders while a scan ran, so another scan follows it.
     rescan_after: bool,
+    /// The watcher over the roots, while it runs.
+    watcher: Option<watch::Watcher>,
+    /// What the watcher saw and the window has not indexed yet.
+    pending: Vec<PathBuf>,
+    /// Paths that were not readable last time. They get one more try.
+    retried: HashSet<PathBuf>,
     /// The expensive stage that runs in the background, if one does.
     indexing_stage: Option<Stage>,
     /// The tab under the preview stage. It stays as the selection moves, so
@@ -243,6 +255,22 @@ pub(super) struct Review {
 pub(super) struct Preview {
     hash: String,
     video: Video,
+}
+
+/// What the header says one batch of changes did.
+fn summary(stats: &WatchStats) -> String {
+    let parts = [
+        (stats.added, "new"),
+        (stats.changed, "changed"),
+        (stats.moved, "moved"),
+        (stats.missing, "gone"),
+    ];
+    parts
+        .iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, label)| format!("{count} {label}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// What the header calls a stage while it runs.
@@ -314,11 +342,15 @@ impl FileBuddy {
             settings: None,
             scanning: false,
             rescan_after: false,
+            watcher: None,
+            pending: Vec::new(),
+            retried: HashSet::new(),
             indexing_stage: None,
             detail: Detail::File,
         };
         this.run_search(cx);
         this.rescan(cx);
+        this.watch_changes(cx);
         this
     }
 
@@ -367,6 +399,103 @@ impl FileBuddy {
             .ok();
         })
         .detach();
+    }
+
+    /// Watch the roots and index what changes, so the collection stays current
+    /// without a rescan.
+    fn watch_changes(&mut self, cx: &mut Context<Self>) {
+        self.start_watching();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WATCH_POLL).await;
+                let alive = this.update(cx, |this, cx| {
+                    while let Some(batch) = this.watcher.as_ref().and_then(watch::Watcher::batch) {
+                        this.pending.extend(batch);
+                    }
+                    // A scan walks every root already, so a batch waits for it.
+                    if !this.pending.is_empty() && !this.scanning {
+                        let batch = std::mem::take(&mut this.pending);
+                        this.apply_changes(batch, cx);
+                    }
+                });
+                if alive.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Start the watcher, or replace the one that watches the old folders.
+    fn start_watching(&mut self) {
+        let Ok(ignore) = self.config.ignore_set() else {
+            return;
+        };
+        self.watcher = match watch::watch(&self.config.roots, &ignore) {
+            Ok(watcher) => Some(watcher),
+            Err(e) => {
+                log::warn!("watching the folders failed: {e:#}");
+                None
+            }
+        };
+    }
+
+    /// Index one batch of changed paths and show what it did.
+    fn apply_changes(&mut self, mut paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        paths.sort();
+        paths.dedup();
+        let Ok(ignore) = self.config.ignore_set() else {
+            return;
+        };
+        let cache = self.cache.clone();
+        let db_path = self.db_path.clone();
+        self.scanning = true;
+        cx.spawn(async move |this, cx| {
+            let applied = cx
+                .background_spawn({
+                    let db_path = db_path.clone();
+                    async move {
+                        let mut db = Db::open(&db_path)?;
+                        let applied = watch::apply(&mut db, &paths, &ignore, &cache)?;
+                        drop(db);
+                        index::run(&db_path, &cache)?;
+                        anyhow::Ok(applied)
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.scanning = false;
+                match applied {
+                    Err(e) => log::error!("indexing the changes failed: {e:#}"),
+                    Ok((stats, retry)) => {
+                        this.requeue(retry);
+                        if !stats.is_empty() {
+                            this.run_search(cx);
+                            this.flash(summary(&stats), false, cx);
+                            this.index_text(Stage::Ocr, db_path, cx);
+                        }
+                    }
+                }
+                if std::mem::take(&mut this.rescan_after) {
+                    this.rescan(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// A path that was still being written comes back once. Unreadable twice
+    /// and only a rescan brings it in.
+    fn requeue(&mut self, retry: Vec<PathBuf>) {
+        let (again, first): (Vec<PathBuf>, Vec<PathBuf>) = retry
+            .into_iter()
+            .partition(|path| self.retried.contains(path));
+        for path in again {
+            log::warn!("watch: gave up on {}", path.display());
+        }
+        self.retried = first.iter().cloned().collect();
+        self.pending.extend(first);
     }
 
     /// Run one expensive stage in the background and show how far it is. OCR
@@ -1501,6 +1630,7 @@ impl FileBuddy {
         self.config = config;
         if rescan {
             self.flash("saved, scanning the folders", false, cx);
+            self.start_watching();
             self.rescan(cx);
         } else {
             self.flash("saved", false, cx);
@@ -1628,6 +1758,10 @@ impl Render for FileBuddy {
                 this.show_page(Page::Settings, window, cx)
             }))
             .on_action(cx.listener(|this, _: &SaveSettings, _, cx| this.save_settings(cx)))
+            .on_action(cx.listener(|this, _: &Rescan, _, cx| {
+                this.flash("scanning the folders", false, cx);
+                this.rescan(cx);
+            }))
             .on_action(cx.listener(|this, _: &ReviewDuplicates, window, cx| {
                 this.show_group(Group::Duplicates, window, cx)
             }))

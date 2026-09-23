@@ -59,6 +59,7 @@ Two things follow from that:
         mod.rs
         jobs.rs       the durable queue
         scan.rs       the walk over the roots
+        watch.rs      the watcher over the roots and the incremental scan
         pipeline.rs   the worker pool. When a stage runs, and what a failure means
         stages/       what a stage produces
           mod.rs      one arm per stage
@@ -96,7 +97,6 @@ FFmpeg into a temporary directory, so it needs nothing from the repository.
 | 06 tags | The tag input and its autocomplete | `ui/tag_input.rs`. The queries are in `db/tags.rs` already |
 | 08 rename | Sanitizing a name the user typed | `media/filename.rs`. The rename itself, which moves the file and updates the row: `src/actions/rename.rs` |
 | 09 review screen | The queries for duplicate groups, long files, failures and poor names | `db/review.rs`. The screen and the bulk rename walk: `ui/review.rs` |
-| 11 file watching | The watcher and the incremental scan it starts | `index/watch.rs` |
 
 ## The window
 

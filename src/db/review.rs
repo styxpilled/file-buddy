@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::files::{self, FileRow, SELECT, read_row};
+use crate::db::files::{self, FileRow, PRESENT, read_row};
 use crate::index::jobs::LONG_FILE_SECONDS;
 use crate::media::filename;
 
@@ -54,7 +54,9 @@ pub fn items(conn: &Connection, group: Group) -> Result<Vec<Item>> {
 /// Every path that shares its bytes with another, one group after the other.
 fn duplicates(conn: &Connection) -> Result<Vec<Item>> {
     let mut statement = conn.prepare(&format!(
-        "{SELECT} WHERE hash IN (SELECT hash FROM files GROUP BY hash HAVING count(*) > 1)
+        "{PRESENT} AND hash IN (
+             SELECT hash FROM files WHERE missing_at IS NULL
+             GROUP BY hash HAVING count(*) > 1)
          ORDER BY hash, path"
     ))?;
     let rows: Vec<FileRow> = statement
@@ -81,7 +83,7 @@ fn duplicates(conn: &Connection) -> Result<Vec<Item>> {
 /// The longest first, because those are the likeliest to be deleted.
 fn long(conn: &Connection) -> Result<Vec<Item>> {
     let mut statement = conn.prepare(&format!(
-        "{SELECT} WHERE duration > ?1 ORDER BY duration DESC"
+        "{PRESENT} AND duration > ?1 ORDER BY duration DESC"
     ))?;
     let rows = statement.query_map([LONG_FILE_SECONDS], read_row)?;
     rows.map(|row| {
@@ -97,7 +99,7 @@ fn long(conn: &Connection) -> Result<Vec<Item>> {
 fn failed(conn: &Connection) -> Result<Vec<Item>> {
     let mut statement = conn.prepare(
         "SELECT id, path, hash, filename, kind, size, duration, state, error
-         FROM files WHERE state = 'failed' ORDER BY path",
+         FROM files WHERE missing_at IS NULL AND state = 'failed' ORDER BY path",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(Item {

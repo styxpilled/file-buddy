@@ -8,7 +8,7 @@ use file_buddy::config::Weights;
 use file_buddy::db::{Db, files, tags};
 use file_buddy::ffmpeg::{self, Tool, thumbnail};
 use file_buddy::index::jobs::Stage;
-use file_buddy::index::{self, scan};
+use file_buddy::index::{self, scan, watch};
 use file_buddy::media::Kind;
 use file_buddy::search;
 
@@ -123,6 +123,17 @@ impl Harness {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap()
+    }
+
+    /// Index one batch of paths the way the watcher does.
+    fn apply(&self, paths: &[PathBuf]) -> watch::WatchStats {
+        let mut db = Db::open(&self.db_path).unwrap();
+        let ignore = globset::GlobSetBuilder::new().build().unwrap();
+        let (stats, retry) = watch::apply(&mut db, paths, &ignore, &self.cache).unwrap();
+        assert!(retry.is_empty(), "{retry:?}");
+        drop(db);
+        index::run(&self.db_path, &self.cache).unwrap();
+        stats
     }
 
     fn db(&self) -> Db {
@@ -272,7 +283,7 @@ fn a_rename_keeps_the_hash_the_tags_and_the_finished_stages() {
     std::fs::rename(harness.clips.join(VIDEO), &renamed).unwrap();
     let stats = harness.scan();
     assert_eq!(stats.added, 1);
-    assert_eq!(stats.removed, 1);
+    assert_eq!(stats.missing, 1);
 
     let db = harness.db();
     let row = files::by_path(db.conn(), &renamed).unwrap().unwrap();
@@ -469,4 +480,125 @@ fn a_still_with_no_text_is_read_and_records_nothing() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn a_deleted_file_keeps_its_tags_until_it_comes_back() {
+    let harness = Harness::new();
+    harness.scan();
+    let still = harness.clips.join(STILL);
+    {
+        let db = harness.db();
+        let row = files::by_path(db.conn(), &still).unwrap().unwrap();
+        tags::attach(db.conn(), &row.hash, "doughnut").unwrap();
+        file_buddy::db::fts::refresh(db.conn(), row.id).unwrap();
+    }
+    assert_eq!(harness.find("doughnut").len(), 1);
+
+    let bytes = std::fs::read(&still).unwrap();
+    std::fs::remove_file(&still).unwrap();
+    let stats = harness.scan();
+    assert_eq!(stats.missing, 1);
+    assert!(harness.find("doughnut").is_empty());
+    assert_eq!(files::all(harness.db().conn()).unwrap().len(), 2);
+
+    std::fs::write(&still, &bytes).unwrap();
+    let stats = harness.scan();
+    assert_eq!(stats.missing, 0);
+    assert_eq!(stats.added, 0, "the row came back, it was not added again");
+    assert_eq!(harness.find("doughnut").len(), 1);
+    assert_eq!(harness.job(&still, Stage::Probe).1, 1, "the probe ran once");
+}
+
+#[test]
+fn the_watcher_indexes_a_new_file() {
+    let harness = Harness::new();
+    harness.scan();
+    let new = harness.clips.join("a few small beers.mp4");
+    std::fs::copy(harness.clips.join(VIDEO), &new).unwrap();
+
+    let stats = harness.apply(std::slice::from_ref(&new));
+
+    assert_eq!(stats.added, 1);
+    let db = harness.db();
+    let row = files::by_path(db.conn(), &new).unwrap().unwrap();
+    assert_eq!(row.state, "ready", "the copy inherited the probe");
+    assert_eq!(harness.find("beers"), vec!["a few small beers.mp4"]);
+}
+
+#[test]
+fn the_watcher_follows_a_move_by_the_bytes() {
+    let harness = Harness::new();
+    harness.scan();
+    let from = harness.clips.join(VIDEO);
+    let into = harness.clips.join("moved");
+    std::fs::create_dir(&into).unwrap();
+    let to = into.join(VIDEO);
+    let hash_before = files::by_path(harness.db().conn(), &from)
+        .unwrap()
+        .unwrap()
+        .hash;
+    std::fs::rename(&from, &to).unwrap();
+
+    let stats = harness.apply(&[from.clone(), to.clone()]);
+
+    assert_eq!(stats.moved, 1, "{stats:?}");
+    assert_eq!(stats.added, 0);
+    assert_eq!(stats.missing, 0);
+    let db = harness.db();
+    assert!(files::by_path(db.conn(), &from).unwrap().is_none());
+    assert_eq!(
+        files::by_path(db.conn(), &to).unwrap().unwrap().hash,
+        hash_before
+    );
+    assert_eq!(files::all(db.conn()).unwrap().len(), 3);
+    assert_eq!(harness.job(&to, Stage::Probe).1, 1, "nothing ran again");
+}
+
+#[test]
+fn the_watcher_marks_a_deleted_folder_missing() {
+    let harness = Harness::new();
+    let inner = harness.clips.join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    std::fs::copy(harness.clips.join(STILL), inner.join(STILL)).unwrap();
+    harness.scan();
+    assert_eq!(files::all(harness.db().conn()).unwrap().len(), 4);
+
+    std::fs::remove_dir_all(&inner).unwrap();
+    let stats = harness.apply(std::slice::from_ref(&inner));
+
+    // The copy shares its bytes with the still that stays, so its row is
+    // redundant and goes.
+    assert_eq!(stats.missing, 1);
+    let db = harness.db();
+    assert!(
+        files::by_path(db.conn(), &inner.join(STILL))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(files::all(db.conn()).unwrap().len(), 3);
+}
+
+#[test]
+fn the_watcher_reports_what_changed_on_disk() {
+    let harness = Harness::new();
+    harness.scan();
+    let ignore = globset::GlobSetBuilder::new().build().unwrap();
+    let watcher = watch::watch(std::slice::from_ref(&harness.clips), &ignore).unwrap();
+
+    let new = harness.clips.join("a few small beers.mp4");
+    std::fs::copy(harness.clips.join(VIDEO), &new).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let batch = loop {
+        if let Some(batch) = watcher.batch() {
+            break batch;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher said nothing"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(batch.contains(&new), "{batch:?}");
 }

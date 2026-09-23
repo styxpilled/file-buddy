@@ -91,7 +91,9 @@ pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
     match existing {
         Some((id, hash)) if hash == file.hash => {
             conn.execute(
-                "UPDATE files SET filename = ?2, size = ?3, mtime = ?4, seen_at = ?5 WHERE id = ?1",
+                "UPDATE files SET filename = ?2, size = ?3, mtime = ?4, seen_at = ?5,
+                        missing_at = NULL
+                 WHERE id = ?1",
                 params![id, filename, file.size as i64, file.mtime, now()],
             )?;
             Ok((id, Upsert::Unchanged))
@@ -100,7 +102,8 @@ pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
             conn.execute(
                 "UPDATE files SET hash = ?2, filename = ?3, kind = ?4, size = ?5, mtime = ?6,
                         duration = NULL, width = NULL, height = NULL, video_codec = NULL,
-                        audio_codec = NULL, state = 'pending', error = NULL, seen_at = ?7
+                        audio_codec = NULL, state = 'pending', error = NULL, seen_at = ?7,
+                        missing_at = NULL
                  WHERE id = ?1",
                 params![
                     id,
@@ -142,7 +145,8 @@ fn inherit_from_duplicate(conn: &Connection, id: i64, hash: &str) -> Result<()> 
         "UPDATE files SET kind = source.kind, duration = source.duration, width = source.width,
                 height = source.height, video_codec = source.video_codec,
                 audio_codec = source.audio_codec, state = source.state, error = source.error
-         FROM (SELECT * FROM files WHERE hash = ?2 AND id <> ?1 LIMIT 1) AS source
+         FROM (SELECT * FROM files WHERE hash = ?2 AND id <> ?1 AND missing_at IS NULL LIMIT 1)
+              AS source
          WHERE files.id = ?1",
         params![id, hash],
     )?;
@@ -178,7 +182,7 @@ pub fn mark_failed(conn: &Connection, hash: &str, error: &str) -> Result<()> {
 }
 
 pub fn by_hash(conn: &Connection, hash: &str) -> Result<Vec<FileRow>> {
-    let mut statement = conn.prepare(&format!("{SELECT} WHERE hash = ?1"))?;
+    let mut statement = conn.prepare(&format!("{PRESENT} AND hash = ?1"))?;
     let rows = statement.query_map([hash], read_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -191,7 +195,7 @@ pub fn by_path(conn: &Connection, path: &Path) -> Result<Option<FileRow>> {
 }
 
 pub fn all(conn: &Connection) -> Result<Vec<FileRow>> {
-    let mut statement = conn.prepare(&format!("{SELECT} ORDER BY path"))?;
+    let mut statement = conn.prepare(&format!("{PRESENT} ORDER BY path"))?;
     let rows = statement.query_map([], read_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
@@ -206,8 +210,40 @@ pub fn set_path(conn: &Connection, id: i64, path: &Path) -> Result<()> {
     fts::refresh(conn, id)
 }
 
-/// Paths that no longer exist on disk, removed with everything keyed to them.
-pub fn remove_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> {
+/// The files at this path, or under it when a whole folder is gone.
+pub fn rows_under(conn: &Connection, path: &Path) -> Result<Vec<FileRow>> {
+    let prefix = format!("{}{}", path.to_string_lossy(), std::path::MAIN_SEPARATOR);
+    let mut statement = conn.prepare(&format!(
+        "{PRESENT} AND (path = ?1 OR substr(path, 1, length(?2)) = ?2)"
+    ))?;
+    let rows = statement.query_map(params![path.to_string_lossy(), prefix], read_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// A path that is gone. The row stays, so the tags and the finished stages of
+/// these bytes come back with the file. A row whose bytes a present path still
+/// holds carries nothing of its own, so that one goes.
+pub fn mark_gone(conn: &Connection, id: i64) -> Result<()> {
+    let redundant = conn.execute(
+        "DELETE FROM files WHERE id = ?1 AND EXISTS (
+             SELECT 1 FROM files AS other
+             WHERE other.hash = files.hash AND other.id <> files.id
+               AND other.missing_at IS NULL)",
+        [id],
+    )?;
+    if redundant == 0 {
+        conn.execute(
+            "UPDATE files SET missing_at = ?2 WHERE id = ?1 AND missing_at IS NULL",
+            params![id, now()],
+        )?;
+    }
+    // Deleted, so the index row goes with it. Missing, so it is out of the way
+    // until the file comes back.
+    fts::refresh(conn, id)
+}
+
+/// Mark every path that the walk did not see. Returns how many are now missing.
+pub fn mark_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> {
     let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "CREATE TEMP TABLE IF NOT EXISTS seen (id INTEGER PRIMARY KEY)",
@@ -220,14 +256,16 @@ pub fn remove_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> 
             insert.execute([id])?;
         }
     }
-    transaction.execute(
-        "DELETE FROM fts WHERE rowid IN (SELECT id FROM files WHERE id NOT IN (SELECT id FROM seen))",
-        [],
-    )?;
-    let removed = transaction.execute(
-        "DELETE FROM files WHERE id NOT IN (SELECT id FROM seen)",
-        [],
-    )?;
+    let unseen: Vec<i64> = {
+        let mut statement = transaction.prepare(
+            "SELECT id FROM files WHERE missing_at IS NULL AND id NOT IN (SELECT id FROM seen)",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    for id in &unseen {
+        mark_gone(&transaction, *id)?;
+    }
     // Stage results of bytes that no file holds any more.
     for table in ["segments", "ocr", "jobs"] {
         transaction.execute(
@@ -236,7 +274,7 @@ pub fn remove_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> 
         )?;
     }
     transaction.commit()?;
-    Ok(removed)
+    Ok(unseen.len())
 }
 
 /// The filename as the search index holds it.
@@ -246,6 +284,11 @@ pub fn indexed_filename(filename: &str) -> String {
 
 pub(crate) const SELECT: &str =
     "SELECT id, path, hash, filename, kind, size, duration, state FROM files";
+
+/// The same, of the files that are on disk. Every screen uses this one.
+pub(crate) const PRESENT: &str =
+    "SELECT id, path, hash, filename, kind, size, duration, state FROM files
+     WHERE missing_at IS NULL";
 
 pub(crate) fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     let kind: String = row.get(4)?;

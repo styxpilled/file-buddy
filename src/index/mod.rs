@@ -5,6 +5,8 @@ pub mod jobs;
 pub mod pipeline;
 pub mod scan;
 pub mod stages;
+pub mod watch;
 
 pub use pipeline::{PipelineStats, StageStats, read_text, run, transcribe};
 pub use scan::ScanStats;
+pub use watch::{WatchStats, Watcher};

@@ -102,7 +102,7 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
                 snippet(fts, 2, '', '', '…', 12),
                 snippet(fts, 3, '', '', '…', 12)
          FROM fts JOIN files f ON f.id = fts.rowid
-         WHERE fts MATCH ?1{filter}
+         WHERE fts MATCH ?1 AND f.missing_at IS NULL{filter}
          ORDER BY score
          LIMIT ?{}",
         values.len()
@@ -138,13 +138,13 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
 pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
     let mut values = Vec::new();
     let filter = match kind_filter(request, &mut values, "kind") {
-        Some(clause) => format!(" WHERE {clause}"),
+        Some(clause) => format!(" AND {clause}"),
         None => String::new(),
     };
     values.push(Value::Integer(request.limit as i64));
     let sql = format!(
         "SELECT id, path, hash, filename, kind, size, duration, state
-         FROM files{filter} ORDER BY mtime DESC LIMIT ?{}",
+         FROM files WHERE missing_at IS NULL{filter} ORDER BY mtime DESC LIMIT ?{}",
         values.len()
     );
 

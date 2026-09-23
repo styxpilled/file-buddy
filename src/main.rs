@@ -5,8 +5,8 @@ use anyhow::Result;
 use file_buddy::db::Db;
 use file_buddy::ui::{self, FileBuddy};
 use file_buddy::{Config, paths};
-use gpui::prelude::*;
 use gpui::{App, WindowOptions, px, size};
+use gpui::{TitlebarOptions, prelude::*};
 use gpui_kit::assets::Assets;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 
@@ -33,6 +33,10 @@ fn main() -> Result<()> {
                     size(px(1280.), px(800.)),
                     cx,
                 ))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("file-buddy".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             cx.open_window(options, |window, cx| {
