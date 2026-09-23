@@ -2,6 +2,7 @@
 //! and the two videos that may play. The files beside this one only draw it.
 
 mod chips;
+mod folders;
 mod grid;
 mod pages;
 mod preview;
@@ -42,6 +43,7 @@ use crate::index::jobs::{self, Stage};
 use crate::index::watch::{self, WatchStats};
 use crate::media::Kind;
 use crate::paths;
+use crate::search::folder::{self as folder_list, Entry};
 use crate::search::{self, Hit, Signal};
 
 /// How long the selection must rest before the side pane opens a decoder. Held
@@ -77,6 +79,7 @@ const INDEX_REFRESH: Duration = Duration::from_secs(30);
 /// is how long the rename waits for it.
 const RENAME_RETRY: Duration = Duration::from_millis(50);
 const RENAME_TRIES: usize = 20;
+const BROWSE_PLACEHOLDER: &str = "Type a few words you remember";
 
 gpui_kit::actions!(
     file_buddy,
@@ -92,6 +95,8 @@ gpui_kit::actions!(
         VolumeUp,
         VolumeDown,
         CopyFile,
+        Activate,
+        GoUp,
         RevealFile,
         OpenFile,
         TagFiles,
@@ -101,6 +106,7 @@ gpui_kit::actions!(
         PreviousSuggestion,
         RenameFile,
         ShowBrowse,
+        ShowFolders,
         ShowReview,
         ShowSettings,
         SaveSettings,
@@ -125,7 +131,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f", FocusQuery, grid),
         KeyBinding::new("m", ToggleMuted, grid),
         KeyBinding::new("space", TogglePaused, grid),
-        KeyBinding::new("enter", CopyFile, grid),
+        KeyBinding::new("enter", Activate, grid),
+        KeyBinding::new("backspace", GoUp, grid),
         KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
@@ -135,8 +142,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-r", RenameFile, Some("FileBuddy")),
         KeyBinding::new("f2", RenameFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-1", ShowBrowse, Some("FileBuddy")),
-        KeyBinding::new("ctrl-2", ShowReview, Some("FileBuddy")),
-        KeyBinding::new("ctrl-3", ShowSettings, Some("FileBuddy")),
+        KeyBinding::new("ctrl-2", ShowFolders, Some("FileBuddy")),
+        KeyBinding::new("ctrl-3", ShowReview, Some("FileBuddy")),
+        KeyBinding::new("ctrl-4", ShowSettings, Some("FileBuddy")),
         KeyBinding::new("ctrl-s", SaveSettings, Some("FileBuddy")),
         KeyBinding::new("alt-1", ReviewDuplicates, Some("FileBuddy")),
         KeyBinding::new("alt-2", ReviewLong, Some("FileBuddy")),
@@ -163,11 +171,15 @@ pub struct FileBuddy {
     config: Config,
     cache: PathBuf,
     input: Entity<InputState>,
+    /// What the search box shows while it is empty. It changes with the folder.
+    placeholder: SharedString,
     /// Held while the search box is not focused, so the window keys arrive.
     focus: FocusHandle,
     panes: Entity<ResizableState>,
     scroll: VirtualListScrollHandle,
-    results: Vec<Hit>,
+    results: Vec<Entry>,
+    /// The results are the contents of a folder, not the answer to a query.
+    listing: bool,
     selected: usize,
     /// The chips that are on. All three by default.
     kinds: Vec<Kind>,
@@ -210,6 +222,10 @@ pub struct FileBuddy {
     menu_open: bool,
     /// The Settings page, when it is open. It holds the unsaved form.
     settings: Option<Settings>,
+    folders_open: bool,
+    /// The folder the Folders page shows, or `None` for the list of roots. It
+    /// stays when the page closes, so the page opens where the user left it.
+    folder: Option<PathBuf>,
     scanning: bool,
     /// Settings saved new folders while a scan ran, so another scan follows it.
     rescan_after: bool,
@@ -229,6 +245,7 @@ pub struct FileBuddy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Page {
     Browse,
+    Folders,
     Review,
     Settings,
 }
@@ -297,8 +314,7 @@ impl FileBuddy {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Type a few words you remember"));
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder(BROWSE_PLACEHOLDER));
         cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.run_search(cx);
@@ -312,10 +328,12 @@ impl FileBuddy {
             config: config.clone(),
             cache: cache.to_path_buf(),
             input,
+            placeholder: BROWSE_PLACEHOLDER.into(),
             focus: cx.focus_handle(),
             panes: cx.new(|_| ResizableState::default()),
             scroll: VirtualListScrollHandle::new(),
             results: Vec::new(),
+            listing: false,
             selected: 0,
             kinds: vec![Kind::Video, Kind::Animated, Kind::Still],
             columns: 1,
@@ -340,6 +358,8 @@ impl FileBuddy {
             review: None,
             menu_open: false,
             settings: None,
+            folders_open: false,
+            folder: None,
             scanning: false,
             rescan_after: false,
             watcher: None,
@@ -599,7 +619,15 @@ impl FileBuddy {
 
     fn fetch_results(&mut self, cx: &mut Context<Self>) {
         let text = self.input.read(cx).value().to_string();
-        let request = search::Request::new(text).kinds(self.kinds.clone());
+        self.listing = self.folders_open && text.trim().is_empty();
+        if self.listing {
+            self.list_folder();
+            return;
+        }
+        let within = self.folders_open.then(|| self.folder.clone()).flatten();
+        let request = search::Request::new(text)
+            .kinds(self.kinds.clone())
+            .within(within);
         match search::search(self.db.conn(), &request, &self.config.weights) {
             Ok(hits) => {
                 self.status = match hits.len() {
@@ -607,13 +635,120 @@ impl FileBuddy {
                     1 => "1 result".into(),
                     n => format!("{n} results").into(),
                 };
-                self.results = hits;
+                self.results = hits.into_iter().map(Entry::File).collect();
             }
             Err(e) => {
                 log::error!("search failed: {e:#}");
                 self.status = format!("search failed: {e:#}").into();
                 self.results.clear();
             }
+        }
+    }
+
+    /// The contents of the folder the Folders page shows, or the roots.
+    fn list_folder(&mut self) {
+        // The folder can be deleted, or its root taken out of the settings,
+        // while the page shows it.
+        while let Some(dir) = &self.folder
+            && !(dir.is_dir() && self.config.roots.iter().any(|root| dir.starts_with(root)))
+        {
+            self.folder = self.parent_folder(dir);
+        }
+        let Some(dir) = &self.folder else {
+            self.results = self
+                .config
+                .roots
+                .iter()
+                .cloned()
+                .map(Entry::Folder)
+                .collect();
+            self.status = folders_counted(self.results.len()).into();
+            return;
+        };
+        let listed = self
+            .config
+            .ignore_set()
+            .and_then(|ignore| folder_list::list(self.db.conn(), dir, &ignore, &self.kinds));
+        match listed {
+            Ok(entries) => {
+                let folders = entries
+                    .iter()
+                    .filter(|entry| matches!(entry, Entry::Folder(_)))
+                    .count();
+                let files = entries.len() - folders;
+                self.status = match folders {
+                    0 => counted(files).into(),
+                    n => format!("{}, {}", folders_counted(n), counted(files)).into(),
+                };
+                self.results = entries;
+            }
+            Err(e) => {
+                log::error!("listing {} failed: {e:#}", dir.display());
+                self.status = format!("cannot read the folder: {e:#}").into();
+                self.results.clear();
+            }
+        }
+    }
+
+    /// One level up, or `None` from a root. Nothing above a root is shown.
+    fn parent_folder(&self, dir: &Path) -> Option<PathBuf> {
+        if self.config.roots.iter().any(|root| root == dir) {
+            return None;
+        }
+        dir.parent()
+            .filter(|parent| {
+                self.config
+                    .roots
+                    .iter()
+                    .any(|root| parent.starts_with(root))
+            })
+            .map(Path::to_path_buf)
+    }
+
+    /// Show another folder. A query searches the folder it was typed in, so
+    /// it goes when the folder changes.
+    pub(super) fn open_folder(
+        &mut self,
+        folder: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let left = std::mem::replace(&mut self.folder, folder);
+        if !self.input.read(cx).value().is_empty() {
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
+        self.run_search(cx);
+        // Up a level, the folder the user came out of stays selected.
+        if let Some(left) = left
+            && let Some(at) = self
+                .results
+                .iter()
+                .position(|entry| matches!(entry, Entry::Folder(path) if *path == left))
+        {
+            self.select(at, cx);
+        }
+    }
+
+    /// Backspace on the Folders page.
+    fn go_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.folders_open {
+            return;
+        }
+        if let Some(dir) = &self.folder {
+            let parent = self.parent_folder(dir);
+            self.open_folder(parent, window, cx);
+        }
+    }
+
+    /// Enter, or a double click. A folder opens; a file goes on the clipboard.
+    pub(super) fn activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.results.get(self.selected) {
+            Some(Entry::Folder(path)) => {
+                let path = path.clone();
+                self.open_folder(Some(path), window, cx);
+            }
+            _ => self.copy_selected(cx),
         }
     }
 
@@ -644,14 +779,14 @@ impl FileBuddy {
         if self.review.is_some() {
             return;
         }
-        let was = self.selected_hit().map(|hit| hit.file.hash.clone());
+        let was = self.results.get(self.selected).map(Entry::key);
         self.fetch_results(cx);
 
         // Follow the file, not the row. A tag reorders the results, so the row
         // the selection sat on can now hold something else, and taking the tag
         // that found a file off it drops the file out of the results entirely.
         self.selected = was
-            .and_then(|hash| self.results.iter().position(|hit| hit.file.hash == hash))
+            .and_then(|key| self.results.iter().position(|entry| entry.key() == key))
             .unwrap_or_else(|| self.selected.min(self.results.len().saturating_sub(1)));
 
         // Both of these are about files that were on screen a moment ago. A
@@ -661,6 +796,7 @@ impl FileBuddy {
         self.marked.retain(|hash| {
             self.results
                 .iter()
+                .filter_map(Entry::hit)
                 .any(|hit| hit.file.hash.as_str() == hash.as_str())
         });
         self.preloaded = None;
@@ -673,8 +809,12 @@ impl FileBuddy {
         cx.notify();
     }
 
-    fn selected_hit(&self) -> Option<&Hit> {
-        self.results.get(self.selected)
+    fn hit_at(&self, index: usize) -> Option<&Hit> {
+        self.results.get(index).and_then(Entry::hit)
+    }
+
+    pub(super) fn selected_hit(&self) -> Option<&Hit> {
+        self.hit_at(self.selected)
     }
 
     pub(super) fn preview_video(&self) -> Option<&Video> {
@@ -714,7 +854,7 @@ impl FileBuddy {
     }
 
     fn focus_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page() != Page::Browse {
+        if !matches!(self.page(), Page::Browse | Page::Folders) {
             return;
         }
         let handle = self.input.read(cx).focus_handle(cx);
@@ -865,7 +1005,7 @@ impl FileBuddy {
             return;
         }
         self.preloaded = None;
-        let Some(hit) = self.results.get(index) else {
+        let Some(hit) = self.hit_at(index) else {
             return;
         };
         if hit.file.kind == Kind::Still {
@@ -951,7 +1091,7 @@ impl FileBuddy {
         if playing == Some(index) {
             return;
         }
-        let Some(hit) = self.results.get(index) else {
+        let Some(hit) = self.hit_at(index) else {
             return;
         };
         // A still image does not react to hover. A tile is always silent.
@@ -984,11 +1124,11 @@ impl FileBuddy {
         cx.notify();
     }
 
-    /// The selected file, if it is still on disk. The index is a snapshot, so a
+    /// The selected path, if it is still on disk. The index is a snapshot, so a
     /// file can be gone while its tile is still on screen, and every action
     /// against a missing file fails silently in the platform call.
     fn selected_file(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
-        let path = self.selected_hit()?.file.path.clone();
+        let path = self.results.get(self.selected)?.path().to_path_buf();
         if !path.exists() {
             self.flash("the file is gone", true, cx);
             return None;
@@ -1046,7 +1186,7 @@ impl FileBuddy {
     }
 
     pub(super) fn toggle_mark(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(hit) = self.results.get(index) else {
+        let Some(hit) = self.hit_at(index) else {
             return;
         };
         let hash = hit.file.hash.clone();
@@ -1125,7 +1265,7 @@ impl FileBuddy {
         } else if self.settings.is_some() && !self.focus.is_focused(window) {
             // A field of the form has focus. Leaving would drop what was typed.
             window.focus(&self.focus, cx);
-        } else if self.page() != Page::Browse {
+        } else if matches!(self.page(), Page::Review | Page::Settings) {
             self.show_page(Page::Browse, window, cx);
         } else if self.query_focused(window, cx) {
             self.blur_query(window, cx);
@@ -1334,7 +1474,12 @@ impl FileBuddy {
             self.preview_task = None;
         }
         let results = &self.results;
-        let holds = |index: &usize| results.get(*index).is_some_and(|hit| hit.file.hash == hash);
+        let holds = |index: &usize| {
+            results
+                .get(*index)
+                .and_then(Entry::hit)
+                .is_some_and(|hit| hit.file.hash == hash)
+        };
         if self.hovered.as_ref().is_some_and(|(at, _)| holds(at)) {
             self.hovered = None;
         }
@@ -1418,7 +1563,10 @@ impl FileBuddy {
         self.count_groups();
         if let (Some(target), Some(hit)) = (
             target,
-            self.results.iter_mut().find(|hit| hit.file.id == file.id),
+            self.results
+                .iter_mut()
+                .filter_map(Entry::hit_mut)
+                .find(|hit| hit.file.id == file.id),
         ) {
             hit.file.filename = files::FileRow::name_of(&target);
             hit.file.path = target;
@@ -1440,7 +1588,6 @@ impl FileBuddy {
             .is_some_and(|review| review.group == Group::PoorNames)
     }
 
-    /// `ctrl-shift-r`. Review opens on the first group that holds a file.
     /// Review opens on the first group that holds a file.
     fn open_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.review = Some(Review {
@@ -1477,15 +1624,17 @@ impl FileBuddy {
         }
     }
 
-    fn group_hits(&mut self, group: Group, cx: &mut Context<Self>) -> Vec<Hit> {
+    fn group_hits(&mut self, group: Group, cx: &mut Context<Self>) -> Vec<Entry> {
         match groups::items(self.db.conn(), group) {
             Ok(items) => items
                 .into_iter()
-                .map(|item| Hit {
-                    file: item.file,
-                    matched: item.note,
-                    score: 0.0,
-                    signal: Signal::Filename,
+                .map(|item| {
+                    Entry::File(Hit {
+                        file: item.file,
+                        matched: item.note,
+                        score: 0.0,
+                        signal: Signal::Filename,
+                    })
                 })
                 .collect(),
             Err(e) => {
@@ -1496,10 +1645,11 @@ impl FileBuddy {
         }
     }
 
-    /// A tab of Review, from a click or `ctrl-1` to `ctrl-4`. It opens Review
+    /// A tab of Review, from a click or `alt-1` to `alt-4`. It opens Review
     /// when it is closed.
     pub(super) fn show_group(&mut self, group: Group, window: &mut Window, cx: &mut Context<Self>) {
         self.settings = None;
+        self.folders_open = false;
         if self.review.is_none() {
             self.review = Some(Review {
                 group,
@@ -1527,7 +1677,9 @@ impl FileBuddy {
             // preview keeps that one as it is.
             self.preview_paused = false;
             if let Some(preview) = &self.preview
-                && preview.hash == self.results[0].file.hash
+                && self
+                    .hit_at(0)
+                    .is_some_and(|hit| hit.file.hash == preview.hash)
             {
                 preview.video.set_paused(false);
             }
@@ -1548,7 +1700,11 @@ impl FileBuddy {
         let was = self.selected_hit().map(|hit| hit.file.id);
         self.results = self.group_hits(group, cx);
         self.selected = was
-            .and_then(|id| self.results.iter().position(|hit| hit.file.id == id))
+            .and_then(|id| {
+                self.results
+                    .iter()
+                    .position(|entry| entry.hit().is_some_and(|hit| hit.file.id == id))
+            })
             .unwrap_or_else(|| self.selected.min(self.results.len().saturating_sub(1)));
         self.preloaded = None;
         self.hovered = None;
@@ -1567,12 +1723,14 @@ impl FileBuddy {
             Page::Review
         } else if self.settings.is_some() {
             Page::Settings
+        } else if self.folders_open {
+            Page::Folders
         } else {
             Page::Browse
         }
     }
 
-    /// A page tab, or `ctrl-1` to `ctrl-3`.
+    /// A page tab, or `ctrl-1` to `ctrl-4`.
     pub(super) fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         if page == self.page() {
             return;
@@ -1581,8 +1739,9 @@ impl FileBuddy {
         self.renamer = None;
         self.rename_task = None;
         window.focus(&self.focus, cx);
+        self.folders_open = page == Page::Folders;
         match page {
-            Page::Browse => {
+            Page::Browse | Page::Folders => {
                 self.review = None;
                 self.settings = None;
                 self.run_search(cx);
@@ -1703,6 +1862,20 @@ impl FileBuddy {
         self.run_search(cx);
     }
 
+    /// On the Folders page the search box says where it searches.
+    fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted: SharedString = match (self.folders_open, &self.folder) {
+            (false, _) => BROWSE_PLACEHOLDER.into(),
+            (true, None) => "Search every folder".into(),
+            (true, Some(dir)) => format!("Search in {}", folders::display(dir)).into(),
+        };
+        if self.placeholder != wanted {
+            self.placeholder = wanted.clone();
+            self.input
+                .update(cx, |input, cx| input.set_placeholder(wanted, window, cx));
+        }
+    }
+
     /// The width the grid had in the last frame, which decides the columns.
     fn grid_width(&self, window: &Window, cx: &App) -> f32 {
         let sizes = self.panes.read(cx).sizes();
@@ -1716,6 +1889,7 @@ impl FileBuddy {
 impl Render for FileBuddy {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.hold_focus(window, cx);
+        self.sync_placeholder(window, cx);
         let width = self.grid_width(window, cx);
         self.columns = grid::columns(width);
 
@@ -1737,6 +1911,8 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.nudge_volume(true, cx)))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.nudge_volume(false, cx)))
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
+            .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
+            .on_action(cx.listener(|this, _: &GoUp, window, cx| this.go_up(window, cx)))
             .on_action(cx.listener(|this, _: &RevealFile, _, cx| this.reveal_selected(cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.open_selected(cx)))
             .on_action(cx.listener(|this, _: &TagFiles, window, cx| this.open_tagger(window, cx)))
@@ -1750,6 +1926,9 @@ impl Render for FileBuddy {
             )
             .on_action(cx.listener(|this, _: &ShowBrowse, window, cx| {
                 this.show_page(Page::Browse, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowFolders, window, cx| {
+                this.show_page(Page::Folders, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ShowReview, window, cx| {
                 this.show_page(Page::Review, window, cx)
@@ -1878,9 +2057,14 @@ impl Render for FileBuddy {
                     h_resizable("panes")
                         .with_state(&self.panes)
                         .child(
-                            resizable_panel()
-                                .size(px(width))
-                                .child(grid::grid(self, cx)),
+                            resizable_panel().size(px(width)).child(
+                                v_flex()
+                                    .size_full()
+                                    .when(self.folders_open, |panel| {
+                                        panel.child(folders::breadcrumb(self, cx))
+                                    })
+                                    .child(div().flex_1().min_h_0().child(grid::grid(self, cx))),
+                            ),
                         )
                         .child(
                             resizable_panel()
@@ -1925,6 +2109,13 @@ fn open_video(path: &Path, buffer: usize) -> Option<Video> {
             log::warn!("cannot play {}: {e}", path.display());
             None
         }
+    }
+}
+
+fn folders_counted(folders: usize) -> String {
+    match folders {
+        1 => "1 folder".to_string(),
+        n => format!("{n} folders"),
     }
 }
 

@@ -101,7 +101,8 @@ Keyboard first. The mouse is optional.
   escape or a click outside it gives focus back to the window. Only the focused
   box takes typed characters, which leaves the letters free for the window.
 - Arrow keys move the selection in a virtual grid.
-- Enter copies the file to the clipboard as `CF_HDROP` and as path text.
+- Enter copies the file to the clipboard as `CF_HDROP` and as path text. On a
+  folder of the Folders page, Enter opens it.
   `ctrl-e` reveals it in Explorer, `ctrl-o` opens it in the default
   application. The header confirms a copy for a couple of seconds.
 - `m` mutes the side pane. `space` plays or pauses it, for that clip only.
@@ -132,12 +133,23 @@ Keyboard first. The mouse is optional.
   the stem only; the extension stays. Enter saves.
 - Escape undoes one thing at a time, the most recent first: it closes the tag
   panel, or closes the rename input, or takes focus out of a Settings field, or
-  goes back to Browse, or gives focus back from the search box, or clears the
+  goes back to Browse from Review or Settings, or gives focus back from the
+  search box, or clears the
   marks. A click outside the tag panel closes it
   too.
 
-The window has three pages, with tabs at the start of the header: Browse,
-Review and Settings. `ctrl-1` to `ctrl-3` switch between them.
+The window has four pages, with tabs at the start of the header: Browse,
+Folders, Review and Settings. `ctrl-1` to `ctrl-4` switch between them.
+
+The Folders page follows the folders of the roots. It opens on the list of
+roots and stays in the last folder when the user leaves it. A double click or
+Enter opens a folder, Backspace goes up one level, and each part of the
+breadcrumb above the grid opens its folder. Folders come first, then the files,
+by name. The search box searches the current folder and every folder under it,
+and it says so in its placeholder. Opening another folder clears the query.
+Files that no search finds come last, coloured by why: yellow for a file that
+is not probed or not indexed yet, red for one an ignore glob matches, and gray
+for one that is not a media file. The chips limit only the indexed files.
 
 The Review page collects every file that needs a person: duplicate groups,
 files over 5 minutes, files that cannot be indexed, and files with no proper

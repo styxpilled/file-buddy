@@ -4,12 +4,17 @@
 its window. Use it when a change only shows itself in the real window. Tests
 cannot see focus, key bindings or layout.
 
-    cargo run &
-    pwsh -File scripts/drive.ps1 -OutDir <scratch> -Steps 'keys:sopr','shot:narrowed','keys:{ESC}','shot:cleared'
+    cargo run --bin file-buddy &
+    & ./scripts/drive.ps1 -OutDir <scratch> -Steps @('keys:sopr','shot:narrowed','keys:{ESC}','shot:cleared')
+
+Call it from PowerShell as above. `pwsh -File` gives the whole list to `-Steps`
+as one string.
 
 It prints the path of each picture. Steps run in order: `keys:<SendKeys>`,
-`click:<x>,<y>`, `shot:<name>`, `wait:<milliseconds>`. `SendKeys` spells the
-special keys `{ESC}`, `{DOWN}`, `{ENTER}`, `{TAB}`. A click is measured from the
+`click:<x>,<y>`, `dblclick:<x>,<y>`, `scroll:<x>,<y>,<notches>`, `shot:<name>`,
+`wait:<milliseconds>`. Each step waits a moment after it, so two `click` steps
+are never a double click. `SendKeys` spells the special keys `{ESC}`, `{DOWN}`,
+`{ENTER}`, `{TAB}`. A click is measured from the
 top left corner of the window, which is where a picture of the window measures
 from too, so a button can be clicked at the coordinates it has in the last
 picture. Take a fresh picture first: the window may have moved or changed size.

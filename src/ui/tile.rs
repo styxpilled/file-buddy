@@ -1,15 +1,21 @@
-//! One result. A thumbnail until the pointer arrives, then the clip itself.
+//! One result. A thumbnail until the pointer arrives, then the clip itself. On
+//! the Folders page a tile can also be a folder, or a file the search cannot
+//! find, coloured by why.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, ClickEvent, Context, Window, div, img, px};
-use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
+use gpui::{AnyElement, App, ClickEvent, Context, Hsla, Window, div, img, px};
+use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
 use super::grid::{TILE_HEIGHT, TILE_WIDTH};
+use super::preview;
+use crate::db::files::{FileRow, State};
 use crate::media::Kind;
 use crate::paths;
-use crate::search::Signal;
+use crate::search::folder::{Entry, Stray};
+use crate::search::{Hit, Signal};
 use crate::ui::FileBuddy;
+use crate::ui::folders;
 
 pub fn tile(
     this: &FileBuddy,
@@ -17,12 +23,56 @@ pub fn tile(
     _window: &mut Window,
     cx: &mut Context<FileBuddy>,
 ) -> AnyElement {
-    let Some(hit) = this.results.get(index) else {
+    let Some(entry) = this.results.get(index) else {
         return div().into_any_element();
     };
     let selected = index == this.selected;
-    let marked = this.is_marked(hit);
+    let marked = entry.hit().is_some_and(|hit| this.is_marked(hit));
     let playing = this.hovered.as_ref().filter(|(i, _)| *i == index);
+
+    let (picture, name, name_color, line) = match entry {
+        Entry::File(hit) => {
+            let pending = hit.file.state == State::Pending.as_str();
+            (
+                thumbnail(this, hit, cx),
+                hit.file.filename.clone(),
+                if pending {
+                    cx.theme().warning
+                } else {
+                    cx.theme().foreground
+                },
+                file_line(this, hit, pending, cx),
+            )
+        }
+        Entry::Folder(path) => (
+            Icon::new(IconName::Folder)
+                .large()
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element(),
+            // The list of roots names each one in full.
+            match this.folder {
+                None => folders::display(path),
+                Some(_) => FileRow::name_of(path),
+            },
+            cx.theme().foreground,
+            div().into_any_element(),
+        ),
+        Entry::Stray { path, why } => {
+            let color = stray_color(*why, cx);
+            (
+                placeholder(
+                    &path
+                        .extension()
+                        .map(|extension| extension.to_string_lossy().to_lowercase())
+                        .unwrap_or_default(),
+                    cx,
+                ),
+                FileRow::name_of(path),
+                color,
+                note(why.as_str(), color),
+            )
+        }
+    };
 
     v_flex()
         .id(("tile", index))
@@ -38,7 +88,12 @@ pub fn tile(
                 this.toggle_mark(index, cx)
             } else {
                 this.select(index, cx);
-                this.renamer_follows(window, cx)
+                this.renamer_follows(window, cx);
+                if event.click_count() == 2
+                    && matches!(this.results.get(index), Some(Entry::Folder(_)))
+                {
+                    this.activate(window, cx);
+                }
             }
         }))
         .child(
@@ -61,7 +116,7 @@ pub fn tile(
                 // The thumbnail stays behind the clip. The element paints
                 // nothing until the decoder presents a frame, so dropping the
                 // thumbnail on hover left the tile empty for a moment.
-                .child(thumbnail(this, hit, cx))
+                .child(picture)
                 .when(marked, |container| {
                     container.child(
                         div()
@@ -100,33 +155,61 @@ pub fn tile(
             div()
                 .w_full()
                 .text_xs()
-                .text_color(cx.theme().foreground)
+                .text_color(name_color)
                 .truncate()
-                .child(hit.file.filename.clone()),
+                .child(name),
         )
+        .child(line)
+        .into_any_element()
+}
+
+/// The second line of a file. In a folder it is the facts of the file; in
+/// Review it is why the file is there; after a query it is what matched.
+fn file_line(this: &FileBuddy, hit: &Hit, pending: bool, cx: &App) -> AnyElement {
+    if pending {
+        return note("not probed yet", cx.theme().warning);
+    }
+    if this.listing {
+        return note(&preview::facts_text(&hit.file), cx.theme().muted_foreground);
+    }
+    h_flex()
+        .w_full()
+        .gap_1()
+        .items_center()
+        // In Review the second line is not a match, so it has no signal.
+        .when(this.review.is_none(), |line| {
+            line.child(badge(hit.signal, cx))
+        })
         .child(
-            h_flex()
-                .w_full()
-                .gap_1()
-                .items_center()
-                // In Review the second line is why the file is there, not a
-                // match, so it has no signal to show.
-                .when(this.review.is_none(), |line| {
-                    line.child(badge(hit.signal, cx))
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .truncate()
-                        .child(hit.matched.clone()),
-                ),
+            div()
+                .flex_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .truncate()
+                .child(hit.matched.clone()),
         )
         .into_any_element()
 }
 
-fn thumbnail(this: &FileBuddy, hit: &crate::search::Hit, cx: &App) -> AnyElement {
+fn note(text: &str, color: Hsla) -> AnyElement {
+    div()
+        .w_full()
+        .text_xs()
+        .text_color(color)
+        .truncate()
+        .child(text.to_string())
+        .into_any_element()
+}
+
+fn stray_color(why: Stray, cx: &App) -> Hsla {
+    match why {
+        Stray::Unindexed => cx.theme().warning,
+        Stray::Ignored => cx.theme().danger,
+        Stray::Unmatched => cx.theme().muted_foreground,
+    }
+}
+
+fn thumbnail(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
     let path = paths::thumbnail_path(&this.cache, &hit.file.hash);
     if path.is_file() {
         return img(path)
@@ -134,14 +217,21 @@ fn thumbnail(this: &FileBuddy, hit: &crate::search::Hit, cx: &App) -> AnyElement
             .max_h(px(TILE_HEIGHT - 4.))
             .into_any_element();
     }
-    div()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(match hit.file.kind {
+    placeholder(
+        match hit.file.kind {
             Kind::Video => "video",
             Kind::Animated => "animation",
             Kind::Still => "image",
-        })
+        },
+        cx,
+    )
+}
+
+fn placeholder(text: &str, cx: &App) -> AnyElement {
+    div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child(text.to_string())
         .into_any_element()
 }
 

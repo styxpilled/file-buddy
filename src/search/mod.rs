@@ -1,7 +1,10 @@
 //! One FTS5 query over four columns, weighted by the config. `query` turns what
 //! the user typed into the expression this runs.
 
+pub mod folder;
 pub mod query;
+
+use std::path::PathBuf;
 
 use anyhow::Result;
 use rusqlite::types::Value;
@@ -9,7 +12,7 @@ use rusqlite::{Connection, params_from_iter};
 
 use self::query::build_match;
 use crate::config::Weights;
-use crate::db::files::FileRow;
+use crate::db::files::{self, FileRow};
 use crate::media::Kind;
 
 /// Which column gave a result its best score. The grid shows it as a badge.
@@ -48,6 +51,8 @@ pub struct Request {
     pub text: String,
     /// The kinds the chips allow. Empty means every kind.
     pub kinds: Vec<Kind>,
+    /// Only files under this folder, at any depth.
+    pub within: Option<PathBuf>,
     pub limit: usize,
 }
 
@@ -56,12 +61,18 @@ impl Request {
         Self {
             text: text.into(),
             kinds: Vec::new(),
+            within: None,
             limit: 500,
         }
     }
 
     pub fn kinds(mut self, kinds: Vec<Kind>) -> Self {
         self.kinds = kinds;
+        self
+    }
+
+    pub fn within(mut self, folder: Option<PathBuf>) -> Self {
+        self.within = folder;
         self
     }
 
@@ -84,10 +95,7 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
         Value::Real(weights.speech),
         Value::Real(weights.ocr),
     ];
-    let filter = match kind_filter(request, &mut values, "f.kind") {
-        Some(clause) => format!(" AND {clause}"),
-        None => String::new(),
-    };
+    let filter = filters(request, &mut values, "f.");
     values.push(Value::Integer(request.limit as i64));
 
     let sql = format!(
@@ -137,10 +145,7 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
 /// What the grid shows when the query is empty: the newest files first.
 pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
     let mut values = Vec::new();
-    let filter = match kind_filter(request, &mut values, "kind") {
-        Some(clause) => format!(" AND {clause}"),
-        None => String::new(),
-    };
+    let filter = filters(request, &mut values, "");
     values.push(Value::Integer(request.limit as i64));
     let sql = format!(
         "SELECT id, path, hash, filename, kind, size, duration, state
@@ -161,18 +166,25 @@ pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-/// `kind IN (?, ?)` for the chips, or `None` when every kind is allowed. There
-/// are three kinds, so a list of three is the same as no filter at all.
-fn kind_filter(request: &Request, values: &mut Vec<Value>, column: &str) -> Option<String> {
-    if request.kinds.is_empty() || request.kinds.len() >= 3 {
-        return None;
+/// The clauses for the chips and the folder, each with ` AND ` before it.
+/// `table` is the alias of `files` with its dot, or nothing.
+fn filters(request: &Request, values: &mut Vec<Value>, table: &str) -> String {
+    let mut clauses = String::new();
+    // There are three kinds, so a list of three is the same as no filter.
+    if !request.kinds.is_empty() && request.kinds.len() < 3 {
+        let mut places = Vec::new();
+        for kind in &request.kinds {
+            values.push(Value::Text(kind.as_str().to_string()));
+            places.push(format!("?{}", values.len()));
+        }
+        clauses += &format!(" AND {table}kind IN ({})", places.join(", "));
     }
-    let mut places = Vec::new();
-    for kind in &request.kinds {
-        values.push(Value::Text(kind.as_str().to_string()));
-        places.push(format!("?{}", values.len()));
+    if let Some(folder) = &request.within {
+        values.push(Value::Text(files::folder_prefix(folder)));
+        let at = values.len();
+        clauses += &format!(" AND substr({table}path, 1, length(?{at})) = ?{at}");
     }
-    Some(format!("{column} IN ({})", places.join(", ")))
+    clauses
 }
 
 fn read_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {

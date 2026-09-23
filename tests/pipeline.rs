@@ -11,6 +11,7 @@ use file_buddy::index::jobs::Stage;
 use file_buddy::index::{self, scan, watch};
 use file_buddy::media::Kind;
 use file_buddy::search;
+use file_buddy::search::folder::{self, Entry, Stray};
 
 const VIDEO: &str = "my honest reaction.mp4";
 const ANIMATION: &str = "silky anteater.gif";
@@ -601,4 +602,85 @@ fn the_watcher_reports_what_changed_on_disk() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
     assert!(batch.contains(&new), "{batch:?}");
+}
+
+#[test]
+fn a_folder_lists_its_folders_then_its_files_then_what_the_search_cannot_find() {
+    let harness = Harness::new();
+    let memes = harness.clips.join("memes");
+    std::fs::create_dir(&memes).unwrap();
+    std::fs::copy(harness.clips.join(STILL), memes.join("krispy copy.png")).unwrap();
+    harness.scan();
+    std::fs::write(harness.clips.join("notes.txt"), "not a clip").unwrap();
+    std::fs::copy(
+        harness.clips.join(ANIMATION),
+        harness.clips.join("late.gif"),
+    )
+    .unwrap();
+    std::fs::copy(harness.clips.join(STILL), harness.clips.join("secret.png")).unwrap();
+
+    let db = harness.db();
+    assert_eq!(
+        files::in_folder(db.conn(), &harness.clips).unwrap().len(),
+        3
+    );
+    let ignore = globset::GlobSetBuilder::new()
+        .add(globset::Glob::new("**/secret*").unwrap())
+        .build()
+        .unwrap();
+    let entries = folder::list(db.conn(), &harness.clips, &ignore, &[]).unwrap();
+    let listed: Vec<(String, &str)> = entries
+        .iter()
+        .map(|entry| {
+            let name = files::FileRow::name_of(entry.path());
+            let what = match entry {
+                Entry::Folder(_) => "folder",
+                Entry::File(_) => "file",
+                Entry::Stray { why, .. } => why.as_str(),
+            };
+            (name, what)
+        })
+        .collect();
+    let expected = [
+        ("memes", "folder"),
+        (STILL, "file"),
+        (VIDEO, "file"),
+        (ANIMATION, "file"),
+        ("late.gif", Stray::Unindexed.as_str()),
+        ("secret.png", Stray::Ignored.as_str()),
+        ("notes.txt", Stray::Unmatched.as_str()),
+    ];
+    let expected: Vec<(String, &str)> = expected
+        .into_iter()
+        .map(|(name, what)| (name.to_string(), what))
+        .collect();
+    assert_eq!(listed, expected);
+
+    // The chips limit the indexed files only.
+    let stills = folder::list(db.conn(), &harness.clips, &ignore, &[Kind::Still]).unwrap();
+    assert_eq!(stills.iter().filter_map(Entry::hit).count(), 1);
+    assert_eq!(stills.len(), 5);
+}
+
+#[test]
+fn a_search_in_a_folder_finds_only_the_files_under_it() {
+    let harness = Harness::new();
+    let memes = harness.clips.join("memes");
+    std::fs::create_dir(&memes).unwrap();
+    std::fs::copy(harness.clips.join(STILL), memes.join("krispy copy.png")).unwrap();
+    harness.scan();
+
+    let db = harness.db();
+    let find = |within: Option<PathBuf>| -> Vec<String> {
+        let request = search::Request::new("krispy").within(within);
+        let mut names: Vec<String> = search::search(db.conn(), &request, &Weights::default())
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.file.filename)
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(find(Some(memes)), vec!["krispy copy.png"]);
+    assert_eq!(find(None), vec!["krispy copy.png", STILL]);
 }

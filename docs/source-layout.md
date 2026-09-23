@@ -70,6 +70,7 @@ Two things follow from that:
       search/         the ranked query
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
+        folder.rs     one folder of the roots, and why a file in it is not found
       ui/             the window. The only directory that knows about GPUI
         mod.rs        the view that owns the state, the keys and the layout
         grid.rs       the virtual grid of results
@@ -78,7 +79,8 @@ Two things follow from that:
         tagger.rs     the tag input and its autocomplete
         renamer.rs    the rename input in the side pane
         review.rs     the Review group tabs
-        pages.rs      the Browse, Review and Settings tabs
+        pages.rs      the Browse, Folders, Review and Settings tabs
+        folders.rs    the breadcrumb of the Folders page
         settings.rs   the Settings form
         chips.rs      the media kind filters
 

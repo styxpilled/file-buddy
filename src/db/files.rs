@@ -212,12 +212,36 @@ pub fn set_path(conn: &Connection, id: i64, path: &Path) -> Result<()> {
 
 /// The files at this path, or under it when a whole folder is gone.
 pub fn rows_under(conn: &Connection, path: &Path) -> Result<Vec<FileRow>> {
-    let prefix = format!("{}{}", path.to_string_lossy(), std::path::MAIN_SEPARATOR);
     let mut statement = conn.prepare(&format!(
         "{PRESENT} AND (path = ?1 OR substr(path, 1, length(?2)) = ?2)"
     ))?;
-    let rows = statement.query_map(params![path.to_string_lossy(), prefix], read_row)?;
+    let rows = statement.query_map(
+        params![path.to_string_lossy(), folder_prefix(path)],
+        read_row,
+    )?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The files directly in this folder, not in the folders under it.
+pub fn in_folder(conn: &Connection, dir: &Path) -> Result<Vec<FileRow>> {
+    let mut statement = conn.prepare(&format!(
+        "{PRESENT} AND substr(path, 1, length(?1)) = ?1
+           AND instr(substr(path, length(?1) + 1), '\\') = 0
+           AND instr(substr(path, length(?1) + 1), '/') = 0"
+    ))?;
+    let rows = statement.query_map([folder_prefix(dir)], read_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// What every path under this folder starts with. A root can be written with
+/// a separator at the end, and the paths under it then have only that one.
+pub fn folder_prefix(dir: &Path) -> String {
+    let dir = dir.to_string_lossy();
+    if dir.ends_with(['/', '\\']) {
+        dir.into_owned()
+    } else {
+        format!("{dir}{}", std::path::MAIN_SEPARATOR)
+    }
 }
 
 /// A path that is gone. The row stays, so the tags and the finished stages of

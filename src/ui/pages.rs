@@ -1,4 +1,5 @@
-//! The page tabs at the start of the header: Browse, Review and Settings.
+//! The page tabs at the start of the header: Browse, Folders, Review and
+//! Settings.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context};
@@ -7,10 +8,11 @@ use gpui_kit::component::{Selectable, Sizable, h_flex};
 
 use crate::ui::{FileBuddy, Page, with_pointer};
 
-const PAGES: [(Page, &str, &str); 3] = [
+const PAGES: [(Page, &str, &str); 4] = [
     (Page::Browse, "Browse", "Ctrl+1"),
-    (Page::Review, "Review", "Ctrl+2"),
-    (Page::Settings, "Settings", "Ctrl+3"),
+    (Page::Folders, "Folders", "Ctrl+2"),
+    (Page::Review, "Review", "Ctrl+3"),
+    (Page::Settings, "Settings", "Ctrl+4"),
 ];
 
 pub fn tabs(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {

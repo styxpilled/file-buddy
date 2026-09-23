@@ -32,6 +32,10 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             .text_color(cx.theme().muted_foreground)
             .child(if this.review.is_some() {
                 "Nothing to review in this group."
+            } else if this.listing && this.folder.is_some() {
+                "This folder is empty."
+            } else if this.folders_open && !this.listing {
+                "Nothing in this folder matches."
             } else {
                 "Nothing here. Check the roots in file-buddy.toml."
             })

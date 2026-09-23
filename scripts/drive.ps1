@@ -2,13 +2,14 @@
 # bring the application forward, send keystrokes and save a picture of its
 # window. The terminal goes back to the size it had when this started.
 #
-#   pwsh -File scripts/drive.ps1 -Steps 'keys:sopr','shot:narrowed','keys:{ESC}','shot:cleared'
+#   & ./scripts/drive.ps1 -Steps @('keys:sopr','shot:narrowed','keys:{ESC}','shot:cleared')
 #
 # Steps run in order:
 #   keys:<SendKeys string>   what to type. See SendKeys for {ESC}, {DOWN}, {TAB}
 #   click:<x>,<y>            click at a point inside the window, measured from
 #                            its top left corner, which is where a picture of
 #                            the window measures from too
+#   dblclick:<x>,<y>         the same, twice, fast enough to be a double click
 #   scroll:<x>,<y>,<notches> turn the wheel over a point inside the window.
 #                            A positive count turns it away from the hand
 #   shot:<name>              save <OutDir>/<name>.png of the application window
@@ -72,13 +73,16 @@ function Get-MainWindow([string]$name) {
     return $process.MainWindowHandle
 }
 
-function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y) {
+function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$count = 1) {
     $rect = New-Object Drive.Win+RECT
     [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
     [Drive.Win]::SetCursorPos($rect.Left + $x, $rect.Top + $y) | Out-Null
     Start-Sleep -Milliseconds 120
-    [Drive.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-    [Drive.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+    for ($i = 0; $i -lt $count; $i++) {
+        [Drive.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+        [Drive.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 60
+    }
 }
 
 function Scroll-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$notches) {
@@ -134,6 +138,11 @@ try {
             'click' {
                 $x, $y = $value -split ',', 2
                 Click-InWindow $application ([int]$x) ([int]$y)
+                Start-Sleep -Milliseconds $SettleMs
+            }
+            'dblclick' {
+                $x, $y = $value -split ',', 2
+                Click-InWindow $application ([int]$x) ([int]$y) 2
                 Start-Sleep -Milliseconds $SettleMs
             }
             'scroll' {

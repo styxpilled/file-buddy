@@ -14,12 +14,14 @@ use gpui_kit::component::{
 };
 use gpui_video::video as video_element;
 
+use crate::db::files::FileRow;
 use crate::db::review::Group;
 use crate::db::{ocr as ocr_rows, segments, tags};
 use crate::index::jobs::{self, Stage};
 use crate::ocr::noise;
 use crate::paths;
 use crate::search::Hit;
+use crate::search::folder::Entry;
 use crate::ui::{
     CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
     with_pointer,
@@ -40,12 +42,22 @@ const DETAILS: [(Detail, &str); 3] = [
 
 pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> AnyElement {
     let Some(hit) = this.selected_hit() else {
+        let text = match this.results.get(this.selected) {
+            Some(Entry::Folder(_)) => "A folder. Enter opens it.".to_string(),
+            Some(Entry::Stray { path, why }) => {
+                format!("{}: {}", FileRow::name_of(path), why.as_str())
+            }
+            _ => "No selection".to_string(),
+        };
         return v_flex()
             .size_full()
+            .p(px(PADDING))
             .items_center()
             .justify_center()
+            .border_l_1()
+            .border_color(cx.theme().border)
             .text_color(cx.theme().muted_foreground)
-            .child("No selection")
+            .child(text)
             .into_any_element();
     };
 
@@ -337,20 +349,25 @@ fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
 }
 
 fn facts(hit: &Hit, cx: &App) -> AnyElement {
-    let mut parts = vec![hit.file.kind.as_str().to_string()];
-    if let Some(duration) = hit.file.duration {
-        parts.push(format!("{duration:.1}s"));
-    }
-    parts.push(format!("{:.1} MB", hit.file.size as f64 / 1_048_576.));
-    if hit.file.state != "ready" {
-        parts.push(hit.file.state.clone());
-    }
     h_flex()
         .gap_2()
         .text_xs()
         .text_color(cx.theme().muted_foreground)
-        .child(parts.join("  ·  "))
+        .child(facts_text(&hit.file))
         .into_any_element()
+}
+
+/// The kind, the length, the size, and the state when it is not ready.
+pub(super) fn facts_text(file: &FileRow) -> String {
+    let mut parts = vec![file.kind.as_str().to_string()];
+    if let Some(duration) = file.duration {
+        parts.push(format!("{duration:.1}s"));
+    }
+    parts.push(format!("{:.1} MB", file.size as f64 / 1_048_576.));
+    if file.state != "ready" {
+        parts.push(file.state.clone());
+    }
+    parts.join("  ·  ")
 }
 
 /// In Review, where the file is, and the whole error of a file that could not
