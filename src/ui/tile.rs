@@ -159,7 +159,7 @@ pub(super) fn click(
     }
 }
 
-/// The second line of a file. In a folder it is the facts of the file; in
+/// The second line of a file. With nothing typed it is the facts of the file; in
 /// Review it is why the file is there; after a query it is what matched.
 fn file_line(this: &FileBuddy, hit: &Hit, pending: bool, cx: &App) -> AnyElement {
     if pending {

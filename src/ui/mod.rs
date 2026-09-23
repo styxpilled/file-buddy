@@ -153,8 +153,8 @@ pub struct FileBuddy {
     panes: Entity<ResizableState>,
     scroll: VirtualListScrollHandle,
     results: Vec<Entry>,
-    /// The results are the contents of a folder, not the answer to a query or
-    /// a group of Review.
+    /// Nothing is typed, so the results are a list and not the answer to a
+    /// query: the newest files on Browse, or a folder on the Folders page.
     listing: bool,
     selected: usize,
     /// The chips that are on. All three by default.
@@ -319,8 +319,8 @@ impl FileBuddy {
     fn fetch_results(&mut self, cx: &mut Context<Self>) -> Vec<Entry> {
         let text = self.input.read(cx).value().to_string();
         let folders = self.page() == Page::Folders;
-        self.listing = folders && text.trim().is_empty();
-        let results = if self.listing {
+        self.listing = text.trim().is_empty();
+        let results = if folders && self.listing {
             self.list_folder()
         } else {
             let within = if folders { self.folder.clone() } else { None };

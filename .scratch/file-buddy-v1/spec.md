@@ -122,7 +122,8 @@ Keyboard first. The mouse is optional.
   with the lines the index leaves out struck through. The tab stays as the
   selection moves.
 - Each result shows the matched text and a badge: tag, filename, speech or
-  screen text.
+  screen text. With nothing typed there is no match, so it shows the kind,
+  the length and the size instead.
 - Chips filter by media kind. All are on by default.
 - `t` opens a tag input with autocomplete over the tags that already exist.
   Tags are lowercase. `x` marks the selection and ctrl-click marks a tile, so
