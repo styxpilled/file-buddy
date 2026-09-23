@@ -80,7 +80,8 @@ Two things follow from that:
         renamer.rs    the rename input in the side pane
         review.rs     the Review group tabs
         pages.rs      the Browse, Folders, Review and Settings tabs
-        folders.rs    the breadcrumb of the Folders page
+        folders.rs    the bar of the Folders page: breadcrumb and sort
+        table.rs      the table view of Browse, Folders and Review
         settings.rs   the Settings form
         chips.rs      the media kind filters
 

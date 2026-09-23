@@ -1,6 +1,8 @@
 //! Tags are the one kind of data the application cannot rebuild from the files.
 //! They belong to the content, so a rename keeps them.
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use rusqlite::{Connection, params, params_from_iter};
 
@@ -132,6 +134,21 @@ pub fn of_hash(conn: &Connection, hash: &str) -> Result<Vec<String>> {
     )?;
     let rows = statement.query_map([hash], |row| row.get(0))?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The tags of every file that has one, by hash, each list by name.
+pub fn by_hash(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
+    let mut statement = conn.prepare(
+        "SELECT ft.hash, t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+         ORDER BY ft.hash, t.name",
+    )?;
+    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    for row in rows {
+        let (hash, name) = row?;
+        tags.entry(hash).or_default().push(name);
+    }
+    Ok(tags)
 }
 
 pub fn all(conn: &Connection) -> Result<Vec<String>> {

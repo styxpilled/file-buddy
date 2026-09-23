@@ -9,10 +9,11 @@ mod preview;
 mod renamer;
 mod review;
 mod settings;
+mod table;
 mod tagger;
 mod tile;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -43,7 +44,7 @@ use crate::index::jobs::{self, Stage};
 use crate::index::watch::{self, WatchStats};
 use crate::media::Kind;
 use crate::paths;
-use crate::search::folder::{self as folder_list, Entry};
+use crate::search::folder::{self as folder_list, Entry, Sort};
 use crate::search::{self, Hit, Signal};
 
 /// How long the selection must rest before the side pane opens a decoder. Held
@@ -97,6 +98,8 @@ gpui_kit::actions!(
         CopyFile,
         Activate,
         GoUp,
+        CycleSort,
+        ToggleTable,
         RevealFile,
         OpenFile,
         TagFiles,
@@ -133,6 +136,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("space", TogglePaused, grid),
         KeyBinding::new("enter", Activate, grid),
         KeyBinding::new("backspace", GoUp, grid),
+        KeyBinding::new("s", CycleSort, grid),
+        KeyBinding::new("v", ToggleTable, grid),
         KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
@@ -226,6 +231,12 @@ pub struct FileBuddy {
     /// The folder the Folders page shows, or `None` for the list of roots. It
     /// stays when the page closes, so the page opens where the user left it.
     folder: Option<PathBuf>,
+    /// The order of a folder on the Folders page. A query keeps its ranking.
+    sort: Sort,
+    /// The Folders page shows a table in place of the grid.
+    table: bool,
+    /// The tags of each file, by hash, while the table shows them.
+    row_tags: HashMap<String, Vec<String>>,
     scanning: bool,
     /// Settings saved new folders while a scan ran, so another scan follows it.
     rescan_after: bool,
@@ -360,6 +371,9 @@ impl FileBuddy {
             settings: None,
             folders_open: false,
             folder: None,
+            sort: Sort::default(),
+            table: false,
+            row_tags: HashMap::new(),
             scanning: false,
             rescan_after: false,
             watcher: None,
@@ -622,8 +636,20 @@ impl FileBuddy {
         self.listing = self.folders_open && text.trim().is_empty();
         if self.listing {
             self.list_folder();
-            return;
+        } else {
+            self.fetch_hits(text);
         }
+        self.row_tags = if self.table_shown() {
+            tags::by_hash(self.db.conn()).unwrap_or_else(|e| {
+                log::error!("reading the tags failed: {e:#}");
+                HashMap::new()
+            })
+        } else {
+            HashMap::new()
+        };
+    }
+
+    fn fetch_hits(&mut self, text: String) {
         let within = self.folders_open.then(|| self.folder.clone()).flatten();
         let request = search::Request::new(text)
             .kinds(self.kinds.clone())
@@ -665,10 +691,9 @@ impl FileBuddy {
             self.status = folders_counted(self.results.len()).into();
             return;
         };
-        let listed = self
-            .config
-            .ignore_set()
-            .and_then(|ignore| folder_list::list(self.db.conn(), dir, &ignore, &self.kinds));
+        let listed = self.config.ignore_set().and_then(|ignore| {
+            folder_list::list(self.db.conn(), dir, &ignore, &self.kinds, self.sort)
+        });
         match listed {
             Ok(entries) => {
                 let folders = entries
@@ -738,6 +763,49 @@ impl FileBuddy {
         if let Some(dir) = &self.folder {
             let parent = self.parent_folder(dir);
             self.open_folder(parent, window, cx);
+        }
+    }
+
+    /// Every page with results can show the table. Settings has none.
+    pub(super) fn table_shown(&self) -> bool {
+        self.table && self.settings.is_none()
+    }
+
+    /// `s`, or a sort button. The selection stays on the same entry.
+    pub(super) fn set_sort(&mut self, sort: Sort, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.folders_open || self.sort == sort {
+            return;
+        }
+        self.sort = sort;
+        self.rerun_search(cx);
+        self.reveal_selection(window, cx);
+    }
+
+    /// `v`, or a view button.
+    pub(super) fn set_table(&mut self, table: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings.is_some() || self.table == table {
+            return;
+        }
+        self.table = table;
+        // The table has no tile to play in.
+        self.hovered = None;
+        self.rerun_search(cx);
+        self.reveal_selection(window, cx);
+    }
+
+    /// Scroll to the selection with the columns of the next frame. They change
+    /// with the view.
+    fn reveal_selection(&mut self, window: &Window, cx: &App) {
+        self.columns = self.column_count(window, cx);
+        self.scroll
+            .scroll_to_item(self.selected / self.columns, ScrollStrategy::Nearest);
+    }
+
+    fn column_count(&self, window: &Window, cx: &App) -> usize {
+        if self.table_shown() {
+            1
+        } else {
+            grid::columns(self.grid_width(window, cx))
         }
     }
 
@@ -1891,7 +1959,7 @@ impl Render for FileBuddy {
         self.hold_focus(window, cx);
         self.sync_placeholder(window, cx);
         let width = self.grid_width(window, cx);
-        self.columns = grid::columns(width);
+        self.columns = self.column_count(window, cx);
 
         v_flex()
             .key_context("FileBuddy")
@@ -1913,6 +1981,12 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
             .on_action(cx.listener(|this, _: &GoUp, window, cx| this.go_up(window, cx)))
+            .on_action(cx.listener(|this, _: &CycleSort, window, cx| {
+                this.set_sort(this.sort.next(), window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ToggleTable, window, cx| {
+                this.set_table(!this.table, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &RevealFile, _, cx| this.reveal_selected(cx)))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| this.open_selected(cx)))
             .on_action(cx.listener(|this, _: &TagFiles, window, cx| this.open_tagger(window, cx)))
@@ -1987,6 +2061,9 @@ impl Render for FileBuddy {
                                     .child(Input::new(&self.input)),
                             )
                             .child(chips::chips(self, cx)),
+                    })
+                    .when(self.settings.is_none(), |header| {
+                        header.child(table::views(self, cx))
                     })
                     .when(!self.marked.is_empty(), |header| {
                         header.child(

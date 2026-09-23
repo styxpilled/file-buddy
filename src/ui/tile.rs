@@ -57,7 +57,7 @@ pub fn tile(
             cx.theme().foreground,
             div().into_any_element(),
         ),
-        Entry::Stray { path, why } => {
+        Entry::Stray { path, why, .. } => {
             let color = stray_color(*why, cx);
             (
                 placeholder(
@@ -82,20 +82,7 @@ pub fn tile(
             cx.listener(move |this, hovered: &bool, _, cx| this.set_hovered(index, *hovered, cx)),
         )
         .cursor_pointer()
-        // Ctrl marks instead of selecting, the way a file manager does it.
-        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-            if event.modifiers().control {
-                this.toggle_mark(index, cx)
-            } else {
-                this.select(index, cx);
-                this.renamer_follows(window, cx);
-                if event.click_count() == 2
-                    && matches!(this.results.get(index), Some(Entry::Folder(_)))
-                {
-                    this.activate(window, cx);
-                }
-            }
-        }))
+        .on_click(cx.listener(move |this, event, window, cx| click(this, index, event, window, cx)))
         .child(
             div()
                 .relative()
@@ -163,6 +150,26 @@ pub fn tile(
         .into_any_element()
 }
 
+/// A click on a tile or a table row. Ctrl marks instead of selecting, the way a
+/// file manager does it.
+pub(super) fn click(
+    this: &mut FileBuddy,
+    index: usize,
+    event: &ClickEvent,
+    window: &mut Window,
+    cx: &mut Context<FileBuddy>,
+) {
+    if event.modifiers().control {
+        this.toggle_mark(index, cx)
+    } else {
+        this.select(index, cx);
+        this.renamer_follows(window, cx);
+        if event.click_count() == 2 && matches!(this.results.get(index), Some(Entry::Folder(_))) {
+            this.activate(window, cx);
+        }
+    }
+}
+
 /// The second line of a file. In a folder it is the facts of the file; in
 /// Review it is why the file is there; after a query it is what matched.
 fn file_line(this: &FileBuddy, hit: &Hit, pending: bool, cx: &App) -> AnyElement {
@@ -201,7 +208,7 @@ fn note(text: &str, color: Hsla) -> AnyElement {
         .into_any_element()
 }
 
-fn stray_color(why: Stray, cx: &App) -> Hsla {
+pub(super) fn stray_color(why: Stray, cx: &App) -> Hsla {
     match why {
         Stray::Unindexed => cx.theme().warning,
         Stray::Ignored => cx.theme().danger,

@@ -98,14 +98,14 @@ fn long(conn: &Connection) -> Result<Vec<Item>> {
 
 fn failed(conn: &Connection) -> Result<Vec<Item>> {
     let mut statement = conn.prepare(
-        "SELECT id, path, hash, filename, kind, size, duration, state, error
+        "SELECT id, path, hash, filename, kind, size, duration, state, mtime, error
          FROM files WHERE missing_at IS NULL AND state = 'failed' ORDER BY path",
     )?;
     let rows = statement.query_map([], |row| {
         Ok(Item {
             file: read_row(row)?,
             note: row
-                .get::<_, Option<String>>(8)?
+                .get::<_, Option<String>>(9)?
                 .unwrap_or_else(|| "no error was recorded".into()),
         })
     })?;

@@ -7,7 +7,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, px, size};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex, v_virtual_list};
 
-use super::tile;
+use super::{table, tile};
 use crate::ui::FileBuddy;
 
 pub const TILE_WIDTH: f32 = 220.;
@@ -40,6 +40,9 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 "Nothing here. Check the roots in file-buddy.toml."
             })
             .into_any_element();
+    }
+    if this.table_shown() {
+        return table::table(this, cx);
     }
 
     let columns = this.columns.max(1);

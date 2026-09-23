@@ -1,13 +1,16 @@
-//! The breadcrumb of the Folders page. Each part opens its folder.
+//! The bar of the Folders page: the breadcrumb, where each part opens its
+//! folder, and the sort buttons.
 
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, px};
+use gpui::{AnyElement, Context, div, px};
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
-use gpui_kit::component::{ActiveTheme, h_flex};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::{ActiveTheme, Selectable, Sizable, h_flex};
 
-use crate::ui::FileBuddy;
+use crate::search::folder::Sort;
+use crate::ui::{FileBuddy, with_pointer};
 
 pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let mut stops: Vec<(String, Option<PathBuf>)> = vec![("Folders".into(), None)];
@@ -46,7 +49,38 @@ pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 })
             })),
         )
+        .child(div().flex_1())
+        // The sort only orders a folder. A query keeps its ranking, so the
+        // sort buttons go while one is typed.
+        .when(this.listing, |bar| {
+            bar.child(h_flex().gap_1().children(Sort::ALL.map(|sort| {
+                toggle(
+                    sort.label(),
+                    "S",
+                    this.sort == sort,
+                    cx.listener(move |this, _, window, cx| this.set_sort(sort, window, cx)),
+                )
+            })))
+        })
         .into_any_element()
+}
+
+pub(super) fn toggle(
+    label: &'static str,
+    key: &'static str,
+    on: bool,
+    click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Div {
+    with_pointer(
+        Button::new(label)
+            .xsmall()
+            .label(label)
+            .tooltip(key)
+            .selected(on)
+            .when(on, |button| button.primary())
+            .on_click(click),
+        true,
+    )
 }
 
 /// A path the way Explorer writes it. A root from the config can mix the two

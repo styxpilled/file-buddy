@@ -151,6 +151,17 @@ Files that no search finds come last, coloured by why: yellow for a file that
 is not probed or not indexed yet, red for one an ignore glob matches, and gray
 for one that is not a media file. The chips limit only the indexed files.
 
+`s` sorts the files of a folder by name, by time (newest first) or by size
+(largest first). Each group keeps its place, and folders stay by name. A query
+keeps its ranking, so the sort buttons go while one is typed.
+
+On Browse, Folders and Review, `v` or the Grid and Table buttons in the header
+switch between the grid and a table with no pictures: name, kind, length,
+size, modified and tags. In Review the last column says why the file is there
+in place of the tags. The selection, the marks and the keys work the same in
+both. One view holds for all three pages. The sort and the view last until the
+application closes.
+
 The Review page collects every file that needs a person: duplicate groups,
 files over 5 minutes, files that cannot be indexed, and files with no proper
 name. It opens on the first group that holds a file, and `alt-1` to `alt-4`

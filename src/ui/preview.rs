@@ -44,7 +44,7 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
     let Some(hit) = this.selected_hit() else {
         let text = match this.results.get(this.selected) {
             Some(Entry::Folder(_)) => "A folder. Enter opens it.".to_string(),
-            Some(Entry::Stray { path, why }) => {
+            Some(Entry::Stray { path, why, .. }) => {
                 format!("{}: {}", FileRow::name_of(path), why.as_str())
             }
             _ => "No selection".to_string(),

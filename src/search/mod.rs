@@ -99,7 +99,7 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
     values.push(Value::Integer(request.limit as i64));
 
     let sql = format!(
-        "SELECT f.id, f.path, f.hash, f.filename, f.kind, f.size, f.duration, f.state,
+        "SELECT f.id, f.path, f.hash, f.filename, f.kind, f.size, f.duration, f.state, f.mtime,
                 bm25(fts, ?2, ?3, ?4, ?5) AS score,
                 bm25(fts, 1.0, 0.0, 0.0, 0.0),
                 bm25(fts, 0.0, 1.0, 0.0, 0.0),
@@ -119,13 +119,13 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
         let per_column = [
-            (Signal::Tags, row.get::<_, f64>(9)?),
-            (Signal::Filename, row.get::<_, f64>(10)?),
-            (Signal::Speech, row.get::<_, f64>(11)?),
-            (Signal::Ocr, row.get::<_, f64>(12)?),
+            (Signal::Tags, row.get::<_, f64>(10)?),
+            (Signal::Filename, row.get::<_, f64>(11)?),
+            (Signal::Speech, row.get::<_, f64>(12)?),
+            (Signal::Ocr, row.get::<_, f64>(13)?),
         ];
         let signal = best_signal(&per_column);
-        let snippet: String = row.get(13 + signal_index(signal))?;
+        let snippet: String = row.get(14 + signal_index(signal))?;
         let file = read_file(row)?;
         let matched = if snippet.trim().is_empty() {
             file.filename.clone()
@@ -134,7 +134,7 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
         };
         Ok(Hit {
             file,
-            score: row.get(8)?,
+            score: row.get(9)?,
             signal,
             matched,
         })
@@ -148,7 +148,7 @@ pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
     let filter = filters(request, &mut values, "");
     values.push(Value::Integer(request.limit as i64));
     let sql = format!(
-        "SELECT id, path, hash, filename, kind, size, duration, state
+        "SELECT id, path, hash, filename, kind, size, duration, state, mtime
          FROM files WHERE missing_at IS NULL{filter} ORDER BY mtime DESC LIMIT ?{}",
         values.len()
     );
@@ -198,6 +198,7 @@ fn read_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         size: row.get::<_, i64>(5)? as u64,
         duration: row.get(6)?,
         state: row.get(7)?,
+        mtime: row.get(8)?,
     })
 }
 

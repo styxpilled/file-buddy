@@ -40,6 +40,8 @@ pub struct FileRow {
     pub size: u64,
     pub duration: Option<f64>,
     pub state: String,
+    /// Seconds since the Unix epoch, as the scan read it from disk.
+    pub mtime: i64,
 }
 
 impl FileRow {
@@ -307,11 +309,11 @@ pub fn indexed_filename(filename: &str) -> String {
 }
 
 pub(crate) const SELECT: &str =
-    "SELECT id, path, hash, filename, kind, size, duration, state FROM files";
+    "SELECT id, path, hash, filename, kind, size, duration, state, mtime FROM files";
 
 /// The same, of the files that are on disk. Every screen uses this one.
 pub(crate) const PRESENT: &str =
-    "SELECT id, path, hash, filename, kind, size, duration, state FROM files
+    "SELECT id, path, hash, filename, kind, size, duration, state, mtime FROM files
      WHERE missing_at IS NULL";
 
 pub(crate) fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
@@ -325,5 +327,6 @@ pub(crate) fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         size: row.get::<_, i64>(5)? as u64,
         duration: row.get(6)?,
         state: row.get(7)?,
+        mtime: row.get(8)?,
     })
 }

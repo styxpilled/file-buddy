@@ -11,7 +11,7 @@ use file_buddy::index::jobs::Stage;
 use file_buddy::index::{self, scan, watch};
 use file_buddy::media::Kind;
 use file_buddy::search;
-use file_buddy::search::folder::{self, Entry, Stray};
+use file_buddy::search::folder::{self, Entry, Sort, Stray};
 
 const VIDEO: &str = "my honest reaction.mp4";
 const ANIMATION: &str = "silky anteater.gif";
@@ -628,7 +628,7 @@ fn a_folder_lists_its_folders_then_its_files_then_what_the_search_cannot_find() 
         .add(globset::Glob::new("**/secret*").unwrap())
         .build()
         .unwrap();
-    let entries = folder::list(db.conn(), &harness.clips, &ignore, &[]).unwrap();
+    let entries = folder::list(db.conn(), &harness.clips, &ignore, &[], Sort::Name).unwrap();
     let listed: Vec<(String, &str)> = entries
         .iter()
         .map(|entry| {
@@ -657,9 +657,63 @@ fn a_folder_lists_its_folders_then_its_files_then_what_the_search_cannot_find() 
     assert_eq!(listed, expected);
 
     // The chips limit the indexed files only.
-    let stills = folder::list(db.conn(), &harness.clips, &ignore, &[Kind::Still]).unwrap();
+    let stills = folder::list(
+        db.conn(),
+        &harness.clips,
+        &ignore,
+        &[Kind::Still],
+        Sort::Name,
+    )
+    .unwrap();
     assert_eq!(stills.iter().filter_map(Entry::hit).count(), 1);
     assert_eq!(stills.len(), 5);
+}
+
+#[test]
+fn a_folder_sorts_its_files_by_name_time_or_size_and_keeps_the_groups() {
+    let harness = Harness::new();
+    let day = std::time::Duration::from_secs(86_400);
+    let now = std::time::SystemTime::now();
+    for (name, age) in [(VIDEO, 3), (STILL, 2), (ANIMATION, 1)] {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(harness.clips.join(name))
+            .unwrap();
+        file.set_modified(now - day * age).unwrap();
+    }
+    harness.scan();
+    std::fs::write(harness.clips.join("a note.txt"), "not a clip").unwrap();
+    std::fs::create_dir(harness.clips.join("zz")).unwrap();
+
+    let db = harness.db();
+    let ignore = globset::GlobSetBuilder::new().build().unwrap();
+    let names = |sort: Sort| -> Vec<String> {
+        folder::list(db.conn(), &harness.clips, &ignore, &[], sort)
+            .unwrap()
+            .iter()
+            .map(|entry| files::FileRow::name_of(entry.path()))
+            .collect()
+    };
+    let expected = |files: [&str; 3]| -> Vec<String> {
+        ["zz", files[0], files[1], files[2], "a note.txt"]
+            .map(str::to_string)
+            .to_vec()
+    };
+    assert_eq!(names(Sort::Name), expected([STILL, VIDEO, ANIMATION]));
+    assert_eq!(names(Sort::Recent), expected([ANIMATION, STILL, VIDEO]));
+
+    let by_size = folder::list(db.conn(), &harness.clips, &ignore, &[], Sort::Size).unwrap();
+    let sizes: Vec<u64> = by_size
+        .iter()
+        .filter_map(Entry::hit)
+        .map(|hit| hit.file.size)
+        .collect();
+    assert_eq!(sizes.len(), 3);
+    assert!(sizes.windows(2).all(|pair| pair[0] >= pair[1]), "{sizes:?}");
+    assert!(matches!(
+        by_size.last(),
+        Some(Entry::Stray { size: 10, .. })
+    ));
 }
 
 #[test]
