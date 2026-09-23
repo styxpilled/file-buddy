@@ -7,14 +7,12 @@ use gpui::{
     AnyElement, App, Context, Div, ScrollDelta, ScrollWheelEvent, SharedString, Stateful, Window,
     div, img, px,
 };
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Selectable, Sizable, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
-use crate::db::files::FileRow;
+use crate::db::files::{FileRow, State};
 use crate::db::review::Group;
 use crate::db::{ocr as ocr_rows, segments, tags};
 use crate::index::jobs::{self, Stage};
@@ -23,8 +21,7 @@ use crate::paths;
 use crate::search::Hit;
 use crate::search::folder::Entry;
 use crate::ui::{
-    CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
-    with_pointer,
+    CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer, toggle,
 };
 
 /// What the pane holds besides the stage: the controls above it, and the tabs
@@ -85,16 +82,12 @@ fn tabs(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
         .gap_1()
         .children(DETAILS.map(|(detail, label)| {
-            let on = detail == this.detail;
-            with_pointer(
-                Button::new(label)
-                    .xsmall()
-                    .label(label)
-                    .selected(on)
-                    .when(on, |button| button.primary())
-                    .on_click(cx.listener(move |this, _, _, cx| this.show_detail(detail, cx))),
-                true,
-            )
+            toggle(label, label, detail == this.detail)
+                .xsmall()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.detail = detail;
+                    cx.notify();
+                }))
         }))
         .into_any_element()
 }
@@ -256,11 +249,12 @@ fn stage(
                 ScrollDelta::Pixels(delta) => f32::from(delta.y),
             };
             if up != 0. {
-                this.nudge_volume(up > 0., cx);
+                this.player.nudge_volume(up > 0.);
+                cx.notify();
             }
         }));
 
-    match this.preview_video() {
+    match this.player.video() {
         Some(playing) => frame
             .child(
                 video_element(playing.clone())
@@ -286,40 +280,46 @@ fn stage(
 /// stays silent whatever these say. The row stays in place with no clip, so the
 /// stage below it does not move while a decoder opens.
 fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
-    let playable = this.preview_video().is_some();
+    let player = &this.player;
+    let playable = player.video().is_some();
     h_flex()
         .gap_2()
-        .child(with_pointer(
-            Button::new("preview-autoplay")
+        .child(
+            toggle("preview-autoplay", "Autoplay", player.autoplay)
                 .small()
-                .label("Autoplay")
                 .tooltip("Ctrl+Space")
-                .selected(this.autoplay)
-                .when(this.autoplay, |button| button.primary())
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
-            true,
-        ))
-        .child(with_pointer(
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.player.toggle_autoplay();
+                    cx.notify();
+                })),
+        )
+        .child(
             Button::new("preview-pause")
                 .small()
                 .disabled(!playable)
-                .icon(if this.preview_paused {
+                .when(playable, |button| button.cursor_pointer())
+                .icon(if player.paused {
                     IconName::Play
                 } else {
                     IconName::Pause
                 })
-                .label(if this.preview_paused { "Play" } else { "Pause" })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_preview_paused(cx))),
-            playable,
-        ))
-        .child(with_pointer(
+                .label(if player.paused { "Play" } else { "Pause" })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.player.toggle_paused();
+                    cx.notify();
+                })),
+        )
+        .child(
             Button::new("preview-mute")
                 .small()
                 .disabled(!playable)
-                .label(if this.preview_muted { "Unmute" } else { "Mute" })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_preview_muted(cx))),
-            playable,
-        ))
+                .when(playable, |button| button.cursor_pointer())
+                .label(if player.muted { "Unmute" } else { "Mute" })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.player.toggle_muted();
+                    cx.notify();
+                })),
+        )
         .child(file_menu(this, cx))
         .into_any_element()
 }
@@ -329,10 +329,11 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
 fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let focus = this.focus.clone();
     let view = cx.entity().downgrade();
-    let button = Button::new("file-menu")
+    Button::new("file-menu")
         .small()
         .icon(IconName::Ellipsis)
         .tooltip("File actions")
+        .cursor_pointer()
         .dropdown_menu(move |menu, _, _| {
             menu.action_context(focus.clone())
                 .menu_with_icon("Copy", IconName::Copy, Box::new(CopyFile))
@@ -344,8 +345,8 @@ fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         // menu the moment it opened.
         .on_open_change(move |open, _, cx| {
             view.update(cx, |this, _| this.menu_open = *open).ok();
-        });
-    with_pointer(button, true).into_any_element()
+        })
+        .into_any_element()
 }
 
 fn facts(hit: &Hit, cx: &App) -> AnyElement {
@@ -364,8 +365,8 @@ pub(super) fn facts_text(file: &FileRow) -> String {
         parts.push(format!("{duration:.1}s"));
     }
     parts.push(format!("{:.1} MB", file.size as f64 / 1_048_576.));
-    if file.state != "ready" {
-        parts.push(file.state.clone());
+    if file.state != State::Ready {
+        parts.push(file.state.as_str().to_string());
     }
     parts.join("  ·  ")
 }
@@ -373,7 +374,7 @@ pub(super) fn facts_text(file: &FileRow) -> String {
 /// In Review, where the file is, and the whole error of a file that could not
 /// be indexed. The tile has room for the first words only.
 fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
-    let Some(group) = this.review_group() else {
+    let Some(group) = this.review().map(|review| review.group) else {
         return div().into_any_element();
     };
     let folder = hit
@@ -413,14 +414,14 @@ fn tag_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElem
                 .text_xs()
                 .child(name)
         }))
-        .child(with_pointer(
+        .child(
             Button::new("file-tag")
                 .xsmall()
                 .icon(IconName::Plus)
                 .label("Tag")
                 .tooltip("T")
+                .cursor_pointer()
                 .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
-            true,
-        ))
+        )
         .into_any_element()
 }

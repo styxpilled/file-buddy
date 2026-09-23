@@ -12,6 +12,9 @@
 #   dblclick:<x>,<y>         the same, twice, fast enough to be a double click
 #   scroll:<x>,<y>,<notches> turn the wheel over a point inside the window.
 #                            A positive count turns it away from the hand
+#   hover:<x>,<y>            move the pointer to a point inside the window and
+#                            print the cursor it shows there: hand, arrow or
+#                            other. A picture does not hold the cursor
 #   shot:<name>              save <OutDir>/<name>.png of the application window
 #   wait:<milliseconds>      wait longer than the settle time
 #
@@ -42,8 +45,12 @@ $signature = @'
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+[DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO info);
+[DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr instance, IntPtr name);
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 public struct RECT { public int Left, Top, Right, Bottom; }
+public struct POINT { public int X, Y; }
+public struct CURSORINFO { public int Size; public int Flags; public IntPtr Cursor; public POINT Position; }
 '@
 $null = Add-Type -MemberDefinition $signature -Name Win -Namespace Drive -PassThru
 
@@ -94,6 +101,26 @@ function Scroll-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$notches) {
     # is unsigned, so a turn towards the hand goes through as two's complement.
     $delta = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]($notches * 120)), 0)
     [Drive.Win]::mouse_event(0x0800, 0, 0, $delta, [UIntPtr]::Zero)
+}
+
+function Get-CursorAt([IntPtr]$hwnd, [int]$x, [int]$y) {
+    $rect = New-Object Drive.Win+RECT
+    [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    # GPUI picks the cursor in the frame after a move, and Windows asks for it
+    # on the next move, so the pointer moves a second time by one pixel.
+    [Drive.Win]::SetCursorPos($rect.Left + $x, $rect.Top + $y) | Out-Null
+    Start-Sleep -Milliseconds 200
+    [Drive.Win]::SetCursorPos($rect.Left + $x + 1, $rect.Top + $y) | Out-Null
+    Start-Sleep -Milliseconds 200
+    $info = New-Object Drive.Win+CURSORINFO
+    $info.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
+    [Drive.Win]::GetCursorInfo([ref]$info) | Out-Null
+    # IDC_HAND and IDC_ARROW. The system shares one handle for each.
+    switch ($info.Cursor) {
+        ([Drive.Win]::LoadCursor([IntPtr]::Zero, [IntPtr]32649)) { return 'hand' }
+        ([Drive.Win]::LoadCursor([IntPtr]::Zero, [IntPtr]32512)) { return 'arrow' }
+        default { return 'other' }
+    }
 }
 
 function Save-WindowPicture([IntPtr]$hwnd, [string]$path) {
@@ -149,6 +176,10 @@ try {
                 $x, $y, $notches = $value -split ',', 3
                 Scroll-InWindow $application ([int]$x) ([int]$y) ([int]$notches)
                 Start-Sleep -Milliseconds $SettleMs
+            }
+            'hover' {
+                $x, $y = $value -split ',', 2
+                Write-Output "hover ${x},${y}: $(Get-CursorAt $application ([int]$x) ([int]$y))"
             }
             'wait' { Start-Sleep -Milliseconds ([int]$value) }
             default { throw "unknown step $step" }

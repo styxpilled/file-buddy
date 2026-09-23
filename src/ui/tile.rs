@@ -15,24 +15,18 @@ use crate::paths;
 use crate::search::folder::{Entry, Stray};
 use crate::search::{Hit, Signal};
 use crate::ui::FileBuddy;
-use crate::ui::folders;
 
-pub fn tile(
-    this: &FileBuddy,
-    index: usize,
-    _window: &mut Window,
-    cx: &mut Context<FileBuddy>,
-) -> AnyElement {
+pub fn tile(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElement {
     let Some(entry) = this.results.get(index) else {
         return div().into_any_element();
     };
     let selected = index == this.selected;
     let marked = entry.hit().is_some_and(|hit| this.is_marked(hit));
-    let playing = this.hovered.as_ref().filter(|(i, _)| *i == index);
+    let playing = this.player.hovered.as_ref().filter(|(at, _)| *at == index);
 
     let (picture, name, name_color, line) = match entry {
         Entry::File(hit) => {
-            let pending = hit.file.state == State::Pending.as_str();
+            let pending = hit.file.state == State::Pending;
             (
                 thumbnail(this, hit, cx),
                 hit.file.filename.clone(),
@@ -49,11 +43,7 @@ pub fn tile(
                 .large()
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element(),
-            // The list of roots names each one in full.
-            match this.folder {
-                None => folders::display(path),
-                Some(_) => FileRow::name_of(path),
-            },
+            this.folder_name(path),
             cx.theme().foreground,
             div().into_any_element(),
         ),
@@ -184,7 +174,7 @@ fn file_line(this: &FileBuddy, hit: &Hit, pending: bool, cx: &App) -> AnyElement
         .gap_1()
         .items_center()
         // In Review the second line is not a match, so it has no signal.
-        .when(this.review.is_none(), |line| {
+        .when(this.review().is_none(), |line| {
             line.child(badge(hit.signal, cx))
         })
         .child(

@@ -2,12 +2,11 @@
 //! known hallucination phrases, sound tags, and the short last window that the
 //! model fills with words that were never said.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::{files, fts, segments};
+use crate::db::files::FileRow;
+use crate::db::{fts, segments};
 use crate::ffmpeg::whisper::{self, Segment, WINDOW_SECONDS};
 use crate::paths;
 
@@ -38,21 +37,16 @@ const HALLUCINATIONS: &[&str] = &[
     "laughter",
 ];
 
-pub fn run(conn: &Connection, hash: &str, source: &Path) -> Result<()> {
+pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
     let model = paths::whisper_model()?;
-    let duration = files::by_hash(conn, hash)?
-        .into_iter()
-        .next()
-        .context("the file left the database")?
-        .duration;
-    let kept = clean(whisper::transcribe(source, &model)?, duration);
+    let kept = clean(whisper::transcribe(&source.path, &model)?, source.duration);
     if kept.is_empty() {
-        log::info!("no speech found in {}", source.display());
+        log::info!("no speech found in {}", source.path.display());
     }
     // No segments is the record of "no speech found". The finished job keeps
     // the file from being transcribed again.
-    segments::replace(conn, hash, &kept)?;
-    fts::refresh_hash(conn, hash)
+    segments::replace(conn, &source.hash, &kept)?;
+    fts::refresh_hash(conn, &source.hash)
 }
 
 fn clean(segments: Vec<Segment>, duration: Option<f64>) -> Vec<Segment> {

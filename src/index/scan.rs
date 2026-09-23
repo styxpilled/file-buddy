@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use globset::GlobSet;
+use rusqlite::Connection;
 use walkdir::WalkDir;
 
 use crate::db::{Db, files, fts};
@@ -45,7 +46,7 @@ pub fn scan(db: &mut Db, roots: &[PathBuf], ignore: &GlobSet, cache: &Path) -> R
             let Some(kind) = Kind::from_path(path) else {
                 continue;
             };
-            match visit(db, path, kind, cache) {
+            match visit(db.conn(), path, kind, cache) {
                 Ok((id, outcome)) => {
                     seen_ids.push(id);
                     match outcome {
@@ -69,7 +70,7 @@ pub fn scan(db: &mut Db, roots: &[PathBuf], ignore: &GlobSet, cache: &Path) -> R
 /// Bring one path up to date and queue the cheap stages it needs. The watcher
 /// calls this for a single file where the scan calls it for every one.
 pub(crate) fn visit(
-    db: &Db,
+    conn: &Connection,
     path: &Path,
     kind: Kind,
     cache: &Path,
@@ -84,7 +85,6 @@ pub(crate) fn visit(
         .unwrap_or(0);
 
     let hash = hash::file_hash(path, size)?;
-    let conn = db.conn();
     let (id, outcome) = files::upsert(
         conn,
         &files::Scanned {
@@ -98,7 +98,7 @@ pub(crate) fn visit(
 
     // The filename changed or the row is new, so the search index needs the
     // current name. The other three columns come from the tables they live in.
-    if outcome != files::Upsert::Unchanged || !in_index(db, id)? {
+    if outcome != files::Upsert::Unchanged || !fts::has_row(conn, id)? {
         fts::refresh(conn, id)?;
     }
 
@@ -110,13 +110,4 @@ pub(crate) fn visit(
         jobs::enqueue(conn, &hash, Stage::Thumbnail)?;
     }
     Ok((id, outcome))
-}
-
-fn in_index(db: &Db, file_id: i64) -> Result<bool> {
-    let count: i64 = db.conn().query_row(
-        "SELECT count(*) FROM fts WHERE rowid = ?1",
-        [file_id],
-        |row| row.get(0),
-    )?;
-    Ok(count > 0)
 }

@@ -2,9 +2,10 @@
 //! way. Everything it shows comes from the library.
 
 use anyhow::Result;
+use file_buddy::config::Config;
 use file_buddy::db::Db;
+use file_buddy::paths;
 use file_buddy::ui::{self, FileBuddy};
-use file_buddy::{Config, paths};
 use gpui::{App, WindowOptions, px, size};
 use gpui::{TitlebarOptions, prelude::*};
 use gpui_kit::assets::Assets;

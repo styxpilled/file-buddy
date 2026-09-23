@@ -180,7 +180,7 @@ pub fn list(
             if !kinds.is_empty() && !kinds.contains(&file.kind) {
                 continue;
             }
-            if file.state == State::Pending.as_str() {
+            if file.state == State::Pending {
                 pending.push(file);
             } else {
                 ready.push(file);

@@ -14,7 +14,6 @@ use crate::db::files::{FileRow, State};
 use crate::media::Kind;
 use crate::search::folder::Entry;
 use crate::ui::FileBuddy;
-use crate::ui::folders;
 
 const ROW_HEIGHT: f32 = 26.;
 /// Kind, length, size, modified and tags, or in Review why the file is there.
@@ -27,7 +26,11 @@ pub fn table(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         this.results.len()
     ]);
     let muted = cx.theme().muted_foreground;
-    let last = if this.review.is_some() { "Why" } else { "Tags" };
+    let last = if this.review().is_some() {
+        "Why"
+    } else {
+        "Tags"
+    };
     let [kind, length, size, modified, tags] =
         ["Kind", "Length", "Size", "Modified", last].map(|label| text(label, muted));
     let header = [kind, length.text_right(), size.text_right(), modified, tags];
@@ -68,11 +71,11 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
                 .gap_1()
                 .min_w_0()
                 .child(Icon::new(IconName::Folder).xsmall().text_color(muted))
-                .child(text(&folder_name(this, path), theme.foreground))
+                .child(text(&this.folder_name(path), theme.foreground))
                 .into_any_element(),
             text("folder", muted),
         ),
-        Entry::File(hit) if hit.file.state == State::Pending.as_str() => (
+        Entry::File(hit) if hit.file.state == State::Pending => (
             text(&hit.file.filename, theme.warning).into_any_element(),
             text("not probed yet", theme.warning),
         ),
@@ -94,7 +97,7 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
         .map(clock)
         .unwrap_or_default();
     let last = match hit {
-        Some(hit) if this.review.is_some() => text(&hit.matched, muted),
+        Some(hit) if this.review().is_some() => text(&hit.matched, muted),
         Some(hit) => text(
             &this
                 .row_tags
@@ -145,29 +148,6 @@ fn line(name: impl IntoElement, rest: [Div; 5]) -> Div {
 
 fn text(text: &str, color: Hsla) -> Div {
     div().truncate().text_color(color).child(text.to_string())
-}
-
-/// The Grid and Table buttons in the header.
-pub fn views(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
-    h_flex()
-        .gap_1()
-        .children([("Grid", false), ("Table", true)].map(|(label, table)| {
-            folders::toggle(
-                label,
-                "V",
-                this.table == table,
-                cx.listener(move |this, _, window, cx| this.set_table(table, window, cx)),
-            )
-        }))
-        .into_any_element()
-}
-
-fn folder_name(this: &FileBuddy, path: &std::path::Path) -> String {
-    // The list of roots names each one in full, as the grid does.
-    match this.folder {
-        None => folders::display(path),
-        Some(_) => FileRow::name_of(path),
-    }
 }
 
 fn kind_label(kind: Kind) -> &'static str {

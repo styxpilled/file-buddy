@@ -11,8 +11,9 @@ directory named for the purpose, and nothing else moves with them.
 
 Two things follow from that:
 
-- SQL lives only in `db/`. A stage, the search or the interface calls a function
-  there. It never writes a query.
+- SQL lives in `db/`, and in two modules that are each one table's worth of
+  queries: `index/jobs.rs`, the queue, and `search/`, the ranked query. A stage
+  or the interface calls a function there. It never writes a query.
 - The library knows nothing about GPUI. The user interface lives in `src/ui/`
   and in `src/main.rs`, and it calls into the library. This is what lets the
   whole pipeline be tested without a window.
@@ -36,7 +37,8 @@ Two things follow from that:
       db/             the database and every query against it
         mod.rs        open, pragmas, migrations
         migrations.rs the schema
-        files.rs      rows in `files`
+        files.rs      rows in `files`, and `read_row`, which every query of
+                      files reads with
         fts.rs        the search index, rebuilt from the tables that own the text.
                       A rule that shapes a column belongs here, not in the stage
                       that fills the table: `fb reindex` is seconds, and reading
@@ -62,9 +64,8 @@ Two things follow from that:
         watch.rs      the watcher over the roots and the incremental scan
         pipeline.rs   the worker pool. When a stage runs, and what a failure means
         stages/       what a stage produces
-          mod.rs      one arm per stage
+          mod.rs      one arm per stage, and the file each job reads
           probe.rs
-          thumbnail.rs
           whisper.rs  the rules that drop hallucinated text
           ocr.rs      the line filter and the deduplication
       search/         the ranked query
@@ -72,18 +73,21 @@ Two things follow from that:
         query.rs      what the user typed becomes an FTS5 expression
         folder.rs     one folder of the roots, and why a file in it is not found
       ui/             the window. The only directory that knows about GPUI
-        mod.rs        the view that owns the state, the keys and the layout
+        mod.rs        the view, its keys, the results and the selection
+        header.rs     the page tabs, the chips, the view buttons, the state line
         grid.rs       the virtual grid of results
         tile.rs       one result: thumbnail, hover video, badge, matched text
+        table.rs      the table view of Browse, Folders and Review
         preview.rs    the side pane and its three tabs
+        player.rs     the clip in the pane, the file opened ahead, the tile
+                      that plays, and the sound
+        indexing.rs   the scan, the watcher and the text stages while the
+                      window is open
         tagger.rs     the tag input and its autocomplete
         renamer.rs    the rename input in the side pane
-        review.rs     the Review group tabs
-        pages.rs      the Browse, Folders, Review and Settings tabs
-        folders.rs    the bar of the Folders page: breadcrumb and sort
-        table.rs      the table view of Browse, Folders and Review
-        settings.rs   the Settings form
-        chips.rs      the media kind filters
+        folders.rs    the Folders page: the folder, the breadcrumb, the sort
+        review.rs     the Review page, its groups and the rename walk
+        settings.rs   the Settings page
 
 `config` and `paths` stay at the root because every directory uses them and they
 belong to none.
@@ -92,32 +96,36 @@ Unit tests sit in the file they test, because most of them test one function.
 `tests/pipeline.rs` is the one integration test. It generates three fixtures with
 FFmpeg into a temporary directory, so it needs nothing from the repository.
 
-## Where the rest of v1 goes
-
-| Issue | New code | Where |
-| --- | --- | --- |
-| 05 file actions | `CF_HDROP` through `clipboard-win`, reveal in Explorer | `src/actions/` |
-| 06 tags | The tag input and its autocomplete | `ui/tag_input.rs`. The queries are in `db/tags.rs` already |
-| 08 rename | Sanitizing a name the user typed | `media/filename.rs`. The rename itself, which moves the file and updates the row: `src/actions/rename.rs` |
-| 09 review screen | The queries for duplicate groups, long files, failures and poor names | `db/review.rs`. The screen and the bulk rename walk: `ui/review.rs` |
-
 ## The window
 
-`ui` holds one view, `FileBuddy`, and it owns everything that changes: the
-query, the results, the selection, the chips and the two videos that may play.
-The other files in `ui` only draw. A free function that takes `&FileBuddy` and
-`&mut Context<FileBuddy>` keeps each part in its own file without a second
-entity to keep in step. Add a screen the same way.
+`ui` holds one view, `FileBuddy`, and it owns everything that changes. Each file
+beside `mod.rs` is one part of the window: an `impl FileBuddy` block with the
+methods that change that part, and the free functions that draw it. A draw
+function takes `&FileBuddy` and `&mut Context<FileBuddy>`, so each part stays in
+its own file without a second entity to keep in step. A child module can read
+the private fields of `FileBuddy`, so no field is public for this.
+
+State that only one part uses is a struct in that part's file, held in one field
+of `FileBuddy`: `Player`, `Indexer`, `Tagger`, `Renamer`. State that only one
+page has is in `Mode`, so Review and Settings cannot both be open.
+
+New results go through `show_results`, which starts over at the top, or
+`update_results`, which keeps the selection on the same file. Do not set
+`results` anywhere else: the selection, the marks and the videos all point into
+it.
+
+Every button that acts on a click takes `.cursor_pointer()`. `Button` puts its
+own arrow first and the caller's style over it. A disabled button keeps the
+arrow.
 
 ## Adding a stage
 
-The pipeline was built so that issues 07 and 10 are additions, not changes.
-
 1. Add the variant to `jobs::Stage`, with its `as_str`, its `concurrency` and
    its place in `Stage::after_probe`.
-2. Add `index/stages/<name>.rs` with one `run` function.
-3. Add the arm to `index::stages::run`.
-4. Add the table that holds the result to `db/`, and rebuild the matching `fts`
+2. Add the arm to `index::stages::run`. A stage that does more than call
+   FFmpeg gets `index/stages/<name>.rs` with one `run` function, which takes
+   the row of a file that holds the bytes.
+3. Add the table that holds the result to `db/`, and rebuild the matching `fts`
    column in `db/fts.rs`.
 
 Nothing in `pipeline.rs` changes. It already counts attempts, stops after two
@@ -128,6 +136,6 @@ cannot open.
 
 `fts` has four columns and the weights are in the config. A fifth signal is a
 schema migration, a fifth weight in `config::Weights`, a fifth column in the
-`bm25` call in `search::search`, and a fifth line in `db::fts::refresh`. Keep
-the column order the same in all four places, because `bm25` takes the weights
-by position.
+`bm25` call in `search::search` and in `Signal::COLUMNS`, and a fifth line in
+`db::fts::refresh`. Keep the column order the same in all of them, because
+`bm25` takes the weights by position.

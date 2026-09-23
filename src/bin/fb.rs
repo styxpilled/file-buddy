@@ -8,11 +8,12 @@
 //!                        the text, after a rule that shapes it changed
 //!     fb status          counts per state and per stage
 
-use anyhow::{Context, Result};
-use file_buddy::db::{Db, files};
-use file_buddy::index::jobs::Stage;
+use anyhow::Result;
+use file_buddy::config::Config;
+use file_buddy::db::{Db, files, fts};
+use file_buddy::index::jobs::{self, Stage};
 use file_buddy::index::{self, scan};
-use file_buddy::{Config, paths, search};
+use file_buddy::{paths, search};
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -53,10 +54,7 @@ fn main() -> Result<()> {
         }
         "reindex" => {
             let db = Db::open(&db_path)?;
-            println!(
-                "reindexed {} files",
-                file_buddy::db::fts::rebuild(db.conn())?
-            );
+            println!("reindexed {} files", fts::rebuild(db.conn())?);
         }
         "search" => {
             let query = args.collect::<Vec<_>>().join(" ");
@@ -76,31 +74,21 @@ fn main() -> Result<()> {
             println!("database: {}", db_path.display());
             println!("files: {}", files::all(db.conn())?.len());
             for stage in [Stage::Probe, Stage::Thumbnail, Stage::Whisper, Stage::Ocr] {
-                let mut statement = db
-                    .conn()
-                    .prepare("SELECT state, count(*) FROM jobs WHERE stage = ?1 GROUP BY state")?;
-                let rows: Vec<(String, i64)> = statement
-                    .query_map([stage.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<Result<_, _>>()
-                    .context("read the job counts")?;
-                let summary = rows
+                let summary = jobs::counts(db.conn(), stage)?
                     .iter()
                     .map(|(state, count)| format!("{count} {state}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                println!(
-                    "{:<10} {}",
-                    stage.as_str(),
-                    if summary.is_empty() {
-                        "-".into()
-                    } else {
-                        summary
-                    }
-                );
+                let summary = if summary.is_empty() {
+                    "-".into()
+                } else {
+                    summary
+                };
+                println!("{:<10} {summary}", stage.as_str());
             }
         }
         other => {
-            anyhow::bail!("unknown command {other:?}. Use scan, search or status");
+            anyhow::bail!("unknown command {other:?}. Use scan, search, reindex or status");
         }
     }
     Ok(())

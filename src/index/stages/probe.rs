@@ -1,21 +1,17 @@
 //! The first stage. It reads what the file is, and so decides which stages come
 //! after it.
 
-use std::path::Path;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::{files, fts};
+use crate::db::files::{self, FileRow};
+use crate::db::fts;
 use crate::ffmpeg::probe::{self, Probe};
 use crate::index::jobs::{self, LONG_FILE_SECONDS, Stage};
 
-pub fn run(conn: &Connection, hash: &str, source: &Path) -> Result<()> {
-    let row = files::by_hash(conn, hash)?
-        .into_iter()
-        .next()
-        .context("the file left the database")?;
-    let probe = probe::probe(source, row.kind)?;
+pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
+    let hash = &source.hash;
+    let probe = probe::probe(&source.path, source.kind)?;
     files::save_probe(conn, hash, &probe)?;
     queue_later_stages(conn, hash, &probe)?;
     fts::refresh_hash(conn, hash)

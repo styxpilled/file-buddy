@@ -3,22 +3,17 @@
 //! and the same caption comes back in every frame that shows it.
 
 use std::collections::HashSet;
-use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::{files, fts, ocr as ocr_rows};
+use crate::db::files::FileRow;
+use crate::db::{fts, ocr as ocr_rows};
 use crate::ffmpeg::frames;
 use crate::ocr;
 
-pub fn run(conn: &Connection, hash: &str, source: &Path) -> Result<()> {
-    let duration = files::by_hash(conn, hash)?
-        .into_iter()
-        .next()
-        .context("the file left the database")?
-        .duration;
-    let frames = frames::sample(source, hash, duration)?;
+pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
+    let frames = frames::sample(&source.path, &source.hash, source.duration)?;
     let engine = ocr::engine()?;
 
     let mut lines = Vec::new();
@@ -45,10 +40,10 @@ pub fn run(conn: &Connection, hash: &str, source: &Path) -> Result<()> {
 
     let kept = clean(lines);
     if kept.is_empty() {
-        log::info!("no text found in {}", source.display());
+        log::info!("no text found in {}", source.path.display());
     }
-    ocr_rows::replace(conn, hash, &kept)?;
-    fts::refresh_hash(conn, hash)
+    ocr_rows::replace(conn, &source.hash, &kept)?;
+    fts::refresh_hash(conn, &source.hash)
 }
 
 /// A line with fewer letters than this says nothing worth indexing.

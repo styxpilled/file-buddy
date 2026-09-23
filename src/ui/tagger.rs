@@ -8,38 +8,42 @@
 //! type, and the name is lowercased on the way into the database.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, MouseDownEvent, SharedString, Subscription, div, px};
-use gpui_kit::component::input::{Input, InputState};
+use gpui::{
+    AnyElement, Context, Entity, Focusable, MouseDownEvent, SharedString, Subscription, Window,
+    div, px,
+};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 
-use crate::ui::FileBuddy;
+use crate::db::tags;
+use crate::ui::{FileBuddy, counted};
 
 /// Suggestions on screen at once. More than this is a list to read, not an
 /// answer to a question.
-pub const MAX_SUGGESTIONS: usize = 8;
+const MAX_SUGGESTIONS: usize = 8;
 
 const PANEL_WIDTH: f32 = 460.;
 
 pub struct Tagger {
-    pub input: Entity<InputState>,
+    input: Entity<InputState>,
     /// The files it will tag, taken when it opened. The selection cannot move
     /// while the input holds focus, so this cannot go stale.
-    pub targets: Vec<String>,
+    targets: Vec<String>,
     /// What the panel says it is about to tag.
-    pub subject: SharedString,
+    subject: SharedString,
     /// Existing tags that match what is typed, best first.
-    pub suggestions: Vec<SharedString>,
+    suggestions: Vec<SharedString>,
     /// The suggestion Enter would apply. With none, Enter applies what was
     /// typed, which is how a new tag gets made.
-    pub highlighted: Option<usize>,
+    highlighted: Option<usize>,
     /// The tags every target already has, so they can be taken off again.
-    pub current: Vec<SharedString>,
-    pub _subscriptions: Vec<Subscription>,
+    current: Vec<SharedString>,
+    _subscription: Subscription,
 }
 
 impl Tagger {
     /// What Enter applies: the highlighted suggestion, or what was typed.
-    pub fn chosen(&self, typed: &str) -> Option<String> {
+    fn chosen(&self, typed: &str) -> Option<String> {
         match self.highlighted.and_then(|at| self.suggestions.get(at)) {
             Some(tag) => Some(tag.to_string()),
             None => {
@@ -47,6 +51,162 @@ impl Tagger {
                 (!typed.is_empty()).then(|| typed.to_lowercase())
             }
         }
+    }
+}
+
+impl FileBuddy {
+    /// Open the tag input on the marked files, or on the selection.
+    pub(super) fn open_tagger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.action_targets();
+        if targets.is_empty() {
+            return;
+        }
+        let subject: SharedString = match (self.marked.len(), self.selected_hit()) {
+            (0, Some(hit)) => format!("Tag {}", hit.file.filename).into(),
+            (1, _) => "Tag 1 marked file".into(),
+            (n, _) => format!("Tag {n} marked files").into(),
+        };
+
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("a tag, lowercase"));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => this.refresh_suggestions(cx),
+                InputEvent::PressEnter { .. } => {
+                    let typed = input.read(cx).value().to_string();
+                    let chosen = this
+                        .tagger
+                        .as_ref()
+                        .and_then(|tagger| tagger.chosen(&typed));
+                    if let Some(name) = chosen {
+                        this.apply_tag(name, window, cx);
+                    }
+                }
+                _ => {}
+            },
+        );
+
+        let handle = input.read(cx).focus_handle(cx);
+        self.tagger = Some(Tagger {
+            input,
+            subject,
+            current: self.common_tags(&targets),
+            targets,
+            suggestions: Vec::new(),
+            highlighted: None,
+            _subscription: subscription,
+        });
+        self.refresh_suggestions(cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    pub(super) fn close_tagger(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tagger.take().is_some() {
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    fn common_tags(&self, targets: &[String]) -> Vec<SharedString> {
+        tags::common_to(self.db.conn(), targets)
+            .unwrap_or_else(|e| {
+                log::error!("reading the tags failed: {e:#}");
+                Vec::new()
+            })
+            .into_iter()
+            .map(SharedString::from)
+            .collect()
+    }
+
+    /// The existing tags that match what is typed. The first is highlighted, so
+    /// a tag that is already there is what Enter applies, not a near miss of it.
+    fn refresh_suggestions(&mut self, cx: &mut Context<Self>) {
+        let Some(tagger) = &mut self.tagger else {
+            return;
+        };
+        let typed = tagger.input.read(cx).value().trim().to_lowercase();
+        let found = tags::matching(self.db.conn(), &typed, MAX_SUGGESTIONS).unwrap_or_default();
+        let exact = found.contains(&typed);
+        tagger.suggestions = found.into_iter().map(SharedString::from).collect();
+        // Nothing typed is a list to browse, not an answer. A name that is
+        // already a tag needs no suggestion either: Enter would do the same.
+        tagger.highlighted =
+            (!typed.is_empty() && !tagger.suggestions.is_empty() && !exact).then_some(0);
+        cx.notify();
+    }
+
+    pub(super) fn move_highlight(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(tagger) = &mut self.tagger else {
+            return;
+        };
+        let count = tagger.suggestions.len();
+        if count == 0 {
+            return;
+        }
+        // Off either end is what was typed, so a new tag is always reachable.
+        tagger.highlighted = match (tagger.highlighted, forward) {
+            (None, true) => Some(0),
+            (None, false) => Some(count - 1),
+            (Some(at), true) if at + 1 < count => Some(at + 1),
+            (Some(_), true) => None,
+            (Some(0), false) => None,
+            (Some(at), false) => Some(at - 1),
+        };
+        cx.notify();
+    }
+
+    /// Apply one tag to every target. The panel stays open with an empty box,
+    /// because a file usually wants more than one tag.
+    fn apply_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = name.trim().to_lowercase();
+        let Some(tagger) = &self.tagger else { return };
+        if name.is_empty() {
+            return;
+        }
+        let targets = tagger.targets.clone();
+        if let Err(e) = tags::attach(self.db.conn_mut(), &targets, &name) {
+            log::error!("tagging failed: {e:#}");
+            self.flash(format!("tagging failed: {e}"), true, cx);
+            return;
+        }
+        self.flash(
+            format!("tagged {} with {name}", counted(targets.len())),
+            false,
+            cx,
+        );
+        self.after_tag_change(window, cx);
+    }
+
+    fn remove_tag(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tagger) = &self.tagger else { return };
+        let targets = tagger.targets.clone();
+        if let Err(e) = tags::detach(self.db.conn_mut(), &targets, &name) {
+            log::error!("untagging failed: {e:#}");
+            self.flash(format!("untagging failed: {e}"), true, cx);
+            return;
+        }
+        self.flash(
+            format!("took {name} off {}", counted(targets.len())),
+            false,
+            cx,
+        );
+        self.after_tag_change(window, cx);
+    }
+
+    /// The index changed under the results, so run the query again. The panel
+    /// keeps its targets and empties its box for the next tag.
+    fn after_tag_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tagger) = &self.tagger else { return };
+        let input = tagger.input.clone();
+        let current = self.common_tags(&tagger.targets);
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(tagger) = &mut self.tagger {
+            tagger.current = current;
+        }
+        self.rerun_search(cx);
+        self.refresh_suggestions(cx);
     }
 }
 

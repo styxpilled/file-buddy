@@ -1,6 +1,5 @@
 /target
 /ffmpeg
 /whisper.cpp
-/spike/*/target
 /test_videos
 /models

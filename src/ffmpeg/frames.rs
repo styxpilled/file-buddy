@@ -9,10 +9,10 @@ use anyhow::{Context, Result};
 use crate::ffmpeg::{self, Tool};
 
 /// How many frames one file gives, at most.
-pub const MAX_FRAMES: u32 = 10;
+const MAX_FRAMES: u32 = 10;
 /// The rate a very short clip is held to, so a two second clip gives 8 frames
 /// and not 10 copies of the same one.
-pub const MAX_FPS: f64 = 4.0;
+const MAX_FPS: f64 = 4.0;
 
 /// Extracted frames, in order. The directory goes with them.
 pub struct Frames {

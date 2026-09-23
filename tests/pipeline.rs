@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use file_buddy::config::Weights;
+use file_buddy::db::files::State;
 use file_buddy::db::{Db, files, tags};
 use file_buddy::ffmpeg::{self, Tool, thumbnail};
 use file_buddy::index::jobs::Stage;
@@ -167,7 +168,13 @@ fn a_scan_fills_the_database_and_writes_thumbnails() {
     assert_eq!(rows.len(), 3);
 
     for row in &rows {
-        assert_eq!(row.state, "ready", "{} is {}", row.filename, row.state);
+        assert_eq!(
+            row.state,
+            State::Ready,
+            "{} is {:?}",
+            row.filename,
+            row.state
+        );
         assert!(
             thumbnail::exists(&row.hash, &harness.cache),
             "no thumbnail for {}",
@@ -208,13 +215,13 @@ fn an_fts_query_returns_the_right_file_by_filename() {
 fn a_tag_outranks_a_filename_and_the_tag_operator_limits_the_search() {
     let harness = Harness::new();
     harness.scan();
-    let db = harness.db();
+    let mut db = harness.db();
     let still = files::all(db.conn())
         .unwrap()
         .into_iter()
         .find(|r| r.filename == STILL)
         .unwrap();
-    tags::attach(db.conn(), &still.hash, "Honest").unwrap();
+    tags::attach(db.conn_mut(), &[still.hash], "Honest").unwrap();
 
     let hits = search::search(
         db.conn(),
@@ -272,12 +279,12 @@ fn a_rename_keeps_the_hash_the_tags_and_the_finished_stages() {
     harness.scan();
     let hash_before;
     {
-        let db = harness.db();
+        let mut db = harness.db();
         let row = files::by_path(db.conn(), &harness.clips.join(VIDEO))
             .unwrap()
             .unwrap();
         hash_before = row.hash.clone();
-        tags::attach(db.conn(), &row.hash, "reaction").unwrap();
+        tags::attach(db.conn_mut(), &[row.hash], "reaction").unwrap();
     }
 
     let renamed = harness.clips.join("a few small beers.mp4");
@@ -289,7 +296,7 @@ fn a_rename_keeps_the_hash_the_tags_and_the_finished_stages() {
     let db = harness.db();
     let row = files::by_path(db.conn(), &renamed).unwrap().unwrap();
     assert_eq!(row.hash, hash_before);
-    assert_eq!(row.state, "ready");
+    assert_eq!(row.state, State::Ready);
     assert_eq!(
         tags::of_hash(db.conn(), &row.hash).unwrap(),
         vec!["reaction"]
@@ -320,7 +327,7 @@ fn a_file_that_ffmpeg_cannot_open_records_the_error_and_stops() {
     let row = files::by_path(db.conn(), &harness.clips.join("broken.mp4"))
         .unwrap()
         .unwrap();
-    assert_eq!(row.state, "failed");
+    assert_eq!(row.state, State::Failed);
 
     let (state, error): (String, Option<String>) = db
         .conn()
@@ -489,10 +496,9 @@ fn a_deleted_file_keeps_its_tags_until_it_comes_back() {
     harness.scan();
     let still = harness.clips.join(STILL);
     {
-        let db = harness.db();
+        let mut db = harness.db();
         let row = files::by_path(db.conn(), &still).unwrap().unwrap();
-        tags::attach(db.conn(), &row.hash, "doughnut").unwrap();
-        file_buddy::db::fts::refresh(db.conn(), row.id).unwrap();
+        tags::attach(db.conn_mut(), &[row.hash], "doughnut").unwrap();
     }
     assert_eq!(harness.find("doughnut").len(), 1);
 
@@ -523,7 +529,7 @@ fn the_watcher_indexes_a_new_file() {
     assert_eq!(stats.added, 1);
     let db = harness.db();
     let row = files::by_path(db.conn(), &new).unwrap().unwrap();
-    assert_eq!(row.state, "ready", "the copy inherited the probe");
+    assert_eq!(row.state, State::Ready, "the copy inherited the probe");
     assert_eq!(harness.find("beers"), vec!["a few small beers.mp4"]);
 }
 

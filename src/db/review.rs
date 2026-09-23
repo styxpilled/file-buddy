@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
 
-use crate::db::files::{self, FileRow, PRESENT, read_row};
+use crate::db::files::{self, COLUMNS, FileRow, PRESENT, read_row};
 use crate::index::jobs::LONG_FILE_SECONDS;
 use crate::media::filename;
 
@@ -97,10 +97,10 @@ fn long(conn: &Connection) -> Result<Vec<Item>> {
 }
 
 fn failed(conn: &Connection) -> Result<Vec<Item>> {
-    let mut statement = conn.prepare(
-        "SELECT id, path, hash, filename, kind, size, duration, state, mtime, error
-         FROM files WHERE missing_at IS NULL AND state = 'failed' ORDER BY path",
-    )?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT {COLUMNS}, error FROM files
+         WHERE missing_at IS NULL AND state = 'failed' ORDER BY path"
+    ))?;
     let rows = statement.query_map([], |row| {
         Ok(Item {
             file: read_row(row)?,

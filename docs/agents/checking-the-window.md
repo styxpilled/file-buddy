@@ -11,8 +11,10 @@ Call it from PowerShell as above. `pwsh -File` gives the whole list to `-Steps`
 as one string.
 
 It prints the path of each picture. Steps run in order: `keys:<SendKeys>`,
-`click:<x>,<y>`, `dblclick:<x>,<y>`, `scroll:<x>,<y>,<notches>`, `shot:<name>`,
-`wait:<milliseconds>`. Each step waits a moment after it, so two `click` steps
+`click:<x>,<y>`, `dblclick:<x>,<y>`, `scroll:<x>,<y>,<notches>`,
+`hover:<x>,<y>`, `shot:<name>`, `wait:<milliseconds>`. `hover` prints the cursor
+the window shows at that point, `hand`, `arrow` or `other`, because a picture
+does not hold the cursor. Each step waits a moment after it, so two `click` steps
 are never a double click. `SendKeys` spells the special keys `{ESC}`, `{DOWN}`,
 `{ENTER}`, `{TAB}`. A click is measured from the
 top left corner of the window, which is where a picture of the window measures

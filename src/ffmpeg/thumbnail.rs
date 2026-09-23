@@ -2,7 +2,7 @@
 //! picks a representative frame and so avoids a black opening frame. Video,
 //! animation and still image all take the same command.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
@@ -10,12 +10,12 @@ use crate::ffmpeg::{self, Tool};
 use crate::paths;
 
 /// The longest edge of a thumbnail, in pixels.
-pub const MAX_EDGE: u32 = 480;
+const MAX_EDGE: u32 = 480;
 /// How many frames the filter compares before it picks one.
 const CANDIDATES: u32 = 100;
 
-/// Write the thumbnail of one file into the cache and return its path.
-pub fn generate(source: &Path, hash: &str, cache: &Path) -> Result<PathBuf> {
+/// Write the thumbnail of one file into the cache.
+pub fn generate(source: &Path, hash: &str, cache: &Path) -> Result<()> {
     let destination = paths::thumbnail_path(cache, hash);
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -44,8 +44,7 @@ pub fn generate(source: &Path, hash: &str, cache: &Path) -> Result<PathBuf> {
     }
     // Renamed last, so a partial file is never mistaken for a finished one.
     std::fs::rename(&partial, &destination)
-        .with_context(|| format!("move the thumbnail to {}", destination.display()))?;
-    Ok(destination)
+        .with_context(|| format!("move the thumbnail to {}", destination.display()))
 }
 
 /// Whether the cache already holds this thumbnail.

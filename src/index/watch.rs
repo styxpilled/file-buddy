@@ -195,24 +195,21 @@ pub fn apply(
         if ignore.is_match(path) {
             continue;
         }
-        match path.is_file() {
-            true if Kind::from_path(path).is_some() => present.push(path.clone()),
-            true => {}
-            false => gone.extend(files::rows_under(db.conn(), path)?),
+        if !path.is_file() {
+            gone.extend(files::rows_under(db.conn(), path)?);
+        } else if let Some(kind) = Kind::from_path(path) {
+            present.push((path.clone(), kind));
         }
     }
 
-    for path in present {
-        let Some(kind) = Kind::from_path(&path) else {
-            continue;
-        };
+    for (path, kind) in present {
         let known = files::by_path(db.conn(), &path)?.is_some();
         if !known && let Some(at) = moved_from(&mut gone, &path) {
             let row = gone.remove(at);
             files::set_path(db.conn(), row.id, &path)?;
             stats.moved += 1;
         }
-        match scan::visit(db, &path, kind, cache) {
+        match scan::visit(db.conn(), &path, kind, cache) {
             Ok((_, files::Upsert::Added)) => stats.added += 1,
             Ok((_, files::Upsert::Changed)) => stats.changed += 1,
             Ok((_, files::Upsert::Unchanged)) => {}

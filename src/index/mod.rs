@@ -7,6 +7,4 @@ pub mod scan;
 pub mod stages;
 pub mod watch;
 
-pub use pipeline::{PipelineStats, StageStats, read_text, run, transcribe};
-pub use scan::ScanStats;
-pub use watch::{WatchStats, Watcher};
+pub use pipeline::{read_text, run, transcribe};

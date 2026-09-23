@@ -68,6 +68,14 @@ pub fn refresh_hash(conn: &Connection, hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether the file has an index row.
+pub fn has_row(conn: &Connection, file_id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT 1 FROM fts WHERE rowid = ?1", [file_id], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
 /// Rebuild every index row, and return how many. This is what a change to
 /// `ocr::noise`, to the filename split or to a weight of the index costs: the
 /// tables that own the text are untouched.

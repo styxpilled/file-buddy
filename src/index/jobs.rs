@@ -195,6 +195,15 @@ pub fn progress(conn: &Connection, stage: Stage) -> Result<Progress> {
     )?)
 }
 
+/// How many jobs of this stage are in each state.
+pub fn counts(conn: &Connection, stage: Stage) -> Result<Vec<(String, i64)>> {
+    let mut statement = conn.prepare(
+        "SELECT state, count(*) FROM jobs WHERE stage = ?1 GROUP BY state ORDER BY state",
+    )?;
+    let rows = statement.query_map([stage.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
 /// Move every job left running by a process that died back to pending. Called
 /// once at startup, never while workers run.
 pub fn requeue_running(conn: &Connection) -> Result<usize> {

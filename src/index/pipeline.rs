@@ -54,7 +54,7 @@ pub fn transcribe(db_path: &Path, cache: &Path) -> Result<StageStats> {
 }
 
 /// Drain one stage with as many workers as the stage allows.
-pub fn run_stage(db_path: &Path, cache: &Path, stage: Stage) -> Result<StageStats> {
+fn run_stage(db_path: &Path, cache: &Path, stage: Stage) -> Result<StageStats> {
     let done = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let workers = stage

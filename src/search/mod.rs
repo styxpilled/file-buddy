@@ -12,7 +12,7 @@ use rusqlite::{Connection, params_from_iter};
 
 use self::query::build_match;
 use crate::config::Weights;
-use crate::db::files::{self, FileRow};
+use crate::db::files::{self, FileRow, PRESENT, read_row};
 use crate::media::Kind;
 
 /// Which column gave a result its best score. The grid shows it as a badge.
@@ -25,6 +25,9 @@ pub enum Signal {
 }
 
 impl Signal {
+    /// In the column order of `fts`.
+    const COLUMNS: [Signal; 4] = [Signal::Tags, Signal::Filename, Signal::Speech, Signal::Ocr];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Signal::Tags => "tag",
@@ -118,15 +121,10 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
 
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
-        let per_column = [
-            (Signal::Tags, row.get::<_, f64>(10)?),
-            (Signal::Filename, row.get::<_, f64>(11)?),
-            (Signal::Speech, row.get::<_, f64>(12)?),
-            (Signal::Ocr, row.get::<_, f64>(13)?),
-        ];
-        let signal = best_signal(&per_column);
-        let snippet: String = row.get(14 + signal_index(signal))?;
-        let file = read_file(row)?;
+        let scores = [row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?];
+        let column = best_column(scores);
+        let snippet: String = row.get(14 + column)?;
+        let file = read_row(row)?;
         let matched = if snippet.trim().is_empty() {
             file.filename.clone()
         } else {
@@ -135,7 +133,7 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
         Ok(Hit {
             file,
             score: row.get(9)?,
-            signal,
+            signal: Signal::COLUMNS[column],
             matched,
         })
     })?;
@@ -148,14 +146,13 @@ pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
     let filter = filters(request, &mut values, "");
     values.push(Value::Integer(request.limit as i64));
     let sql = format!(
-        "SELECT id, path, hash, filename, kind, size, duration, state, mtime
-         FROM files WHERE missing_at IS NULL{filter} ORDER BY mtime DESC LIMIT ?{}",
+        "{PRESENT}{filter} ORDER BY mtime DESC LIMIT ?{}",
         values.len()
     );
 
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
-        let file = read_file(row)?;
+        let file = read_row(row)?;
         Ok(Hit {
             matched: file.filename.clone(),
             file,
@@ -187,37 +184,12 @@ fn filters(request: &Request, values: &mut Vec<Value>, table: &str) -> String {
     clauses
 }
 
-fn read_file(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
-    let kind: String = row.get(4)?;
-    Ok(FileRow {
-        id: row.get(0)?,
-        path: row.get::<_, String>(1)?.into(),
-        hash: row.get(2)?,
-        filename: row.get(3)?,
-        kind: kind.parse().unwrap_or(Kind::Still),
-        size: row.get::<_, i64>(5)? as u64,
-        duration: row.get(6)?,
-        state: row.get(7)?,
-        mtime: row.get(8)?,
-    })
-}
-
-fn signal_index(signal: Signal) -> usize {
-    match signal {
-        Signal::Tags => 0,
-        Signal::Filename => 1,
-        Signal::Speech => 2,
-        Signal::Ocr => 3,
-    }
-}
-
-/// A column that did not match scores zero, so the lowest score wins.
-fn best_signal(scores: &[(Signal, f64); 4]) -> Signal {
-    scores
-        .iter()
-        .min_by(|a, b| a.1.total_cmp(&b.1))
-        .map(|(signal, _)| *signal)
-        .unwrap_or(Signal::Filename)
+/// The column that gave the best score. A column that did not match scores
+/// zero, so the lowest score wins.
+fn best_column(scores: [f64; 4]) -> usize {
+    (0..scores.len())
+        .min_by(|a, b| scores[*a].total_cmp(&scores[*b]))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -226,12 +198,7 @@ mod tests {
 
     #[test]
     fn the_strongest_column_gives_the_badge() {
-        let scores = [
-            (Signal::Tags, 0.0),
-            (Signal::Filename, -1.5),
-            (Signal::Speech, -0.2),
-            (Signal::Ocr, 0.0),
-        ];
-        assert_eq!(best_signal(&scores), Signal::Filename);
+        let column = best_column([0.0, -1.5, -0.2, 0.0]);
+        assert_eq!(Signal::COLUMNS[column], Signal::Filename);
     }
 }

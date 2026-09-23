@@ -8,7 +8,7 @@ use gpui::{AnyElement, Context, px, size};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex, v_virtual_list};
 
 use super::{table, tile};
-use crate::ui::FileBuddy;
+use crate::ui::{FileBuddy, Page};
 
 pub const TILE_WIDTH: f32 = 220.;
 pub const TILE_HEIGHT: f32 = 124.;
@@ -30,14 +30,11 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             .items_center()
             .justify_center()
             .text_color(cx.theme().muted_foreground)
-            .child(if this.review.is_some() {
-                "Nothing to review in this group."
-            } else if this.listing && this.folder.is_some() {
-                "This folder is empty."
-            } else if this.folders_open && !this.listing {
-                "Nothing in this folder matches."
-            } else {
-                "Nothing here. Check the roots in file-buddy.toml."
+            .child(match this.page() {
+                Page::Review => "Nothing to review in this group.",
+                Page::Folders if !this.listing => "Nothing in this folder matches.",
+                Page::Folders if this.folder.is_some() => "This folder is empty.",
+                _ => "Nothing here. Check the roots in file-buddy.toml.",
             })
             .into_any_element();
     }
@@ -50,29 +47,24 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let sizes = Rc::new(vec![size(px(f32::MAX), px(ROW_HEIGHT)); rows]);
     let scroll = this.scroll.clone();
 
-    v_virtual_list(
-        cx.entity(),
-        "grid",
-        sizes,
-        move |this, range, window, cx| {
-            range
-                .map(|row| {
-                    let first = row * columns;
-                    let last = (first + columns).min(this.results.len());
-                    h_flex()
-                        .w_full()
-                        .gap(px(GAP))
-                        .px(px(PADDING))
-                        .children(
-                            (first..last)
-                                .map(|index| tile::tile(this, index, window, cx))
-                                .collect::<Vec<_>>(),
-                        )
-                        .into_any_element()
-                })
-                .collect()
-        },
-    )
+    v_virtual_list(cx.entity(), "grid", sizes, move |this, range, _, cx| {
+        range
+            .map(|row| {
+                let first = row * columns;
+                let last = (first + columns).min(this.results.len());
+                h_flex()
+                    .w_full()
+                    .gap(px(GAP))
+                    .px(px(PADDING))
+                    .children(
+                        (first..last)
+                            .map(|index| tile::tile(this, index, cx))
+                            .collect::<Vec<_>>(),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    })
     .track_scroll(&scroll)
     .into_any_element()
 }

@@ -2,6 +2,7 @@
 //! through its hash. Every stage result is keyed by the hash.
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -9,7 +10,6 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use crate::db::{fts, now};
 use crate::ffmpeg::probe::Probe;
 use crate::media::Kind;
-use crate::media::filename;
 
 /// The state of the whole file, as a summary of its stages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,19 @@ impl State {
     }
 }
 
+impl FromStr for State {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Ok(match s {
+            "pending" => State::Pending,
+            "ready" => State::Ready,
+            "failed" => State::Failed,
+            other => anyhow::bail!("unknown file state {other:?}"),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: i64,
@@ -39,7 +52,7 @@ pub struct FileRow {
     pub kind: Kind,
     pub size: u64,
     pub duration: Option<f64>,
-    pub state: String,
+    pub state: State,
     /// Seconds since the Unix epoch, as the scan read it from disk.
     pub mtime: i64,
 }
@@ -75,11 +88,7 @@ pub struct Scanned<'a> {
 /// Insert the file, or update the row that holds this path. A rename is a new
 /// path with a known hash, so it costs one insert and no stage work.
 pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
-    let filename = file
-        .path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let filename = FileRow::name_of(file.path);
     let path = file.path.to_string_lossy();
 
     let existing: Option<(i64, String)> = conn
@@ -190,7 +199,7 @@ pub fn by_hash(conn: &Connection, hash: &str) -> Result<Vec<FileRow>> {
 }
 
 pub fn by_path(conn: &Connection, path: &Path) -> Result<Option<FileRow>> {
-    let mut statement = conn.prepare(&format!("{SELECT} WHERE path = ?1"))?;
+    let mut statement = conn.prepare(&format!("SELECT {COLUMNS} FROM files WHERE path = ?1"))?;
     Ok(statement
         .query_row([path.to_string_lossy()], read_row)
         .optional()?)
@@ -303,21 +312,17 @@ pub fn mark_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> {
     Ok(unseen.len())
 }
 
-/// The filename as the search index holds it.
-pub fn indexed_filename(filename: &str) -> String {
-    filename::index_form(filename)
-}
+/// The columns `read_row` reads, in its order.
+pub(crate) const COLUMNS: &str = "id, path, hash, filename, kind, size, duration, state, mtime";
 
-pub(crate) const SELECT: &str =
-    "SELECT id, path, hash, filename, kind, size, duration, state, mtime FROM files";
-
-/// The same, of the files that are on disk. Every screen uses this one.
+/// The files that are on disk. Every screen uses this one.
 pub(crate) const PRESENT: &str =
-    "SELECT id, path, hash, filename, kind, size, duration, state, mtime FROM files
-     WHERE missing_at IS NULL";
+    "SELECT id, path, hash, filename, kind, size, duration, state, mtime
+     FROM files WHERE missing_at IS NULL";
 
 pub(crate) fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
     let kind: String = row.get(4)?;
+    let state: String = row.get(7)?;
     Ok(FileRow {
         id: row.get(0)?,
         path: PathBuf::from(row.get::<_, String>(1)?),
@@ -326,7 +331,7 @@ pub(crate) fn read_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         kind: kind.parse().unwrap_or(Kind::Still),
         size: row.get::<_, i64>(5)? as u64,
         duration: row.get(6)?,
-        state: row.get(7)?,
+        state: state.parse().unwrap_or(State::Pending),
         mtime: row.get(8)?,
     })
 }

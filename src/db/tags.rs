@@ -9,7 +9,7 @@ use rusqlite::{Connection, params, params_from_iter};
 use crate::db::fts;
 
 /// The tag id, creating the tag if it is new. Tags are lowercase.
-pub fn ensure(conn: &Connection, name: &str) -> Result<i64> {
+fn ensure(conn: &Connection, name: &str) -> Result<i64> {
     let name = name.trim().to_lowercase();
     conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [&name])?;
     Ok(
@@ -19,28 +19,10 @@ pub fn ensure(conn: &Connection, name: &str) -> Result<i64> {
     )
 }
 
-pub fn attach(conn: &Connection, hash: &str, name: &str) -> Result<()> {
-    let tag_id = ensure(conn, name)?;
-    conn.execute(
-        "INSERT OR IGNORE INTO file_tags (hash, tag_id) VALUES (?1, ?2)",
-        params![hash, tag_id],
-    )?;
-    fts::refresh_hash(conn, hash)
-}
-
-pub fn detach(conn: &Connection, hash: &str, name: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM file_tags WHERE hash = ?1
-         AND tag_id IN (SELECT id FROM tags WHERE name = ?2)",
-        params![hash, name.trim().to_lowercase()],
-    )?;
-    fts::refresh_hash(conn, hash)
-}
-
 /// Attach one tag to several files at once. It is a transaction because each
 /// file rebuilds its own index row: a failure halfway would leave some files
 /// tagged, some indexed and no way to tell which.
-pub fn attach_many(conn: &mut Connection, hashes: &[String], name: &str) -> Result<()> {
+pub fn attach(conn: &mut Connection, hashes: &[String], name: &str) -> Result<()> {
     let transaction = conn.transaction()?;
     let tag_id = ensure(&transaction, name)?;
     for hash in hashes {
@@ -54,7 +36,7 @@ pub fn attach_many(conn: &mut Connection, hashes: &[String], name: &str) -> Resu
     Ok(())
 }
 
-pub fn detach_many(conn: &mut Connection, hashes: &[String], name: &str) -> Result<()> {
+pub fn detach(conn: &mut Connection, hashes: &[String], name: &str) -> Result<()> {
     let transaction = conn.transaction()?;
     let name = name.trim().to_lowercase();
     for hash in hashes {
@@ -151,12 +133,6 @@ pub fn by_hash(conn: &Connection) -> Result<HashMap<String, Vec<String>>> {
     Ok(tags)
 }
 
-pub fn all(conn: &Connection) -> Result<Vec<String>> {
-    let mut statement = conn.prepare("SELECT name FROM tags ORDER BY name")?;
-    let rows = statement.query_map([], |row| row.get(0))?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,7 +155,7 @@ mod tests {
         seed(&db, "bbb", "two.mp4");
 
         let hashes = vec!["aaa".to_string(), "bbb".to_string()];
-        attach_many(db.conn_mut(), &hashes, "  Reaction  ").unwrap();
+        attach(db.conn_mut(), &hashes, "  Reaction  ").unwrap();
 
         // Lowercased on the way in, so one tag cannot become three.
         assert_eq!(of_hash(db.conn(), "aaa").unwrap(), vec!["reaction"]);
@@ -195,7 +171,7 @@ mod tests {
             .unwrap();
         assert_eq!(found, 2);
 
-        detach_many(db.conn_mut(), &hashes, "REACTION").unwrap();
+        detach(db.conn_mut(), &hashes, "REACTION").unwrap();
         assert!(of_hash(db.conn(), "aaa").unwrap().is_empty());
         // Taking it off the last file takes the name out of the autocomplete.
         assert!(matching(db.conn(), "reaction", 10).unwrap().is_empty());
@@ -209,8 +185,8 @@ mod tests {
 
         // `unfunny` holds `funny` but does not start with it. `funnny` is the
         // typo the autocomplete exists to prevent.
-        attach_many(db.conn_mut(), &["aaa".into(), "bbb".into()], "unfunny").unwrap();
-        attach_many(db.conn_mut(), &["aaa".into()], "funnny").unwrap();
+        attach(db.conn_mut(), &["aaa".into(), "bbb".into()], "unfunny").unwrap();
+        attach(db.conn_mut(), &["aaa".into()], "funnny").unwrap();
         ensure(db.conn(), "funny").unwrap();
 
         let found = matching(db.conn(), "funn", 10).unwrap();
@@ -232,8 +208,8 @@ mod tests {
         seed(&db, "aaa", "one.mp4");
         seed(&db, "bbb", "two.mp4");
 
-        attach_many(db.conn_mut(), &["aaa".into(), "bbb".into()], "both").unwrap();
-        attach_many(db.conn_mut(), &["aaa".into()], "one only").unwrap();
+        attach(db.conn_mut(), &["aaa".into(), "bbb".into()], "both").unwrap();
+        attach(db.conn_mut(), &["aaa".into()], "one only").unwrap();
 
         let hashes = vec!["aaa".to_string(), "bbb".to_string()];
         assert_eq!(common_to(db.conn(), &hashes).unwrap(), vec!["both"]);
