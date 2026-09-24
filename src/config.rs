@@ -1,5 +1,6 @@
 //! The TOML configuration file, written next to the executable on first run.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -15,6 +16,11 @@ pub struct Config {
     pub weights: Weights,
     #[serde(default)]
     pub paused: Paused,
+    /// The window keys the user changed, by action. An action that is not here
+    /// keeps its default keys, and an empty list unbinds it. The window checks
+    /// the entries, since only it knows the actions.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, Vec<String>>,
 }
 
 /// Stages that start no new job. A job that runs when one is paused finishes.
@@ -70,6 +76,7 @@ impl Default for Config {
             ignore: default_ignore(),
             weights: Weights::default(),
             paused: Paused::default(),
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -107,6 +114,7 @@ impl Config {
         ignore: &str,
         weights: [&str; 5],
         paused: Paused,
+        keys: BTreeMap<String, Vec<String>>,
     ) -> Result<Self> {
         if roots.is_empty() {
             anyhow::bail!("add at least one folder");
@@ -142,6 +150,7 @@ impl Config {
                 visual: parsed[4],
             },
             paused,
+            keys,
         };
         config.ignore_set()?;
         Ok(config)
@@ -217,6 +226,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
             "**/thumbs/**\n\n  **/.git/**  \n",
             ["20", "10.5", " 3 ", "0", "0.5"],
             Paused::default(),
+            BTreeMap::new(),
         )
         .unwrap();
         assert_eq!(config.ignore, ["**/thumbs/**", "**/.git/**"]);
@@ -225,7 +235,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         assert_eq!(config.weights.visual, 0.5);
 
         let error = |roots, ignore, weights| {
-            Config::edited(roots, ignore, weights, Paused::default())
+            Config::edited(roots, ignore, weights, Paused::default(), BTreeMap::new())
                 .unwrap_err()
                 .to_string()
         };
@@ -242,6 +252,29 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
             "the screen text weight must be a number of 0 or more"
         );
         assert!(error(roots, "a/{b", ["1", "1", "1", "1", "1"]).starts_with("bad ignore glob"));
+    }
+
+    #[test]
+    fn changed_keys_read_back_and_no_change_writes_no_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file-buddy.toml");
+        let config = Config::load_or_create(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("[keys]"));
+
+        let keys = BTreeMap::from([
+            (
+                "rename_file".to_string(),
+                vec!["r".to_string(), "f2".to_string()],
+            ),
+            ("toggle_table".to_string(), vec![]),
+        ]);
+        Config {
+            keys: keys.clone(),
+            ..config
+        }
+        .write(&path)
+        .unwrap();
+        assert_eq!(Config::load_or_create(&path).unwrap().keys, keys);
     }
 
     #[test]

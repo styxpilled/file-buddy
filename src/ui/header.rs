@@ -75,6 +75,16 @@ pub fn header(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                     .child(this.player.volume_label()),
             )
         })
+        .when(!this.key_problems.is_empty(), |header| {
+            header.child(
+                div()
+                    .max_w(px(260.))
+                    .truncate()
+                    .text_sm()
+                    .text_color(cx.theme().danger)
+                    .child(format!("[keys] skipped: {}", this.key_problems.join("; "))),
+            )
+        })
         .when_some(this.indexer.progress.as_ref(), |header, progress| {
             header.child(
                 div()

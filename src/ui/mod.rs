@@ -6,6 +6,7 @@ mod folders;
 mod grid;
 mod header;
 mod indexing;
+mod keys;
 mod player;
 mod preview;
 mod renamer;
@@ -18,14 +19,14 @@ mod tagger;
 mod tile;
 mod visual;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, Entity, FocusHandle, Focusable, KeyBinding, ScrollStrategy,
-    SharedString, Task, Window, div, px,
+    App, Context, ElementId, Entity, FocusHandle, Focusable, ScrollStrategy, SharedString,
+    Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
@@ -101,68 +102,19 @@ gpui_kit::actions!(
         RowDown,
         EditRow,
         DeleteRow,
-        AddRow
+        AddRow,
+        KeyRowUp,
+        KeyRowDown,
+        CaptureKey,
+        RemoveKey,
+        ResetKeys
     ]
 );
 
-/// The window keys are plain letters, so they must not reach the search box
-/// while it types. `!Input` fails the match when any node on the focus path is
-/// an input. Autoplay is the one key that works either way. The rows of the
-/// Speech and Text tabs take the keys they need over the grid's.
-pub fn bind_keys(cx: &mut App) {
-    let grid = Some("FileBuddy && !Input");
-    let rows = Some("Rows && !Input");
-    cx.bind_keys([
-        KeyBinding::new("left", SelectLeft, grid),
-        KeyBinding::new("right", SelectRight, grid),
-        KeyBinding::new("up", SelectUp, grid),
-        KeyBinding::new("down", SelectDown, grid),
-        KeyBinding::new("f", FocusQuery, grid),
-        KeyBinding::new("m", ToggleMuted, grid),
-        KeyBinding::new("space", TogglePaused, grid),
-        KeyBinding::new("shift-left", SkipBack, grid),
-        KeyBinding::new("shift-right", SkipForward, grid),
-        KeyBinding::new("enter", Activate, grid),
-        KeyBinding::new("backspace", GoUp, grid),
-        KeyBinding::new("s", CycleSort, grid),
-        KeyBinding::new("v", ToggleTable, grid),
-        KeyBinding::new("a", MoreLikeThis, grid),
-        KeyBinding::new("i", CycleDetail, grid),
-        KeyBinding::new("e", EditRows, grid),
-        KeyBinding::new("up", RowUp, rows),
-        KeyBinding::new("down", RowDown, rows),
-        KeyBinding::new("enter", EditRow, rows),
-        KeyBinding::new("delete", DeleteRow, rows),
-        KeyBinding::new("l", AddRow, rows),
-        KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
-        KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
-        KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
-        KeyBinding::new("t", TagFiles, grid),
-        KeyBinding::new("x", ToggleMark, grid),
-        KeyBinding::new("r", RenameFile, grid),
-        KeyBinding::new("ctrl-r", RenameFile, Some("FileBuddy")),
-        KeyBinding::new("f2", RenameFile, Some("FileBuddy")),
-        KeyBinding::new("ctrl-1", ShowBrowse, Some("FileBuddy")),
-        KeyBinding::new("ctrl-2", ShowFolders, Some("FileBuddy")),
-        KeyBinding::new("ctrl-3", ShowReview, Some("FileBuddy")),
-        KeyBinding::new("ctrl-4", ShowSettings, Some("FileBuddy")),
-        KeyBinding::new("ctrl-s", SaveSettings, Some("FileBuddy")),
-        KeyBinding::new("alt-1", ReviewDuplicates, Some("FileBuddy")),
-        KeyBinding::new("alt-2", ReviewLong, Some("FileBuddy")),
-        KeyBinding::new("alt-3", ReviewFailed, Some("FileBuddy")),
-        KeyBinding::new("alt-4", ReviewPoorNames, Some("FileBuddy")),
-        // `input::Escape` reaches this view only while an input has focus, so
-        // escape needs a binding of its own for the rest of the time.
-        KeyBinding::new("escape", Dismiss, grid),
-        // Plain arrows belong to the text in the tag input, so the suggestion
-        // list takes the ones the input leaves alone.
-        KeyBinding::new("alt-down", NextSuggestion, Some("FileBuddy")),
-        KeyBinding::new("alt-up", PreviousSuggestion, Some("FileBuddy")),
-        KeyBinding::new("ctrl-space", ToggleAutoplay, Some("FileBuddy")),
-        KeyBinding::new("f5", Rescan, Some("FileBuddy")),
-        KeyBinding::new("ctrl-up", VolumeUp, Some("FileBuddy")),
-        KeyBinding::new("ctrl-down", VolumeDown, Some("FileBuddy")),
-    ]);
+/// Bind every key: the fixed ones, the defaults and the user's changes.
+/// Returns the changes that could not apply.
+pub fn bind_keys(changes: &BTreeMap<String, Vec<String>>, cx: &mut App) -> Vec<String> {
+    keys::apply(changes, cx)
 }
 
 pub struct FileBuddy {
@@ -204,6 +156,10 @@ pub struct FileBuddy {
     renamer: Option<Renamer>,
     /// The cursor on the rows of the Speech or Text tab.
     rows: Option<RowEditor>,
+    /// The entries of `[keys]` that could not apply, for the header.
+    key_problems: Vec<String>,
+    /// Takes the next key while the Keys section of Settings captures one.
+    _key_capture: Subscription,
     /// The file menu in the side pane is open and holds focus.
     menu_open: bool,
     /// The folder the Folders page shows, or `None` for the list of roots. It
@@ -236,7 +192,7 @@ enum Mode {
     /// Its group replaces the results.
     Review(Review),
     /// The unsaved form.
-    Settings(Settings),
+    Settings(Box<Settings>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +276,8 @@ impl FileBuddy {
             tagger: None,
             renamer: None,
             rows: None,
+            key_problems: keys::resolve(&config.keys).problems(),
+            _key_capture: settings::capture_keys(cx),
             menu_open: false,
             folder: None,
             sort: Sort::default(),
@@ -363,7 +321,7 @@ impl FileBuddy {
             }
             Page::Review => self.show_group(None, window, cx),
             Page::Settings => {
-                self.mode = Mode::Settings(Settings::new(&self.config, window, cx));
+                self.mode = Mode::Settings(Box::new(Settings::new(&self.config, window, cx)));
                 self.listing = false;
                 // Nothing plays behind the form, and no key acts on a file that
                 // cannot be seen.
@@ -778,8 +736,21 @@ impl Render for FileBuddy {
             .text_color(cx.theme().foreground)
             .on_action(cx.listener(|this, _: &SelectLeft, _, cx| this.move_selection(-1, 0, cx)))
             .on_action(cx.listener(|this, _: &SelectRight, _, cx| this.move_selection(1, 0, cx)))
-            .on_action(cx.listener(|this, _: &SelectUp, _, cx| this.move_selection(0, -1, cx)))
-            .on_action(cx.listener(|this, _: &SelectDown, _, cx| this.move_selection(0, 1, cx)))
+            .on_action(cx.listener(|this, _: &SelectUp, window, cx| {
+                if !this.focus_keys(window, cx) {
+                    this.move_selection(0, -1, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SelectDown, window, cx| {
+                if !this.focus_keys(window, cx) {
+                    this.move_selection(0, 1, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &KeyRowUp, _, cx| this.move_key_row(false, cx)))
+            .on_action(cx.listener(|this, _: &KeyRowDown, _, cx| this.move_key_row(true, cx)))
+            .on_action(cx.listener(|this, _: &CaptureKey, _, cx| this.start_capture(cx)))
+            .on_action(cx.listener(|this, _: &RemoveKey, _, cx| this.remove_key(cx)))
+            .on_action(cx.listener(|this, _: &ResetKeys, _, cx| this.reset_keys(cx)))
             .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleMuted, _, cx| {
                 this.player.toggle_muted();

@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Hsla, div, px, transparent_black};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex, v_virtual_list};
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
@@ -42,12 +43,17 @@ pub fn table(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .border_color(cx.theme().border),
         )
         .child(
-            div().flex_1().min_h_0().child(
-                v_virtual_list(cx.entity(), "table", sizes, |this, range, _, cx| {
-                    range.map(|index| row(this, index, cx)).collect()
-                })
-                .track_scroll(&this.scroll),
-            ),
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    v_virtual_list(cx.entity(), "table", sizes, |this, range, _, cx| {
+                        range.map(|index| row(this, index, cx)).collect()
+                    })
+                    .track_scroll(&this.scroll),
+                )
+                .vertical_scrollbar(&*this.scroll),
         )
         .into_any_element()
 }

@@ -4,7 +4,8 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, px, size};
+use gpui::{AnyElement, Context, div, px, size};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex, v_virtual_list};
 
 use super::{table, tile};
@@ -47,7 +48,7 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let sizes = Rc::new(vec![size(px(f32::MAX), px(ROW_HEIGHT)); rows]);
     let scroll = this.scroll.clone();
 
-    v_virtual_list(cx.entity(), "grid", sizes, move |this, range, _, cx| {
+    let list = v_virtual_list(cx.entity(), "grid", sizes, move |this, range, _, cx| {
         range
             .map(|row| {
                 let first = row * columns;
@@ -65,8 +66,13 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             })
             .collect()
     })
-    .track_scroll(&scroll)
-    .into_any_element()
+    .track_scroll(&scroll);
+    div()
+        .relative()
+        .size_full()
+        .child(list)
+        .vertical_scrollbar(&*scroll)
+        .into_any_element()
 }
 
 #[cfg(test)]

@@ -90,7 +90,9 @@ Two things follow from that:
         visual.rs     the vectors in memory, the cutoff, the merge with the
                       text matches, and the search by the look of files
       ui/             the window. The only directory that knows about GPUI
-        mod.rs        the view, its keys, the results and the selection
+        mod.rs        the view, its actions, the results and the selection
+        keys.rs       the default keys, the fixed keys, the `[keys]` changes
+                      and the rules that join them
         header.rs     the page tabs, the chips, the view buttons, the state line
         grid.rs       the virtual grid of results
         tile.rs       one result: thumbnail, hover video, badge, matched text

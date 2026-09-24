@@ -241,16 +241,20 @@ The keys inside the text inputs belong to gpui-component and do not change.
   stop the save. The error names both actions.
 - **No key sequences.** Only single keys with modifiers.
 - **Settings.** A Keys section lists each action that can change, with its
-  keys. Enter captures the next key and adds it. `delete` removes the last key
+  keys. Up or down on the page, outside a field, goes into the list. Enter
+  captures the next key and adds it. `delete` removes the last key
   of the row. `r` resets the row to the default. Escape cancels a capture. A row
   that differs from the default is marked. `ctrl-s` saves, as for the rest of
   the page.
 - **A bad entry.** An unknown action or a key GPUI cannot parse is skipped. The
   other entries apply. The header and the Keys section name what was skipped.
 - **When keys apply.** On start and on save, with no restart. The application
-  clears all bindings, then binds gpui-component's keys, the defaults and the
-  overrides again. `clear_key_bindings` also removes gpui-component's keys,
-  which is why they are bound again.
+  clears all bindings, then binds gpui-component's keys, the fixed keys, the
+  defaults and the overrides again. `clear_key_bindings` also removes
+  gpui-component's keys, so the first bind keeps a copy of them to bind again.
+- **A key must be a key.** GPUI takes any word as a key name, and a key named
+  `blah` never fires. A key is a single character, an F key or a named key
+  such as `space` or `pageup`, with modifiers.
 
 ## FFmpeg
 

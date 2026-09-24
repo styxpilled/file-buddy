@@ -1,31 +1,48 @@
 //! The Settings page. It edits the fields of `file-buddy.toml`: the folders to
-//! index, the ignore globs, the search weights and the paused stages. A switch
-//! that pauses a stage is written at once. Nothing else is written until Save,
-//! and Save writes nothing that `Config::edited` refuses.
+//! index, the ignore globs, the search weights, the paused stages and the keys.
+//! A switch that pauses a stage is written at once. Nothing else is written
+//! until Save, and Save writes nothing that `Config::edited` refuses or that
+//! gives one key to two actions.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, PathPromptOptions, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, Entity, FocusHandle, Keystroke, PathPromptOptions, ScrollHandle,
+    Subscription, Window, div, px,
+};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 
 use crate::config::{Config, Paused};
 use crate::index::jobs::Stage;
 use crate::paths;
+use crate::ui::keys::{self, ACTIONS};
 use crate::ui::{FileBuddy, Mode};
 
 const PAGE_WIDTH: f32 = 720.;
 const WEIGHT_WIDTH: f32 = 120.;
 const WEIGHT_NAMES: [&str; 5] = ["Tags", "Filename", "Speech", "Screen text", "Visual"];
+const KEY_LIST_HEIGHT: f32 = 320.;
+const KEY_NAME_WIDTH: f32 = 180.;
 
 pub struct Settings {
     roots: Vec<PathBuf>,
     ignore: Entity<TextareaState>,
     /// In column order, as `Config::edited` takes them.
     weights: [Entity<InputState>; 5],
+    /// The `[keys]` table as edited: only the actions that differ.
+    keys: BTreeMap<String, Vec<String>>,
+    /// The row of `ACTIONS` that the keys act on.
+    key_row: usize,
+    key_focus: FocusHandle,
+    key_scroll: ScrollHandle,
+    /// The next key pressed goes to the row.
+    capturing: bool,
 }
 
 impl Settings {
@@ -48,6 +65,21 @@ impl Settings {
             weights: values.map(|value| {
                 cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
             }),
+            keys: config.keys.clone(),
+            key_row: 0,
+            key_focus: cx.focus_handle(),
+            key_scroll: ScrollHandle::new(),
+            capturing: false,
+        }
+    }
+
+    /// Give a row these keys. A row with its default keys leaves the table.
+    fn set_keys(&mut self, name: &str, keys: Vec<String>) {
+        let action = ACTIONS.iter().find(|action| action.name == name);
+        if action.is_some_and(|action| keys == keys::keys_of(action, &BTreeMap::new())) {
+            self.keys.remove(name);
+        } else {
+            self.keys.insert(name.to_string(), keys);
         }
     }
 
@@ -63,6 +95,7 @@ impl Settings {
             &ignore,
             weights.each_ref().map(String::as_str),
             paused,
+            self.keys.clone(),
         )
     }
 }
@@ -70,14 +103,14 @@ impl Settings {
 impl FileBuddy {
     pub(super) fn settings(&self) -> Option<&Settings> {
         match &self.mode {
-            Mode::Settings(settings) => Some(settings),
+            Mode::Settings(settings) => Some(settings.as_ref()),
             _ => None,
         }
     }
 
     fn settings_mut(&mut self) -> Option<&mut Settings> {
         match &mut self.mode {
-            Mode::Settings(settings) => Some(settings),
+            Mode::Settings(settings) => Some(settings.as_mut()),
             _ => None,
         }
     }
@@ -95,12 +128,19 @@ impl FileBuddy {
                 return;
             }
         };
+        if let Some(conflict) = keys::resolve(&config.keys).conflicts.first() {
+            self.flash(conflict.clone(), true, cx);
+            return;
+        }
         if let Err(e) = paths::config_path().and_then(|path| config.write(&path)) {
             log::error!("saving the settings failed: {e:#}");
             self.flash(format!("saving failed: {e}"), true, cx);
             return;
         }
         let rescan = config.roots != self.config.roots || config.ignore != self.config.ignore;
+        if config.keys != self.config.keys {
+            self.key_problems = keys::apply(&config.keys, cx);
+        }
         self.config = config;
         if rescan {
             self.flash("saved, scanning the folders", false, cx);
@@ -113,7 +153,7 @@ impl FileBuddy {
 
     fn revert_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings().is_some() {
-            self.mode = Mode::Settings(Settings::new(&self.config, window, cx));
+            self.mode = Mode::Settings(Box::new(Settings::new(&self.config, window, cx)));
             cx.notify();
         }
     }
@@ -145,6 +185,91 @@ impl FileBuddy {
         .detach();
     }
 
+    /// Up or down on the page, outside the fields, goes into the keys.
+    pub(super) fn focus_keys(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(settings) = self.settings() else {
+            return false;
+        };
+        window.focus(&settings.key_focus, cx);
+        cx.notify();
+        true
+    }
+
+    fn select_key_row(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_mut() {
+            settings.key_row = at;
+            settings.capturing = false;
+        }
+        self.focus_keys(window, cx);
+    }
+
+    pub(super) fn move_key_row(&mut self, down: bool, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_mut() {
+            settings.key_row = if down {
+                (settings.key_row + 1).min(ACTIONS.len() - 1)
+            } else {
+                settings.key_row.saturating_sub(1)
+            };
+            settings.key_scroll.scroll_to_item(settings.key_row);
+            cx.notify();
+        }
+    }
+
+    /// Enter. The next key pressed goes to the row, in `capture_key`.
+    pub(super) fn start_capture(&mut self, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_mut() {
+            settings.capturing = true;
+            cx.notify();
+        }
+    }
+
+    /// `delete`. The last key of the row goes.
+    pub(super) fn remove_key(&mut self, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_mut() {
+            let action = &ACTIONS[settings.key_row];
+            let mut keys = keys::keys_of(action, &settings.keys);
+            keys.pop();
+            settings.set_keys(action.name, keys);
+            cx.notify();
+        }
+    }
+
+    /// `r`. The row goes back to its default keys.
+    pub(super) fn reset_keys(&mut self, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_mut() {
+            settings.keys.remove(ACTIONS[settings.key_row].name);
+            cx.notify();
+        }
+    }
+
+    /// The key after Enter in the Keys section. It must not also fire the
+    /// action it is bound to, so it is taken before the keymap sees it.
+    fn capture_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) -> bool {
+        let Some(settings) = self.settings_mut().filter(|settings| settings.capturing) else {
+            return false;
+        };
+        // A modifier on its own is the start of the key, not the key.
+        if matches!(
+            keystroke.key.as_str(),
+            "shift" | "control" | "alt" | "platform" | "function"
+        ) {
+            return false;
+        }
+        settings.capturing = false;
+        if keystroke.key != "escape"
+            && let Some(key) = keys::normal(&keystroke.unparse())
+        {
+            let action = &ACTIONS[settings.key_row];
+            let mut keys = keys::keys_of(action, &settings.keys);
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+            settings.set_keys(action.name, keys);
+        }
+        cx.notify();
+        true
+    }
+
     fn remove_root(&mut self, at: usize, cx: &mut Context<Self>) {
         if let Some(settings) = self.settings_mut()
             && at < settings.roots.len()
@@ -161,9 +286,8 @@ pub fn page(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     };
 
     div()
-        .id("settings")
         .size_full()
-        .overflow_y_scroll()
+        .overflow_y_scrollbar()
         .child(
             v_flex()
                 .w(px(PAGE_WIDTH))
@@ -180,6 +304,7 @@ pub fn page(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 )
                 .child(weights(settings, cx))
                 .child(stages(this.config.paused, cx))
+                .child(key_list(settings, cx))
                 .child(footer(cx)),
         )
         .into_any_element()
@@ -279,6 +404,100 @@ fn stages(paused: Paused, cx: &mut Context<FileBuddy>) -> AnyElement {
                 }))
         }),
     )
+    .into_any_element()
+}
+
+/// Takes keys for the Keys section before the keymap does. It acts only while
+/// a row captures.
+pub(super) fn capture_keys(cx: &mut Context<FileBuddy>) -> Subscription {
+    let view = cx.weak_entity();
+    cx.intercept_keystrokes(move |event, _, cx| {
+        let captured = view
+            .update(cx, |this, cx| this.capture_key(&event.keystroke, cx))
+            .unwrap_or(false);
+        if captured {
+            cx.stop_propagation();
+        }
+    })
+}
+
+/// Each action with its keys. A row that differs from the default is marked,
+/// and what cannot apply is named under the list.
+fn key_list(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let problems = keys::resolve(&settings.keys).problems();
+    let rows = ACTIONS.iter().enumerate().map(|(at, action)| {
+        let current = at == settings.key_row;
+        let capturing = current && settings.capturing;
+        let keys = keys::keys_of(action, &settings.keys);
+        let text = if capturing {
+            "press a key".to_string()
+        } else if keys.is_empty() {
+            "none".to_string()
+        } else {
+            keys.join(", ")
+        };
+        h_flex()
+            .id(("key-row", at))
+            .gap_2()
+            .px_1()
+            .rounded(px(3.))
+            .text_sm()
+            .cursor_pointer()
+            .when(current, |row| row.bg(cx.theme().primary.opacity(0.18)))
+            .on_click(cx.listener(move |this, _, window, cx| this.select_key_row(at, window, cx)))
+            .child(div().w(px(KEY_NAME_WIDTH)).child(action.name))
+            .child(
+                div()
+                    .flex_1()
+                    .when(keys.is_empty() || capturing, |text| {
+                        text.text_color(cx.theme().muted_foreground)
+                    })
+                    .child(text),
+            )
+            .when(settings.keys.contains_key(action.name), |row| {
+                row.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().warning)
+                        .child("changed"),
+                )
+            })
+    });
+
+    section(
+        "Keys",
+        "Up and down pick an action. Enter adds the next key you press, delete removes the last key, r resets the row to its default, and escape cancels. A key with ctrl or alt, or an F key, works in the text boxes too.",
+        cx,
+    )
+    .child(
+        // GPUI scrolls every scroll area under the pointer, so the page would
+        // move with the list. The wheel stops here, after the list took it.
+        div()
+            .id("keys-frame")
+            .relative()
+            .h(px(KEY_LIST_HEIGHT))
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id("keys")
+                    .track_focus(&settings.key_focus)
+                    .key_context("Keys")
+                    .track_scroll(&settings.key_scroll)
+                    .size_full()
+                    .overflow_y_scroll()
+                    .p_1()
+                    .rounded(px(4.))
+                    .bg(cx.theme().secondary)
+                    .children(rows),
+            )
+            .vertical_scrollbar(&settings.key_scroll),
+    )
+    .children(problems.into_iter().map(|problem| {
+        div()
+            .text_sm()
+            .text_color(cx.theme().danger)
+            .child(problem)
+    }))
     .into_any_element()
 }
 

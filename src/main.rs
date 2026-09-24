@@ -9,6 +9,7 @@ use file_buddy::ui::{self, FileBuddy};
 use gpui::{App, WindowOptions, px, size};
 use gpui::{TitlebarOptions, prelude::*};
 use gpui_kit::assets::Assets;
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 
 fn main() -> Result<()> {
@@ -25,7 +26,10 @@ fn main() -> Result<()> {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             Theme::change(ThemeMode::Dark, None, cx);
-            ui::bind_keys(cx);
+            Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
+            for problem in ui::bind_keys(&config.keys, cx) {
+                log::warn!("[keys]: {problem}");
+            }
 
             let options = WindowOptions {
                 focus: true,
