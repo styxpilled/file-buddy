@@ -4,23 +4,25 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Div, ScrollDelta, ScrollWheelEvent, SharedString, Stateful, Window,
-    div, img, px,
+    AnyElement, App, ClickEvent, Context, Div, ScrollDelta, ScrollWheelEvent, SharedString,
+    Stateful, Window, div, img, px,
 };
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
+use crate::db::edits::{self, Row, Table};
 use crate::db::files::{FileRow, State};
 use crate::db::review::Group;
-use crate::db::{ocr as ocr_rows, segments, tags};
+use crate::db::{ocr as ocr_rows, tags};
 use crate::index::jobs::{self, Stage};
 use crate::media::{self, Kind};
-use crate::ocr::noise;
 use crate::paths;
 use crate::search::Hit;
 use crate::search::folder::Entry;
+use crate::ui::rows::{RowInput, Target};
 use crate::ui::{
     CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
     seek_bar, toggle,
@@ -80,7 +82,7 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .into_any_element()
 }
 
-/// The three tabs under the clip.
+/// The three tabs under the clip. `i` cycles them.
 fn tabs(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
         .gap_1()
@@ -142,8 +144,8 @@ fn file_details(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> Any
 /// shows what was found and what can be searched.
 fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let conn = this.db.conn();
-    let lines = ocr_rows::of_hash(conn, &hit.file.hash).unwrap_or_default();
-    if lines.is_empty() {
+    let lines = edits::rows(conn, Table::Ocr, &hit.file.hash).unwrap_or_default();
+    if lines.is_empty() && !editing(this, hit, Table::Ocr) {
         let text = match jobs::state(conn, &hit.file.hash, Stage::Ocr) {
             Ok(Some((state, error))) => match state.as_str() {
                 "done" => "No text found".to_string(),
@@ -155,34 +157,14 @@ fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyE
         };
         return note(this, hit, text, cx);
     }
-
-    // A still has one frame, so a time in it says nothing.
-    let timed = hit.file.kind != Kind::Still;
-    panel(this, hit, cx)
-        .children(lines.into_iter().enumerate().map(|(at, line)| {
-            let dropped = noise::is_noise(&line.text);
-            let text = div()
-                .when(dropped, |text| {
-                    text.text_color(cx.theme().muted_foreground).line_through()
-                })
-                .child(line.text);
-            timed_row(
-                this,
-                hit,
-                ("line-time", at),
-                line.time_ms.filter(|_| timed),
-                text,
-                cx,
-            )
-        }))
-        .into_any_element()
+    row_list(this, hit, Table::Ocr, lines, cx)
 }
 
 /// The speech of the file, one segment per line. Without segments it says why.
 fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let conn = this.db.conn();
-    let lines = segments::of_hash(conn, &hit.file.hash).unwrap_or_default();
-    if lines.is_empty() {
+    let lines = edits::rows(conn, Table::Segments, &hit.file.hash).unwrap_or_default();
+    if lines.is_empty() && !editing(this, hit, Table::Segments) {
         let text = match jobs::state(conn, &hit.file.hash, Stage::Whisper) {
             Ok(Some((state, error))) => match state.as_str() {
                 "done" => "No speech found".to_string(),
@@ -194,20 +176,98 @@ fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyEl
         };
         return note(this, hit, text, cx);
     }
+    row_list(this, hit, Table::Segments, lines, cx)
+}
+
+/// The row cursor is on this tab of this file.
+fn editing(this: &FileBuddy, hit: &Hit, table: Table) -> bool {
+    this.rows
+        .as_ref()
+        .is_some_and(|rows| rows.hash == hit.file.hash && rows.table == table)
+}
+
+/// The rows of a tab, with the cursor and the input while they are edited. A
+/// double click on a row edits it.
+fn row_list(
+    this: &FileBuddy,
+    hit: &Hit,
+    table: Table,
+    rows: Vec<Row>,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
+    let editor = this.rows.as_ref().filter(|_| editing(this, hit, table));
+    let input = editor.and_then(|editor| editor.input.as_ref());
+    let adding = input.and_then(|input| match input.target {
+        Target::Add(time) => Some(time),
+        Target::Edit(_) => None,
+    });
+    // A still has one frame, so a time in it says nothing.
+    let timed = hit.file.kind != Kind::Still;
+    let cursor = editor.map(|editor| editor.cursor);
+    let empty = rows.is_empty();
+
+    let mut children = Vec::new();
+    for (at, row) in rows.into_iter().enumerate() {
+        let current = cursor == Some(at);
+        let text = match input.filter(|input| current && matches!(input.target, Target::Edit(_))) {
+            Some(input) => div().child(Input::new(&input.state).xsmall()),
+            None => {
+                let dropped = table == Table::Ocr && !ocr_rows::indexed(&row.text, row.edited);
+                div()
+                    .when(dropped, |text| {
+                        text.text_color(cx.theme().muted_foreground).line_through()
+                    })
+                    .child(row.text)
+            }
+        };
+        let text = text.id(("row-text", at)).on_click(cx.listener(
+            move |this, event: &ClickEvent, window, cx| {
+                if event.click_count() == 2 {
+                    this.edit_rows(Some(at), window, cx);
+                    this.edit_row(window, cx);
+                }
+            },
+        ));
+        children.push(timed_row(
+            this,
+            hit,
+            ("row-time", at),
+            row.time_ms.filter(|_| timed),
+            text,
+            current,
+            cx,
+        ));
+        if current && let Some(time) = adding {
+            children.push(add_line(this, hit, input, time, cx));
+        }
+    }
+    if empty && let Some(time) = adding {
+        children.push(add_line(this, hit, input, time, cx));
+    }
 
     panel(this, hit, cx)
-        .children(lines.into_iter().enumerate().map(|(at, segment)| {
-            let text = div().child(segment.text);
-            timed_row(
-                this,
-                hit,
-                ("segment-time", at),
-                Some(segment.start_ms),
-                text,
-                cx,
-            )
-        }))
+        .when_some(editor, |panel, editor| {
+            panel
+                .track_focus(&editor.focus)
+                .key_context("Rows")
+                .track_scroll(&editor.scroll)
+        })
+        .children(children)
         .into_any_element()
+}
+
+/// The input of a new row, with the time it gets.
+fn add_line(
+    this: &FileBuddy,
+    hit: &Hit,
+    input: Option<&RowInput>,
+    time: Option<i64>,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
+    let text = div()
+        .id("row-new")
+        .children(input.map(|input| Input::new(&input.state).xsmall()));
+    timed_row(this, hit, ("row-time-new", 0), time, text, true, cx)
 }
 
 /// A line of a tab with its time in front. A click on the time seeks the clip
@@ -217,7 +277,8 @@ fn timed_row(
     hit: &Hit,
     id: (&'static str, usize),
     time_ms: Option<i64>,
-    text: Div,
+    text: Stateful<Div>,
+    current: bool,
     cx: &mut Context<FileBuddy>,
 ) -> AnyElement {
     let playing = this.player.video_of(&hit.file.hash).is_some();
@@ -241,6 +302,8 @@ fn timed_row(
         .w_full()
         .gap_2()
         .items_start()
+        .rounded(px(3.))
+        .when(current, |row| row.bg(cx.theme().primary.opacity(0.18)))
         .child(time)
         // Without a zero minimum width a long line pushes past the pane
         // instead of wrapping.

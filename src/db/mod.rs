@@ -1,5 +1,6 @@
 //! The SQLite database: opening, pragmas and migrations.
 
+pub mod edits;
 pub mod files;
 pub mod fts;
 mod migrations;

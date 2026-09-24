@@ -53,6 +53,8 @@ Two things follow from that:
         tags.rs       tags and `file_tags`
         review.rs     the four Review groups, each file with its reason
         segments.rs   speech segments
+        edits.rs      the segments and screen lines the user changed, deleted
+                      or added. Like tags, nothing can rebuild them
         ocr.rs        the on-screen text of a file, one row per line with its
                       time
         vectors.rs    the CLIP vector of each sampled frame
@@ -94,6 +96,8 @@ Two things follow from that:
         tile.rs       one result: thumbnail, hover video, badge, matched text
         table.rs      the table view of Browse, Folders and Review
         preview.rs    the side pane and its three tabs
+        rows.rs       the cursor and the input that edit the Speech and Text
+                      tabs
         seek_bar.rs   the bar under the clip in the pane, and the skip keys
         player.rs     the clip in the pane, the file opened ahead, the tile
                       that plays, and the sound
@@ -105,7 +109,7 @@ Two things follow from that:
         review.rs     the Review page, its groups and the rename walk
         settings.rs   the Settings page
         visual.rs     the visual half of a search, which merges in after the
-                      text matches, and `l` with its escape steps
+                      text matches, and `a` with its escape steps
 
 `config` and `paths` stay at the root because every directory uses them and they
 belong to none.

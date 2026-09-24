@@ -3,7 +3,7 @@
 Status: ready-for-agent
 
 Depends on nothing in v2. Read the Custom keys section of the v2 spec first.
-New actions from 18 to 25, such as `l` for more like this, join the list the
+New actions from 18 to 25, such as `a` for more like this, join the list the
 same way.
 
 ## Work

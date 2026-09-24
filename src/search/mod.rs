@@ -17,7 +17,6 @@ use crate::config::Weights;
 use crate::db::files::{self, FileRow, PRESENT, read_row};
 use crate::db::{ocr, segments};
 use crate::media::{self, Kind};
-use crate::ocr::noise;
 
 /// Which column gave a result its best score. The grid shows it as a badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,7 +186,7 @@ fn find_moment(conn: &Connection, hit: &mut Hit, query: &str) -> Result<()> {
         }
         Signal::Ocr => {
             let mut lines = ocr::of_hash(conn, &hit.file.hash)?;
-            lines.retain(|line| !noise::is_noise(&line.text));
+            lines.retain(|line| ocr::indexed(&line.text, line.edited));
             match moment::best(&lines, |line| &line.text, query) {
                 Some(line) => (line.time_ms, line.text.clone()),
                 None => return Ok(()),

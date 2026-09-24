@@ -116,7 +116,8 @@ matches. The CLIP weight is a fifth weight on the Settings page. `floor` and
 
 ## More like this
 
-`l` replaces the results with the clips that look like the selection.
+`a` replaces the results with the clips that look like the selection. It was
+`l` until issue 25 gave `l` to the rows.
 
 - The query is the mean of the selection's frame vectors. With files marked, it
   is the mean over all the marked files.
@@ -126,7 +127,7 @@ matches. The CLIP weight is a fifth weight on the Settings page. `floor` and
   spread differently for each file. See issue 22.
 - The search box shows `like: <name>`, or `like: <n> files`. Typing over it
   ends the search. Escape goes back to the results from before, with their
-  selection and marks, after it clears the marks. `l` again goes one step
+  selection and marks, after it clears the marks. `a` again goes one step
   deeper, and each escape goes back one step.
 - The chips still filter.
 
@@ -157,8 +158,18 @@ goes to the index at once.
   Migrations must never drop them.
 - An edited OCR line is always indexed, even if the watermark rule would leave
   it out. The user typed it on purpose.
-- The keys are decided in that issue. Keyboard first, as for the rest of the
-  window.
+- A tab can be edited only after its stage has run for the file. Before that,
+  an edit would stop the stage from ever running.
+- `i` cycles the tabs: File, Speech, Text. `e` puts a cursor on the rows of the
+  Speech or Text tab, on the row the clip is at. In the rows, up and down move
+  the cursor and seek the clip to the row. Enter edits the row, with its text
+  selected: enter saves, and escape cancels. Enter on a tab with no rows adds
+  one. `delete` deletes the row. `l` adds a row at the time of the clip. A
+  double click on a row edits it.
+- Escape, after the tag panel and the rename input: it closes the row input,
+  then takes the cursor off the rows.
+- Focus that leaves the rows or their input, such as a click outside them, ends
+  the editing and drops what was typed.
 
 ## Preview controls
 

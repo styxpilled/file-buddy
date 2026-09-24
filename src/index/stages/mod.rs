@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 
+use crate::db::edits::{self, Table};
 use crate::db::files::{self, FileRow};
 use crate::ffmpeg::thumbnail;
 use crate::index::jobs::{Job, Stage};
@@ -36,8 +37,24 @@ impl Default for Workers {
     }
 }
 
-/// Run one claimed job. The error text ends up in the `jobs` row.
+/// Run one claimed job. The error text ends up in the `jobs` row. A file with a
+/// row the user edited keeps its rows, so the stage does not run for it.
 pub fn run(conn: &Connection, cache: &Path, workers: &Workers, job: &Job) -> Result<()> {
+    let edited = match job.stage {
+        Stage::Whisper => Some(Table::Segments),
+        Stage::Ocr => Some(Table::Ocr),
+        _ => None,
+    };
+    if let Some(table) = edited
+        && edits::any(conn, table, &job.hash)?
+    {
+        log::info!(
+            "{} kept the edited rows of {}",
+            job.stage.as_str(),
+            job.hash
+        );
+        return Ok(());
+    }
     let source = source(conn, &job.hash)?;
     match job.stage {
         Stage::Probe => probe::run(conn, &source),

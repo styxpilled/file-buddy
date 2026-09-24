@@ -164,7 +164,7 @@ impl FileBuddy {
         Ok(())
     }
 
-    /// `l`. The results become the files that look like the marked files, or
+    /// `a`. The results become the files that look like the marked files, or
     /// like the selection when nothing is marked.
     pub(super) fn more_like_this(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.page(), Page::Browse | Page::Folders) {

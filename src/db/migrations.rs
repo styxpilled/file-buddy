@@ -1,6 +1,7 @@
-//! Schema migrations. Everything except `tags` and `file_tags` can be rebuilt
-//! from the files on disk, so a migration may drop and recreate any other
-//! table. A migration must never drop the two tag tables.
+//! Schema migrations. Everything except the tags and the edited rows can be
+//! rebuilt from the files on disk, so a migration may drop and recreate any
+//! other table. A migration must never drop `tags` or `file_tags`, and never
+//! drop a row of `segments` or `ocr` that has `edited` set.
 
 use rusqlite_migration::{M, Migrations};
 
@@ -16,6 +17,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(RECORD_NO_SPEECH_PROB),
         M::up(ADD_THE_CLIP_STAGE),
         M::up(OCR_LINES_WITH_TIMES),
+        M::up(EDITED_ROWS),
     ])
 }
 
@@ -120,6 +122,13 @@ CREATE INDEX ocr_hash ON ocr (hash);
 
 UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
 WHERE stage = 'ocr' AND state = 'done';
+"#;
+
+/// Issue 25. A row the user changed, deleted or added. A deleted row keeps an
+/// empty text, so a later run cannot bring it back.
+const EDITED_ROWS: &str = r#"
+ALTER TABLE segments ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ocr ADD COLUMN edited INTEGER NOT NULL DEFAULT 0;
 "#;
 
 const INITIAL: &str = r#"

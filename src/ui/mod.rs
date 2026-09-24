@@ -10,6 +10,7 @@ mod player;
 mod preview;
 mod renamer;
 mod review;
+mod rows;
 mod seek_bar;
 mod settings;
 mod table;
@@ -37,6 +38,7 @@ use self::indexing::Indexer;
 use self::player::Player;
 use self::renamer::Renamer;
 use self::review::Review;
+use self::rows::RowEditor;
 use self::seek_bar::SeekBar;
 use self::settings::Settings;
 use self::tagger::Tagger;
@@ -92,15 +94,24 @@ gpui_kit::actions!(
         Rescan,
         MoreLikeThis,
         SkipBack,
-        SkipForward
+        SkipForward,
+        CycleDetail,
+        EditRows,
+        RowUp,
+        RowDown,
+        EditRow,
+        DeleteRow,
+        AddRow
     ]
 );
 
 /// The window keys are plain letters, so they must not reach the search box
 /// while it types. `!Input` fails the match when any node on the focus path is
-/// an input. Autoplay is the one key that works either way.
+/// an input. Autoplay is the one key that works either way. The rows of the
+/// Speech and Text tabs take the keys they need over the grid's.
 pub fn bind_keys(cx: &mut App) {
     let grid = Some("FileBuddy && !Input");
+    let rows = Some("Rows && !Input");
     cx.bind_keys([
         KeyBinding::new("left", SelectLeft, grid),
         KeyBinding::new("right", SelectRight, grid),
@@ -115,7 +126,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", GoUp, grid),
         KeyBinding::new("s", CycleSort, grid),
         KeyBinding::new("v", ToggleTable, grid),
-        KeyBinding::new("l", MoreLikeThis, grid),
+        KeyBinding::new("a", MoreLikeThis, grid),
+        KeyBinding::new("i", CycleDetail, grid),
+        KeyBinding::new("e", EditRows, grid),
+        KeyBinding::new("up", RowUp, rows),
+        KeyBinding::new("down", RowDown, rows),
+        KeyBinding::new("enter", EditRow, rows),
+        KeyBinding::new("delete", DeleteRow, rows),
+        KeyBinding::new("l", AddRow, rows),
         KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
@@ -184,6 +202,8 @@ pub struct FileBuddy {
     marked: HashSet<String>,
     tagger: Option<Tagger>,
     renamer: Option<Renamer>,
+    /// The cursor on the rows of the Speech or Text tab.
+    rows: Option<RowEditor>,
     /// The file menu in the side pane is open and holds focus.
     menu_open: bool,
     /// The folder the Folders page shows, or `None` for the list of roots. It
@@ -234,6 +254,17 @@ enum Detail {
     File,
     Speech,
     Text,
+}
+
+impl Detail {
+    /// `i`.
+    fn next(self) -> Self {
+        match self {
+            Detail::File => Detail::Speech,
+            Detail::Speech => Detail::Text,
+            Detail::Text => Detail::File,
+        }
+    }
 }
 
 /// A line in the header. The colour is the whole point: a copy that failed and
@@ -288,6 +319,7 @@ impl FileBuddy {
             marked: HashSet::new(),
             tagger: None,
             renamer: None,
+            rows: None,
             menu_open: false,
             folder: None,
             sort: Sort::default(),
@@ -611,6 +643,7 @@ impl FileBuddy {
             && !self.query_focused(window, cx)
             && self.tagger.is_none()
             && self.renamer.is_none()
+            && self.rows.is_none()
             && self.settings().is_none()
             && !self.menu_open
         {
@@ -625,6 +658,10 @@ impl FileBuddy {
             self.close_tagger(window, cx);
         } else if self.renamer.is_some() {
             self.close_renamer(window, cx);
+        } else if self.rows.as_ref().is_some_and(|rows| rows.input.is_some()) {
+            self.close_row_input(window, cx);
+        } else if self.rows.is_some() {
+            self.close_rows(window, cx);
         } else if self.settings().is_some() && !self.focus.is_focused(window) {
             // A field of the form has focus. Leaving would drop what was typed.
             window.focus(&self.focus, cx);
@@ -725,6 +762,7 @@ impl FileBuddy {
 
 impl Render for FileBuddy {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_rows();
         self.hold_focus(window, cx);
         self.sync_placeholder(window, cx);
         self.sync_seek_bar(window, cx);
@@ -795,6 +833,18 @@ impl Render for FileBuddy {
             .on_action(
                 cx.listener(|this, _: &RenameFile, window, cx| this.open_renamer(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CycleDetail, _, cx| {
+                this.detail = this.detail.next();
+                cx.notify();
+            }))
+            .on_action(
+                cx.listener(|this, _: &EditRows, window, cx| this.edit_rows(None, window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &RowUp, _, cx| this.move_row(false, cx)))
+            .on_action(cx.listener(|this, _: &RowDown, _, cx| this.move_row(true, cx)))
+            .on_action(cx.listener(|this, _: &EditRow, window, cx| this.edit_row(window, cx)))
+            .on_action(cx.listener(|this, _: &DeleteRow, _, cx| this.delete_row(cx)))
+            .on_action(cx.listener(|this, _: &AddRow, window, cx| this.add_row(window, cx)))
             .on_action(cx.listener(|this, _: &ShowBrowse, window, cx| {
                 this.show_page(Page::Browse, window, cx)
             }))

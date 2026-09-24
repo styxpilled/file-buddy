@@ -6,7 +6,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::db::ocr;
 use crate::media::filename;
-use crate::ocr::noise;
 
 /// Rebuild the index row of one file.
 pub fn refresh(conn: &Connection, file_id: i64) -> Result<()> {
@@ -29,7 +28,8 @@ pub fn refresh(conn: &Connection, file_id: i64) -> Result<()> {
         |row| row.get(0),
     )?;
     let speech: String = conn.query_row(
-        "SELECT coalesce(group_concat(text, ' '), '') FROM segments WHERE hash = ?1",
+        "SELECT coalesce(group_concat(text, ' '), '') FROM segments
+         WHERE hash = ?1 AND text <> ''",
         [&hash],
         |row| row.get(0),
     )?;
@@ -38,8 +38,8 @@ pub fn refresh(conn: &Connection, file_id: i64) -> Result<()> {
     // shown in a single row of a tile.
     let ocr = ocr::of_hash(conn, &hash)?
         .into_iter()
+        .filter(|line| ocr::indexed(&line.text, line.edited))
         .map(|line| line.text)
-        .filter(|line| !noise::is_noise(line))
         .collect::<Vec<_>>()
         .join(" ");
 
