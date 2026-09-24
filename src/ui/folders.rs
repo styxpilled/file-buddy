@@ -5,15 +5,15 @@
 use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, SharedString, Window, div, px};
+use gpui::{AnyElement, Context, SharedString, Window};
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
-use gpui_kit::component::{ActiveTheme, Sizable, h_flex};
+use gpui_kit::component::{Sizable, h_flex};
 
 use crate::db::files::FileRow;
 use crate::search::folder::{self as listing, Entry, Sort};
 use crate::ui::{FileBuddy, Page, counted, toggle};
 
-pub(super) const BROWSE_PLACEHOLDER: &str = "Type a few words you remember";
+pub(super) const BROWSE_PLACEHOLDER: &str = "search database";
 
 impl FileBuddy {
     /// The contents of the folder the Folders page shows, or the roots.
@@ -121,7 +121,7 @@ impl FileBuddy {
     /// On the Folders page the search box says where it searches.
     pub(super) fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted: SharedString = match (self.page(), &self.folder) {
-            (Page::Folders, None) => "Search every folder".into(),
+            (Page::Folders, None) => "search in directories".into(),
             (Page::Folders, Some(dir)) => format!("Search in {}", display(dir)).into(),
             _ => BROWSE_PLACEHOLDER.into(),
         };
@@ -161,36 +161,31 @@ pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     }
 
     let view = cx.entity();
+    Breadcrumb::new()
+        .children(stops.into_iter().map(|(label, folder)| {
+            let view = view.clone();
+            BreadcrumbItem::new(label).on_click(move |_, window, cx| {
+                let folder = folder.clone();
+                view.update(cx, |this, cx| this.open_folder(folder, window, cx));
+            })
+        }))
+        .into_any_element()
+}
+
+/// The sort only orders a folder. A query keeps its ranking, so the sort
+/// buttons go while one is typed.
+pub fn sort_buttons(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
-        .w_full()
-        .flex_none()
-        .h(px(32.))
-        .px_3()
-        .items_center()
-        .text_sm()
-        .border_b_1()
-        .border_color(cx.theme().border)
-        .child(
-            Breadcrumb::new().children(stops.into_iter().map(|(label, folder)| {
-                let view = view.clone();
-                BreadcrumbItem::new(label).on_click(move |_, window, cx| {
-                    let folder = folder.clone();
-                    view.update(cx, |this, cx| this.open_folder(folder, window, cx));
-                })
-            })),
-        )
-        .child(div().flex_1())
-        // The sort only orders a folder. A query keeps its ranking, so the
-        // sort buttons go while one is typed.
-        .when(this.listing, |bar| {
-            bar.child(h_flex().gap_1().children(Sort::ALL.map(|sort| {
+        .gap_1()
+        .when(this.listing, |buttons| {
+            buttons.children(Sort::ALL.map(|sort| {
                 toggle(sort.label(), sort.label(), this.sort == sort)
                     .xsmall()
                     .tooltip("S")
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.set_sort(sort, window, cx)),
                     )
-            })))
+            }))
         })
         .into_any_element()
 }

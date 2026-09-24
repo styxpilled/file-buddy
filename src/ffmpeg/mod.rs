@@ -6,10 +6,12 @@ pub mod frames;
 pub mod probe;
 pub mod thumbnail;
 
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -30,9 +32,15 @@ impl Tool {
 /// corrupts any loop that feeds it file names. `ffprobe` has no `-nostdin`
 /// option and fails if it gets one, so closing the handle is the rule that
 /// covers both tools.
+///
+/// The window has no console, so a console program it starts would open one
+/// of its own. `CREATE_NO_WINDOW` stops that.
 pub fn command(tool: Tool) -> Command {
     let mut command = Command::new(path_of(tool));
-    command.stdin(Stdio::null()).args(["-v", "error"]);
+    command
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .args(["-v", "error"]);
     if tool == Tool::Ffmpeg {
         command.args(["-nostdin", "-y"]);
     }

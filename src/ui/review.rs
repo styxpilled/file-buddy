@@ -1,5 +1,5 @@
 //! The Review page: the files that need a person, in four groups. Its tabs take
-//! the place of the search box and the chips. The Poor names group is the
+//! the place of the search box, and the chips limit every group. The Poor names group is the
 //! rename walk: the clip plays, and a saved name moves on to the next file.
 
 use gpui::prelude::*;
@@ -94,15 +94,18 @@ impl FileBuddy {
         }
     }
 
-    /// The files of every group, in the order of `Group::ALL`.
+    /// The files of every group of the kinds the chips let through, in the
+    /// order of `Group::ALL`.
     fn review_items(&mut self, cx: &mut Context<Self>) -> [Vec<Item>; 4] {
         let mut failure = None;
         let items = Group::ALL.map(|group| {
-            groups::items(self.db.conn(), group).unwrap_or_else(|e| {
+            let mut items = groups::items(self.db.conn(), group).unwrap_or_else(|e| {
                 log::error!("reading {} failed: {e:#}", group.label());
                 failure = Some(format!("reading {} failed: {e}", group.label()));
                 Vec::new()
-            })
+            });
+            items.retain(|item| self.kinds.contains(&item.file.kind));
+            items
         });
         if let Some(text) = failure {
             self.flash(text, true, cx);
@@ -131,7 +134,6 @@ fn entries(items: [Vec<Item>; 4], group: Group) -> Vec<Entry> {
 
 pub fn tabs(review: &Review, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
-        .flex_1()
         .gap_1()
         .children(Group::ALL.into_iter().zip(review.counts).enumerate().map(
             |(at, (group, count))| {

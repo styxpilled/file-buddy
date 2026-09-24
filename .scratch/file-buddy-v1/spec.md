@@ -108,7 +108,7 @@ Keyboard first. The mouse is optional.
 - `m` mutes the side pane. `space` plays or pauses it, for that clip only.
 - The wheel over the side pane, and `ctrl-up` and `ctrl-down`, set the sound
   level. Turning it up lifts the mute, because the press asks to hear the clip.
-  The header shows the level beside the chips, and says `muted` instead of a
+  The side pane shows the level beside the Play and Mute buttons, and says `muted` instead of a
   number, which is the only thing that explains the silence. There is no
   control to drag: the level has one place to read it and two ways to set it.
 - `ctrl-space` is the autoplay flag, off at the start, which decides whether a
@@ -124,7 +124,10 @@ Keyboard first. The mouse is optional.
 - Each result shows the matched text and a badge: tag, filename, speech or
   screen text. With nothing typed there is no match, so it shows the kind,
   the length and the size instead.
-- Chips filter by media kind. All are on by default.
+- Chips filter by media kind, on every page with results. All are on by
+  default. A bar over the results holds the chips, the Grid and Table buttons
+  and the result count, on Browse, Folders and Review. On Folders it also
+  holds the breadcrumb and the sort.
 - `t` opens a tag input with autocomplete over the tags that already exist.
   Tags are lowercase. `x` marks the selection and ctrl-click marks a tile, so
   one tag can reach many files at once. Inside the input, `alt-up` and
@@ -166,8 +169,8 @@ application closes.
 The Review page collects every file that needs a person: duplicate groups,
 files over 5 minutes, files that cannot be indexed, and files with no proper
 name. It opens on the first group that holds a file, and `alt-1` to `alt-4`
-pick a group. The group tabs take the place of the search box and the chips;
-the grid and the side pane stay. Each tile says why the file
+pick a group. The group tabs take the place of the search box;
+the bar, the grid and the side pane stay. Each tile says why the file
 is there, and the side pane shows its folder and, for a failure, the error.
 
 A name is poor when its stem holds `_`, `-`, a bracket, a character outside

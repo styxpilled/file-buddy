@@ -530,6 +530,7 @@ impl FileBuddy {
             self.kinds.push(kind);
         }
         self.run_search(cx);
+        self.reload_review(cx);
     }
 
     /// Every page with results can show the table. Settings has none.
@@ -851,7 +852,7 @@ impl Render for FileBuddy {
             )
             // The search box propagates the escape it does not need itself.
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.dismiss(window, cx)))
-            .child(header::header(self, cx))
+            .child(header::header(self, window, cx))
             .map(|page| match self.settings() {
                 Some(_) => page.child(settings::page(self, cx)),
                 None => page.child(
@@ -861,9 +862,7 @@ impl Render for FileBuddy {
                             resizable_panel().size(px(width)).child(
                                 v_flex()
                                     .size_full()
-                                    .when(self.page() == Page::Folders, |panel| {
-                                        panel.child(folders::breadcrumb(self, cx))
-                                    })
+                                    .child(header::bar(self, cx))
                                     .child(div().flex_1().min_h_0().child(grid::grid(self, cx))),
                             ),
                         )
@@ -880,12 +879,13 @@ impl Render for FileBuddy {
 }
 
 /// A button that is on or off, such as a tab or a filter. The caller gives it a
-/// size, a tooltip and what a click does.
+/// size, a tooltip and what a click does. A primary button has no border, so
+/// the one that is on gets one, or it would be 2 px narrower than the others.
 fn toggle(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Button {
     Button::new(id)
         .label(label)
         .selected(on)
-        .when(on, |button| button.primary())
+        .when(on, |button| button.primary().border_1())
         .cursor_pointer()
 }
 

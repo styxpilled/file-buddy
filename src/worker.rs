@@ -7,12 +7,14 @@
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Write};
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
 /// A child process that starts on the first call, and starts again on the call
 /// after it stops.
@@ -66,6 +68,8 @@ impl Running {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            // A console program started by the window would open a console.
+            .creation_flags(CREATE_NO_WINDOW.0)
             .spawn()
             .with_context(|| format!("start {}", program.display()))?;
         Ok(Self {

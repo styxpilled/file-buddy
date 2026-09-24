@@ -93,7 +93,9 @@ Two things follow from that:
         mod.rs        the view, its actions, the results and the selection
         keys.rs       the default keys, the fixed keys, the `[keys]` changes
                       and the rules that join them
-        header.rs     the page tabs, the chips, the view buttons, the state line
+        header.rs     the page tabs, the search box, the notices and the window
+                      buttons. It is the title bar. Also the bar over the
+                      results: chips, view buttons, count
         grid.rs       the virtual grid of results
         tile.rs       one result: thumbnail, hover video, badge, matched text
         table.rs      the table view of Browse, Folders and Review

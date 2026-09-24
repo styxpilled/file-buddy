@@ -28,7 +28,7 @@ toml = "=1.1.6"
 url = "=2.5.8"
 walkdir = "=2.5.0"
 whisper-rs = { version = "=0.16.0", features = ["vulkan", "log_backend"] }
-windows = { version = "=0.62.2", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Time"] }
+windows = { version = "=0.62.2", features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Threading", "Win32_System_Time"] }
 
 # Frame conversion and decoding are far too slow unoptimized, so the video path
 # and every dependency are built with optimization even in a debug build.

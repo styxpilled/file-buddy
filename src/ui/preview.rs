@@ -430,6 +430,13 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                     cx.notify();
                 })),
         )
+        .child(
+            div()
+                .min_w(px(56.))
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(player.volume_label()),
+        )
         .child(file_menu(this, cx))
         .into_any_element()
 }
