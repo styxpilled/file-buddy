@@ -4,6 +4,7 @@
 //! `docs/source-layout.md` says what each directory is for.
 
 pub mod actions;
+pub mod clip;
 pub mod config;
 pub mod db;
 pub mod ffmpeg;

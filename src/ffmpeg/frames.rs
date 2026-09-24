@@ -1,5 +1,6 @@
-//! The frames that OCR reads. Ten spread over the duration of the file, which
-//! issue 01 measured against scene detection and `fps=1` and found best.
+//! The frames that OCR reads and CLIP embeds. Ten spread over the duration of
+//! the file, which issue 01 measured against scene detection and `fps=1` and
+//! found best.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -60,6 +61,45 @@ pub fn sample(source: &Path, hash: &str, duration: Option<f64>) -> Result<Frames
     paths.sort();
     frames.paths = paths;
     Ok(frames)
+}
+
+/// One frame as raw `rgb24`, and its time in the file.
+pub struct Pixels {
+    pub time_ms: i64,
+    pub rgb: Vec<u8>,
+}
+
+/// The same frames as `sample`, scaled so the short side is `size`, cut to a
+/// square at the center, and read from a pipe.
+pub fn pixels(source: &Path, duration: Option<f64>, size: u32) -> Result<Vec<Pixels>> {
+    let square = format!(
+        "scale={size}:{size}:force_original_aspect_ratio=increase:flags=bilinear,crop={size}:{size}"
+    );
+    let mut command = ffmpeg::command(Tool::Ffmpeg);
+    command
+        .arg("-i")
+        .arg(source)
+        .args(["-map", "0:v:0", "-an", "-sn", "-dn"]);
+    let fps = rate(duration);
+    match fps {
+        Some(fps) => command
+            .args(["-vf", &format!("fps={fps:.6},{square}")])
+            .args(["-frames:v", &MAX_FRAMES.to_string()]),
+        None => command.args(["-vf", &square, "-frames:v", "1"]),
+    };
+    command.args(["-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]);
+    let bytes = ffmpeg::output(command).context("extract frames")?;
+
+    let frame_len = (size * size * 3) as usize;
+    Ok(bytes
+        .chunks_exact(frame_len)
+        .enumerate()
+        .map(|(i, rgb)| Pixels {
+            // The `fps` filter puts frame n at n / fps.
+            time_ms: fps.map_or(0, |fps| (i as f64 / fps * 1000.0).round() as i64),
+            rgb: rgb.to_vec(),
+        })
+        .collect())
 }
 
 /// Where one call puts its frames. The hash names it, so a directory left

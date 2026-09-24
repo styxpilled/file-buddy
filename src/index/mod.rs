@@ -7,4 +7,4 @@ pub mod scan;
 pub mod stages;
 pub mod watch;
 
-pub use pipeline::{read_text, run, transcribe};
+pub use pipeline::{embed_frames, read_text, run, transcribe};

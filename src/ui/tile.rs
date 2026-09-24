@@ -232,6 +232,7 @@ fn badge(signal: Signal, cx: &App) -> AnyElement {
         Signal::Filename => cx.theme().info,
         Signal::Speech => cx.theme().success,
         Signal::Ocr => cx.theme().warning,
+        Signal::Visual => cx.theme().chart_5,
     };
     div()
         .px_1()

@@ -14,6 +14,7 @@ mod settings;
 mod table;
 mod tagger;
 mod tile;
+mod visual;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,7 @@ use self::renamer::Renamer;
 use self::review::Review;
 use self::settings::Settings;
 use self::tagger::Tagger;
+use self::visual::Visual;
 use crate::actions::clipboard;
 use crate::config::Config;
 use crate::db::review::Group;
@@ -187,6 +189,16 @@ pub struct FileBuddy {
     /// The tab under the preview stage. It stays as the selection moves, so
     /// stepping through the results keeps reading the same kind of thing.
     detail: Detail,
+    visual: Visual,
+}
+
+/// The status line for a number of results.
+fn count(results: usize) -> SharedString {
+    match results {
+        0 => "nothing found".into(),
+        1 => "1 result".into(),
+        n => format!("{n} results").into(),
+    }
 }
 
 enum Mode {
@@ -270,8 +282,10 @@ impl FileBuddy {
             table: false,
             row_tags: HashMap::new(),
             detail: Detail::File,
+            visual: Visual::default(),
         };
         this.run_search(cx);
+        this.load_visual(cx);
         this.rescan(cx);
         this.watch_changes(cx);
         this
@@ -317,6 +331,8 @@ impl FileBuddy {
     /// The results of the query, or the contents of the folder on the Folders
     /// page while nothing is typed. Sets the status line to match.
     fn fetch_results(&mut self, cx: &mut Context<Self>) -> Vec<Entry> {
+        // A visual search for an older query must not land on these results.
+        self.visual.task = None;
         let text = self.input.read(cx).value().to_string();
         let folders = self.page() == Page::Folders;
         self.listing = text.trim().is_empty();
@@ -324,7 +340,7 @@ impl FileBuddy {
             self.list_folder()
         } else {
             let within = if folders { self.folder.clone() } else { None };
-            self.fetch_hits(text, within)
+            self.fetch_hits(text, within, cx)
         };
         self.row_tags = if self.table_shown() {
             tags::by_hash(self.db.conn()).unwrap_or_else(|e| {
@@ -337,17 +353,20 @@ impl FileBuddy {
         results
     }
 
-    fn fetch_hits(&mut self, text: String, within: Option<PathBuf>) -> Vec<Entry> {
+    /// The text matches now. The visual matches follow, in `visual`.
+    fn fetch_hits(
+        &mut self,
+        text: String,
+        within: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Vec<Entry> {
         let request = search::Request::new(text)
             .kinds(self.kinds.clone())
             .within(within);
         match search::search(self.db.conn(), &request, &self.config.weights) {
             Ok(hits) => {
-                self.status = match hits.len() {
-                    0 => "nothing found".into(),
-                    1 => "1 result".into(),
-                    n => format!("{n} results").into(),
-                };
+                self.status = count(hits.len());
+                self.search_visually(request, hits.clone(), cx);
                 hits.into_iter().map(Entry::File).collect()
             }
             Err(e) => {

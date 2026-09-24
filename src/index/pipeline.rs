@@ -46,6 +46,14 @@ pub fn read_text(db_path: &Path, cache: &Path, paused: &AtomicBool) -> Result<St
     run_stage(db_path, cache, Stage::Ocr, paused)
 }
 
+/// Embed the frames of every file that waits for it. Minutes of work where
+/// speech is hours, so it runs before speech. Without the model it stops here,
+/// before a job can fail for that reason.
+pub fn embed_frames(db_path: &Path, cache: &Path, paused: &AtomicBool) -> Result<StageStats> {
+    paths::clip_model()?;
+    run_stage(db_path, cache, Stage::Clip, paused)
+}
+
 /// Transcribe every file that waits for it. Hours of work on a first run, so it
 /// is separate from `run` and the window can show results before it starts.
 /// Without the model it stops here, before a job can fail for that reason.

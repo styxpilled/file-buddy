@@ -7,6 +7,7 @@ pub mod ocr;
 pub mod review;
 pub mod segments;
 pub mod tags;
+pub mod vectors;
 
 use std::path::Path;
 use std::time::Duration;
@@ -88,6 +89,7 @@ mod tests {
             "fts",
             "jobs",
             "ocr",
+            "vectors",
         ] {
             assert!(tables.contains(&expected.to_string()), "missing {expected}");
         }

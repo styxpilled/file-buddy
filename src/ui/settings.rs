@@ -19,19 +19,25 @@ use crate::ui::{FileBuddy, Mode};
 
 const PAGE_WIDTH: f32 = 720.;
 const WEIGHT_WIDTH: f32 = 120.;
-const WEIGHT_NAMES: [&str; 4] = ["Tags", "Filename", "Speech", "Screen text"];
+const WEIGHT_NAMES: [&str; 5] = ["Tags", "Filename", "Speech", "Screen text", "Visual"];
 
 pub struct Settings {
     roots: Vec<PathBuf>,
     ignore: Entity<TextareaState>,
     /// In column order, as `Config::edited` takes them.
-    weights: [Entity<InputState>; 4],
+    weights: [Entity<InputState>; 5],
 }
 
 impl Settings {
     pub fn new(config: &Config, window: &mut Window, cx: &mut App) -> Self {
         let weights = config.weights;
-        let values = [weights.tags, weights.filename, weights.speech, weights.ocr];
+        let values = [
+            weights.tags,
+            weights.filename,
+            weights.speech,
+            weights.ocr,
+            weights.visual,
+        ];
         Self {
             roots: config.roots.clone(),
             ignore: cx.new(|cx| {
@@ -231,7 +237,7 @@ fn folders(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
 fn weights(settings: &Settings, cx: &App) -> AnyElement {
     section(
         "Search weights",
-        "How much a match in each kind of text counts. A higher number ranks it above the others.",
+        "How much a match in each kind of text counts. A higher number ranks it above the others. Visual is how much what a frame shows counts against all text, which counts 1.",
         cx,
     )
     .children(
@@ -259,6 +265,7 @@ fn stages(paused: Paused, cx: &mut Context<FileBuddy>) -> AnyElement {
     .children(
         [
             (Stage::Ocr, paused.ocr, "Screen text (OCR)"),
+            (Stage::Clip, paused.clip, "Visual/semantic (CLIP)"),
             (Stage::Whisper, paused.whisper, "Speech (Whisper)"),
         ]
         .map(|(stage, checked, label)| {

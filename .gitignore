@@ -3,3 +3,4 @@
 /whisper.cpp
 /test_videos
 /models
+/onnxruntime

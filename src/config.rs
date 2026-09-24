@@ -22,18 +22,29 @@ pub struct Config {
 #[serde(default)]
 pub struct Paused {
     pub ocr: bool,
+    pub clip: bool,
     pub whisper: bool,
 }
 
 /// The bm25 column weights. The filename outranks machine text because the user
 /// controls it. Tags outrank the filename because the user applies them on
 /// purpose.
+///
+/// `visual` is of another kind: the weight of the visual list against the text
+/// list, which counts 1, when the two merge.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Weights {
     pub tags: f64,
     pub filename: f64,
     pub speech: f64,
     pub ocr: f64,
+    #[serde(default = "default_visual_weight")]
+    pub visual: f64,
+}
+
+/// Below 1, so a word in a filename or a tag still puts that file first.
+fn default_visual_weight() -> f64 {
+    0.5
 }
 
 impl Default for Weights {
@@ -43,6 +54,7 @@ impl Default for Weights {
             filename: 10.0,
             speech: 3.0,
             ocr: 1.0,
+            visual: default_visual_weight(),
         }
     }
 }
@@ -93,19 +105,20 @@ impl Config {
     pub fn edited(
         roots: Vec<PathBuf>,
         ignore: &str,
-        weights: [&str; 4],
+        weights: [&str; 5],
         paused: Paused,
     ) -> Result<Self> {
         if roots.is_empty() {
             anyhow::bail!("add at least one folder");
         }
-        let mut parsed = [0.0; 4];
-        for ((slot, text), name) in
-            parsed
-                .iter_mut()
-                .zip(weights)
-                .zip(["tags", "filename", "speech", "screen text"])
-        {
+        let mut parsed = [0.0; 5];
+        for ((slot, text), name) in parsed.iter_mut().zip(weights).zip([
+            "tags",
+            "filename",
+            "speech",
+            "screen text",
+            "visual",
+        ]) {
             *slot = text
                 .trim()
                 .parse::<f64>()
@@ -126,6 +139,7 @@ impl Config {
                 filename: parsed[1],
                 speech: parsed[2],
                 ocr: parsed[3],
+                visual: parsed[4],
             },
             paused,
         };
@@ -162,6 +176,8 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         .unwrap();
         assert_eq!(config.roots, vec![PathBuf::from("D:/clips")]);
         assert_eq!(config.weights.tags, 20.0);
+        // A file from before the visual weight gets its default.
+        assert_eq!(config.weights.visual, 0.5);
     }
 
     #[test]
@@ -184,6 +200,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         let paused = Config {
             paused: Paused {
                 ocr: false,
+                clip: false,
                 whisper: true,
             },
             ..written
@@ -198,13 +215,14 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         let config = Config::edited(
             roots.clone(),
             "**/thumbs/**\n\n  **/.git/**  \n",
-            ["20", "10.5", " 3 ", "0"],
+            ["20", "10.5", " 3 ", "0", "0.5"],
             Paused::default(),
         )
         .unwrap();
         assert_eq!(config.ignore, ["**/thumbs/**", "**/.git/**"]);
         assert_eq!(config.weights.filename, 10.5);
         assert_eq!(config.weights.ocr, 0.0);
+        assert_eq!(config.weights.visual, 0.5);
 
         let error = |roots, ignore, weights| {
             Config::edited(roots, ignore, weights, Paused::default())
@@ -212,18 +230,18 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
                 .to_string()
         };
         assert_eq!(
-            error(vec![], "", ["1", "1", "1", "1"]),
+            error(vec![], "", ["1", "1", "1", "1", "1"]),
             "add at least one folder"
         );
         assert_eq!(
-            error(roots.clone(), "", ["1", "-1", "1", "1"]),
+            error(roots.clone(), "", ["1", "-1", "1", "1", "1"]),
             "the filename weight must be a number of 0 or more"
         );
         assert_eq!(
-            error(roots.clone(), "", ["1", "1", "1", "lots"]),
+            error(roots.clone(), "", ["1", "1", "1", "lots", "1"]),
             "the screen text weight must be a number of 0 or more"
         );
-        assert!(error(roots, "a/{b", ["1", "1", "1", "1"]).starts_with("bad ignore glob"));
+        assert!(error(roots, "a/{b", ["1", "1", "1", "1", "1"]).starts_with("bad ignore glob"));
     }
 
     #[test]

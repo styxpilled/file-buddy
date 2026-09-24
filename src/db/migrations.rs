@@ -14,6 +14,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(RESTORE_EVERY_OCR_LINE),
         M::up(MARK_A_GONE_FILE_MISSING),
         M::up(RECORD_NO_SPEECH_PROB),
+        M::up(ADD_THE_CLIP_STAGE),
     ])
 }
 
@@ -67,6 +68,27 @@ CREATE INDEX files_missing ON files (missing_at);
 
 const RECORD_NO_SPEECH_PROB: &str = r#"
 ALTER TABLE segments ADD COLUMN no_speech_prob REAL;
+"#;
+
+/// Issue 20. One CLIP vector per sampled frame. Every file already probed gets a
+/// `clip` job, skipped where its OCR job was skipped, since both stages sample
+/// the same frames under the same limit.
+const ADD_THE_CLIP_STAGE: &str = r#"
+CREATE TABLE vectors (
+    id      INTEGER PRIMARY KEY,
+    hash    TEXT NOT NULL,
+    time_ms INTEGER NOT NULL,
+    vector  BLOB NOT NULL
+);
+
+CREATE INDEX vectors_hash ON vectors (hash);
+
+INSERT OR IGNORE INTO jobs (hash, stage, state, error, updated_at)
+SELECT hash, 'clip',
+       CASE state WHEN 'skipped' THEN 'skipped' ELSE 'pending' END,
+       CASE state WHEN 'skipped' THEN error END,
+       unixepoch()
+FROM jobs WHERE stage = 'ocr';
 "#;
 
 const INITIAL: &str = r#"

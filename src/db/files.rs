@@ -302,7 +302,7 @@ pub fn mark_missing(conn: &mut Connection, seen_ids: &[i64]) -> Result<usize> {
         mark_gone(&transaction, *id)?;
     }
     // Stage results of bytes that no file holds any more.
-    for table in ["segments", "ocr", "jobs"] {
+    for table in ["segments", "ocr", "vectors", "jobs"] {
         transaction.execute(
             &format!("DELETE FROM {table} WHERE hash NOT IN (SELECT hash FROM files)"),
             [],

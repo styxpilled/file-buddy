@@ -21,6 +21,7 @@ pub enum Stage {
     Thumbnail,
     Whisper,
     Ocr,
+    Clip,
 }
 
 impl Stage {
@@ -30,15 +31,16 @@ impl Stage {
             Stage::Thumbnail => "thumbnail",
             Stage::Whisper => "whisper",
             Stage::Ocr => "ocr",
+            Stage::Clip => "clip",
         }
     }
 
-    /// How many of this stage may run at once. Whisper has one worker process,
-    /// which takes one file at a time.
+    /// How many of this stage may run at once. Whisper and CLIP each have one
+    /// worker process, which takes one file at a time.
     pub fn concurrency(self) -> usize {
         match self {
             Stage::Probe | Stage::Thumbnail => 8,
-            Stage::Whisper => 1,
+            Stage::Whisper | Stage::Clip => 1,
             Stage::Ocr => 4,
         }
     }
@@ -46,8 +48,8 @@ impl Stage {
     /// The stages that run after a probe, for a file of this kind.
     pub fn after_probe(kind: Kind) -> &'static [Stage] {
         match kind {
-            Kind::Video => &[Stage::Whisper, Stage::Ocr],
-            Kind::Animated | Kind::Still => &[Stage::Ocr],
+            Kind::Video => &[Stage::Whisper, Stage::Ocr, Stage::Clip],
+            Kind::Animated | Kind::Still => &[Stage::Ocr, Stage::Clip],
         }
     }
 }
@@ -61,6 +63,7 @@ impl FromStr for Stage {
             "thumbnail" => Stage::Thumbnail,
             "whisper" => Stage::Whisper,
             "ocr" => Stage::Ocr,
+            "clip" => Stage::Clip,
             other => anyhow::bail!("unknown stage {other:?}"),
         })
     }

@@ -3,6 +3,7 @@
 
 pub mod folder;
 pub mod query;
+pub mod visual;
 
 use std::path::PathBuf;
 
@@ -10,7 +11,7 @@ use anyhow::Result;
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
 
-use self::query::build_match;
+use self::query::{build_match, visual_only};
 use crate::config::Weights;
 use crate::db::files::{self, FileRow, PRESENT, read_row};
 use crate::media::Kind;
@@ -22,6 +23,8 @@ pub enum Signal {
     Filename,
     Speech,
     Ocr,
+    /// What a frame shows. Not a column of `fts`.
+    Visual,
 }
 
 impl Signal {
@@ -34,6 +37,7 @@ impl Signal {
             Signal::Filename => "filename",
             Signal::Speech => "speech",
             Signal::Ocr => "screen text",
+            Signal::Visual => "visual",
         }
     }
 }
@@ -41,7 +45,8 @@ impl Signal {
 #[derive(Debug, Clone)]
 pub struct Hit {
     pub file: FileRow,
-    /// The bm25 score. Lower is better, and it is always negative.
+    /// Lower is better, and it is always negative: the bm25 score, or minus the
+    /// fused score once the visual hits are merged in.
     pub score: f64,
     pub signal: Signal,
     /// The text that matched, from the column the badge names.
@@ -85,9 +90,15 @@ impl Request {
     }
 }
 
-/// The best results for what the user typed.
+/// The best text matches for what the user typed. A query that starts with `~`
+/// has none, and `visual` gives its results.
 pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result<Vec<Hit>> {
-    let Some(expression) = build_match(&request.text) else {
+    let text = match visual_only(&request.text) {
+        Some("") => "",
+        Some(_) => return Ok(Vec::new()),
+        None => &request.text,
+    };
+    let Some(expression) = build_match(text) else {
         return browse(conn, request);
     };
 

@@ -41,10 +41,12 @@ pub(super) struct Indexer {
     retried: HashSet<PathBuf>,
     /// The expensive stage that runs in the background, if one does.
     stage: Option<Stage>,
-    /// Text was asked for while speech ran, so it runs when speech ends.
-    ocr_after: bool,
+    /// A scan queued new work while a later stage ran, so the chain starts
+    /// again from text when that stage ends.
+    restart_after: bool,
     /// The workers of a stage read these before each claim.
     ocr_paused: Arc<AtomicBool>,
+    clip_paused: Arc<AtomicBool>,
     whisper_paused: Arc<AtomicBool>,
     /// How far that stage is, or why it cannot run.
     pub progress: Option<Notice>,
@@ -54,6 +56,7 @@ impl Indexer {
     pub(super) fn new(paused: Paused) -> Self {
         Self {
             ocr_paused: Arc::new(AtomicBool::new(paused.ocr)),
+            clip_paused: Arc::new(AtomicBool::new(paused.clip)),
             whisper_paused: Arc::new(AtomicBool::new(paused.whisper)),
             ..Self::default()
         }
@@ -62,6 +65,7 @@ impl Indexer {
     fn paused(&self, stage: Stage) -> &Arc<AtomicBool> {
         match stage {
             Stage::Ocr => &self.ocr_paused,
+            Stage::Clip => &self.clip_paused,
             _ => &self.whisper_paused,
         }
     }
@@ -73,6 +77,7 @@ impl FileBuddy {
     pub(super) fn pause_stage(&mut self, stage: Stage, paused: bool, cx: &mut Context<Self>) {
         match stage {
             Stage::Ocr => self.config.paused.ocr = paused,
+            Stage::Clip => self.config.paused.clip = paused,
             _ => self.config.paused.whisper = paused,
         }
         self.indexer.paused(stage).store(paused, Ordering::Relaxed);
@@ -215,35 +220,43 @@ impl FileBuddy {
         indexer.pending.extend(first);
     }
 
-    /// Run one expensive stage in the background and show how far it is. OCR
-    /// comes first and speech follows it, because OCR is minutes of work where
-    /// speech is hours. The queue is durable, so a restart continues it, and a
-    /// run that is already going picks up the jobs a later scan queues.
+    /// Run one expensive stage in the background and show how far it is. Text
+    /// comes first, then images, then speech, because the first two are
+    /// minutes of work where speech is hours. The queue is durable, so a
+    /// restart continues it, and a run that is already going picks up the jobs
+    /// a later scan queues.
     fn index_text(&mut self, stage: Stage, cx: &mut Context<Self>) {
         if let Some(running) = self.indexer.stage {
-            self.indexer.ocr_after |= stage == Stage::Ocr && running != Stage::Ocr;
+            self.indexer.restart_after |= stage == Stage::Ocr && running != Stage::Ocr;
             return;
         }
         if self.indexer.paused(stage).load(Ordering::Relaxed) {
-            if stage == Stage::Ocr {
-                self.index_text(Stage::Whisper, cx);
+            if let Some(next) = next_stage(stage) {
+                self.index_text(next, cx);
             }
             return;
         }
-        if stage == Stage::Whisper
-            && let Err(e) = paths::whisper_model()
+        if let Some((model, file)) = match stage {
+            Stage::Clip => Some((paths::clip_model(), paths::CLIP_MODEL)),
+            Stage::Whisper => Some((paths::whisper_model(), paths::WHISPER_MODEL)),
+            _ => None,
+        } && let Err(e) = model
         {
             log::error!("{e:#}");
             self.indexer.progress = Some(Notice {
                 text: format!(
-                    "speech model missing: {}\\{}",
-                    paths::MODEL_DIR,
-                    paths::WHISPER_MODEL
+                    "{} model missing: {}\\{file}",
+                    stage_label(stage),
+                    paths::MODEL_DIR
                 )
                 .into(),
                 failed: true,
             });
             cx.notify();
+            // Speech does not wait for images.
+            if let Some(next) = next_stage(stage) {
+                self.index_text(next, cx);
+            }
             return;
         }
 
@@ -254,6 +267,7 @@ impl FileBuddy {
         let work = cx.background_spawn(async move {
             match stage {
                 Stage::Ocr => index::read_text(&db_path, &cache, &paused),
+                Stage::Clip => index::embed_frames(&db_path, &cache, &paused),
                 _ => index::transcribe(&db_path, &cache, &paused),
             }
         });
@@ -307,10 +321,10 @@ impl FileBuddy {
                     }
                 });
                 this.rerun_search(cx);
-                if stage == Stage::Ocr {
-                    this.index_text(Stage::Whisper, cx);
-                } else if std::mem::take(&mut this.indexer.ocr_after) {
+                if std::mem::take(&mut this.indexer.restart_after) {
                     this.index_text(Stage::Ocr, cx);
+                } else if let Some(next) = next_stage(stage) {
+                    this.index_text(next, cx);
                 }
             })
             .ok();
@@ -334,10 +348,20 @@ fn summary(stats: &WatchStats) -> String {
     .join(", ")
 }
 
+/// The expensive stage that runs after this one.
+fn next_stage(stage: Stage) -> Option<Stage> {
+    match stage {
+        Stage::Ocr => Some(Stage::Clip),
+        Stage::Clip => Some(Stage::Whisper),
+        _ => None,
+    }
+}
+
 /// What the header calls a stage while it runs.
 fn stage_label(stage: Stage) -> &'static str {
     match stage {
         Stage::Ocr => "text",
+        Stage::Clip => "clip",
         _ => "speech",
     }
 }

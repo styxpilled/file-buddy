@@ -26,10 +26,14 @@ Two things follow from that:
       config.rs       the TOML file, the ignore globs, the bm25 weights
       paths.rs        the data directory, the thumbnail cache, the config file,
                       the speech model
-      bin/fb.rs       a headless front end: scan, search, reindex, status, and
-                      the worker processes
+      bin/fb.rs       a headless front end: scan, search, visual, reindex,
+                      status, and the worker processes
       worker.rs       a model in a child `fb` process, one JSON line each way
       speech.rs       whisper-rs: the model the `whisper` worker loads once
+      clip/           visual, as vectors, through ONNX Runtime
+        mod.rs        the runtime DLLs, the model config, the vector math
+        image.rs      the image encoder, which the `clip` worker loads once
+        text.rs       the tokenizer and the text encoder, for search
       actions/        what the user does to a file on disk
         clipboard.rs  the Windows clipboard, which GPUI cannot do
         rename.rs     a new name on disk and in the index, never over a file
@@ -50,10 +54,12 @@ Two things follow from that:
         review.rs     the four Review groups, each file with its reason
         segments.rs   speech segments
         ocr.rs        the on-screen text of a file
+        vectors.rs    the CLIP vector of each sampled frame
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
         audio.rs      the first audio track as 16 kHz mono samples
-        frames.rs     the frames OCR reads, spread over the duration
+        frames.rs     the frames OCR reads and CLIP embeds, spread over the
+                      duration
         probe.rs      ffprobe and its JSON
         thumbnail.rs  the `thumbnail` filter
       ocr/            the recognizer, behind one interface
@@ -72,10 +78,13 @@ Two things follow from that:
           probe.rs
           whisper.rs  the rules that drop hallucinated text
           ocr.rs      the line filter and the deduplication
+          clip.rs
       search/         the ranked query
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
         folder.rs     one folder of the roots, and why a file in it is not found
+        visual.rs     the vectors in memory, the cutoff, and the merge with the
+                      text matches
       ui/             the window. The only directory that knows about GPUI
         mod.rs        the view, its keys, the results and the selection
         header.rs     the page tabs, the chips, the view buttons, the state line
@@ -92,6 +101,8 @@ Two things follow from that:
         folders.rs    the Folders page: the folder, the breadcrumb, the sort
         review.rs     the Review page, its groups and the rename walk
         settings.rs   the Settings page
+        visual.rs     the visual half of a search, which merges in after the
+                      text matches
 
 `config` and `paths` stay at the root because every directory uses them and they
 belong to none.

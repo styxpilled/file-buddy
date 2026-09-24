@@ -4,6 +4,7 @@
 //! A new stage is a new arm in `run`, usually with a file of its own here, and
 //! a new variant in `jobs::Stage`.
 
+mod clip;
 mod ocr;
 mod probe;
 mod whisper;
@@ -23,12 +24,14 @@ use crate::worker::Worker;
 /// stops when this is dropped.
 pub struct Workers {
     whisper: Mutex<Worker>,
+    clip: Mutex<Worker>,
 }
 
 impl Default for Workers {
     fn default() -> Self {
         Self {
             whisper: Mutex::new(Worker::new(&["worker", "whisper"])),
+            clip: Mutex::new(Worker::new(&["worker", "clip"])),
         }
     }
 }
@@ -41,6 +44,7 @@ pub fn run(conn: &Connection, cache: &Path, workers: &Workers, job: &Job) -> Res
         Stage::Thumbnail => thumbnail::generate(&source.path, &source.hash, cache),
         Stage::Whisper => whisper::run(conn, &source, &workers.whisper),
         Stage::Ocr => ocr::run(conn, &source),
+        Stage::Clip => clip::run(conn, &source, &workers.clip),
     }
 }
 

@@ -10,6 +10,7 @@ pub const DATABASE_FILE: &str = "file-buddy.db";
 pub const THUMBNAIL_DIR: &str = "thumbnails";
 pub const MODEL_DIR: &str = "models";
 pub const WHISPER_MODEL: &str = "ggml-large-v3-turbo.bin";
+pub const CLIP_MODEL: &str = "mobileclip2-s2";
 
 /// The directory that holds the executable. Both the configuration file and the
 /// default data directory sit next to it.
@@ -44,22 +45,29 @@ pub fn thumbnail_dir() -> Result<PathBuf> {
 /// The speech model. The user supplies it in `models` next to the executable. A
 /// development build also looks in `models` at the repository root.
 pub fn whisper_model() -> Result<PathBuf> {
-    let beside_exe = executable_dir()?.join(MODEL_DIR).join(WHISPER_MODEL);
+    model(WHISPER_MODEL, "speech model", Path::is_file)
+}
+
+/// The directory of the image and text model, with its ONNX files, tokenizer
+/// and configuration. Found the same way as the speech model.
+pub fn clip_model() -> Result<PathBuf> {
+    model(CLIP_MODEL, "image model", |dir| {
+        dir.join("open_clip_config.json").is_file()
+    })
+}
+
+fn model(name: &str, what: &str, exists: impl Fn(&Path) -> bool) -> Result<PathBuf> {
+    let beside_exe = executable_dir()?.join(MODEL_DIR).join(name);
     let candidates = [
         beside_exe.clone(),
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(MODEL_DIR)
-            .join(WHISPER_MODEL),
+            .join(name),
     ];
     candidates
         .into_iter()
-        .find(|path| path.is_file())
-        .with_context(|| {
-            format!(
-                "the speech model is missing. Put it at {}",
-                beside_exe.display()
-            )
-        })
+        .find(|path| exists(path))
+        .with_context(|| format!("the {what} is missing. Put it at {}", beside_exe.display()))
 }
 
 /// The thumbnail of one file, in a directory named after the first two

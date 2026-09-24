@@ -115,6 +115,10 @@ impl Harness {
         index::transcribe(&self.db_path, &self.cache, &AtomicBool::new(false)).unwrap();
     }
 
+    fn embed_frames(&self) {
+        index::embed_frames(&self.db_path, &self.cache, &AtomicBool::new(false)).unwrap();
+    }
+
     fn read_text(&self) {
         index::read_text(&self.db_path, &self.cache, &AtomicBool::new(false)).unwrap();
     }
@@ -371,7 +375,7 @@ fn a_long_file_skips_the_expensive_stages() {
     let row = files::by_path(db.conn(), &long).unwrap().unwrap();
     assert!(row.duration.unwrap() > 300.0, "{:?}", row.duration);
 
-    for stage in [Stage::Whisper, Stage::Ocr] {
+    for stage in [Stage::Whisper, Stage::Ocr, Stage::Clip] {
         let state: String = db
             .conn()
             .query_row(
@@ -484,6 +488,35 @@ fn on_screen_text_is_read_once_and_found() {
     harness.scan();
     harness.read_text();
     assert_eq!(harness.job(&captioned, Stage::Ocr), ("done".into(), 1));
+}
+
+#[test]
+fn every_kind_gets_the_vectors_of_its_frames() {
+    let harness = Harness::new();
+    harness.scan();
+    harness.embed_frames();
+
+    let db = harness.db();
+    let mut frames = std::collections::HashMap::new();
+    for (_, hash, frame) in file_buddy::db::vectors::since(db.conn(), 0).unwrap() {
+        assert_eq!(frame.vector.len(), 512);
+        let length: f32 = frame.vector.iter().map(|x| x * x).sum();
+        assert!((length - 1.0).abs() < 1e-3, "{length}");
+        frames
+            .entry(hash)
+            .or_insert_with(Vec::new)
+            .push(frame.time_ms);
+    }
+    for (name, count) in [(VIDEO, 8), (ANIMATION, 4), (STILL, 1)] {
+        let path = harness.clips.join(name);
+        assert_eq!(
+            harness.job(&path, Stage::Clip),
+            ("done".into(), 1),
+            "{name}"
+        );
+        let row = files::by_path(db.conn(), &path).unwrap().unwrap();
+        assert_eq!(frames[&row.hash].len(), count, "{name}");
+    }
 }
 
 #[test]
