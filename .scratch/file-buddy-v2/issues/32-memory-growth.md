@@ -19,8 +19,7 @@ Measure before any fix.
    - moving the selection, so the side pane plays one clip after another
    - hover videos on the tiles
    - a stage that runs while the window is open (OCR, CLIP, speech)
-3. Compare with commit `a6e4afc`, before v2, for the same actions. If the growth
-   is there too, 20 and 21 did not cause it.
+     is there too, 20 and 21 did not cause it.
 
 ## Places to look
 

@@ -1,6 +1,7 @@
 //! What the user typed becomes an FTS5 expression. Every term is a prefix
 //! term, because the search runs on every keystroke. A query that starts with
-//! `~` searches only by what the frames show.
+//! `~` searches only by what the frames show. `like:` is what the box shows for
+//! a search by the look of files.
 
 /// The rest of a query that starts with `~`.
 pub fn visual_only(query: &str) -> Option<&str> {
@@ -16,6 +17,14 @@ pub fn visual_text(query: &str) -> Option<String> {
         .filter(|word| !matches!(word.split_once(':'), Some(("tag" | "tags", _))))
         .collect();
     (!words.is_empty()).then(|| words.join(" "))
+}
+
+/// What the search box shows while the results look like `names`.
+pub fn like_label(names: &[String]) -> String {
+    match names {
+        [name] => format!("like: {name}"),
+        _ => format!("like: {} files", names.len()),
+    }
 }
 
 /// The expression for a query, or `None` when there is nothing to search for.
@@ -79,6 +88,15 @@ mod tests {
         assert_eq!(visual_text("tag:reaction cat").unwrap(), "cat");
         assert!(visual_text("tag:reaction").is_none());
         assert!(visual_text("~").is_none());
+    }
+
+    #[test]
+    fn a_search_by_look_names_one_file_or_counts_several() {
+        assert_eq!(like_label(&["cat.mp4".into()]), "like: cat.mp4");
+        assert_eq!(
+            like_label(&["a.mp4".into(), "b.gif".into()]),
+            "like: 2 files"
+        );
     }
 
     #[test]

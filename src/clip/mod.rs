@@ -94,7 +94,7 @@ fn runtime_dir() -> PathBuf {
 }
 
 /// Scale to unit length. A zero vector stays zero.
-fn normalize(vector: &mut [f32]) {
+pub fn normalize(vector: &mut [f32]) {
     let norm = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         vector.iter_mut().for_each(|x| *x /= norm);

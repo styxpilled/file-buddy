@@ -80,6 +80,7 @@ impl FileBuddy {
         cx: &mut Context<Self>,
     ) {
         let left = std::mem::replace(&mut self.folder, folder);
+        self.end_likes();
         if !self.input.read(cx).value().is_empty() {
             self.input
                 .update(cx, |input, cx| input.set_value("", window, cx));

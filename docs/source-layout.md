@@ -26,8 +26,8 @@ Two things follow from that:
       config.rs       the TOML file, the ignore globs, the bm25 weights
       paths.rs        the data directory, the thumbnail cache, the config file,
                       the speech model
-      bin/fb.rs       a headless front end: scan, search, visual, reindex,
-                      status, and the worker processes
+      bin/fb.rs       a headless front end: scan, search, visual, like,
+                      reindex, status, and the worker processes
       worker.rs       a model in a child `fb` process, one JSON line each way
       speech.rs       whisper-rs: the model the `whisper` worker loads once
       clip/           visual, as vectors, through ONNX Runtime
@@ -83,8 +83,8 @@ Two things follow from that:
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
         folder.rs     one folder of the roots, and why a file in it is not found
-        visual.rs     the vectors in memory, the cutoff, and the merge with the
-                      text matches
+        visual.rs     the vectors in memory, the cutoff, the merge with the
+                      text matches, and the search by the look of files
       ui/             the window. The only directory that knows about GPUI
         mod.rs        the view, its keys, the results and the selection
         header.rs     the page tabs, the chips, the view buttons, the state line
@@ -102,7 +102,7 @@ Two things follow from that:
         review.rs     the Review page, its groups and the rename walk
         settings.rs   the Settings page
         visual.rs     the visual half of a search, which merges in after the
-                      text matches
+                      text matches, and `l` with its escape steps
 
 `config` and `paths` stay at the root because every directory uses them and they
 belong to none.

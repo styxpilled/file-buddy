@@ -1,22 +1,23 @@
 //! The visual half of a search. The text matches show at once, and the files
-//! that look like the query merge into them a moment later.
+//! that look like the query merge into them a moment later. `l` searches by the
+//! look of the selection instead.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use gpui::prelude::*;
-use gpui::{Context, ScrollStrategy, Task};
+use gpui::{Context, ScrollStrategy, SharedString, Task, Window};
 
 use crate::clip::text::TextEncoder;
 use crate::db::{Db, vectors};
 use crate::paths;
 use crate::search::folder::Entry;
-use crate::search::query::{visual_only, visual_text};
-use crate::search::visual::{self, DELTA, FLOOR, Scored, Vectors};
+use crate::search::query::{like_label, visual_only, visual_text};
+use crate::search::visual::{self, DELTA, FLOOR, LIKE_COUNT, Scored, Vectors};
 use crate::search::{Hit, Request};
-use crate::ui::FileBuddy;
+use crate::ui::{FileBuddy, Page, count};
 
 /// How long typing must pause before the text encoder runs. About the time it
 /// takes, so a fast typist does not queue a run per key.
@@ -34,6 +35,29 @@ pub(super) struct Visual {
     vectors: Arc<Vectors>,
     /// The search that waits or runs. A new one drops it, which cancels it.
     pub(super) task: Option<Task<()>>,
+    /// Searches by look, the latest last. Escape leaves one at a time. While
+    /// one is here, the search box shows its label.
+    likes: Vec<Like>,
+}
+
+/// A search by the look of files, and the results it replaced.
+struct Like {
+    label: String,
+    hashes: Vec<String>,
+    before: Before,
+}
+
+/// What escape brings back.
+struct Before {
+    text: String,
+    results: Vec<Entry>,
+    selected: usize,
+    marked: HashSet<String>,
+    listing: bool,
+    status: SharedString,
+    /// The search for these results had not finished, so they are not all
+    /// there.
+    pending: bool,
 }
 
 struct Encoder {
@@ -140,6 +164,154 @@ impl FileBuddy {
         Ok(())
     }
 
+    /// `l`. The results become the files that look like the marked files, or
+    /// like the selection when nothing is marked.
+    pub(super) fn more_like_this(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.page(), Page::Browse | Page::Folders) {
+            return;
+        }
+        let hashes = self.action_targets();
+        if hashes.is_empty() {
+            return;
+        }
+        if self.visual.encoder.is_none() {
+            self.flash("visual search is not ready", true, cx);
+            return;
+        }
+        if let Err(e) = self.refresh_vectors() {
+            log::error!("reading the vectors failed: {e:#}");
+        }
+        if !hashes.iter().any(|hash| self.visual.vectors.contains(hash)) {
+            self.flash("no frames are embedded for this yet", true, cx);
+            return;
+        }
+        let names: Vec<String> = hashes
+            .iter()
+            .map(|hash| {
+                self.results
+                    .iter()
+                    .filter_map(Entry::hit)
+                    .find(|hit| hit.file.hash == *hash)
+                    .map(|hit| hit.file.filename.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let label = like_label(&names);
+        let before = Before {
+            text: self.input.read(cx).value().to_string(),
+            results: self.results.clone(),
+            selected: self.selected,
+            marked: self.marked.clone(),
+            listing: self.listing,
+            status: self.status.clone(),
+            pending: self
+                .visual
+                .task
+                .as_ref()
+                .is_some_and(|task| !task.is_ready()),
+        };
+        self.input
+            .update(cx, |input, cx| input.set_value(label.clone(), window, cx));
+        self.visual.likes.push(Like {
+            label,
+            hashes,
+            before,
+        });
+        self.run_search(cx);
+    }
+
+    /// Typing, or another folder. The results from before are no longer the
+    /// way back.
+    pub(super) fn end_likes(&mut self) {
+        self.visual.likes.clear();
+    }
+
+    /// Run the latest search by look again, if there is one. `fresh` starts at
+    /// the top of the results, as `show_results` does.
+    pub(super) fn search_like(&mut self, fresh: bool, cx: &mut Context<Self>) -> bool {
+        let Some(like) = self.visual.likes.last() else {
+            return false;
+        };
+        let text = like.label.clone();
+        let hashes = like.hashes.clone();
+        self.visual.task = None;
+        self.listing = false;
+        if let Err(e) = self.refresh_vectors() {
+            log::error!("reading the vectors failed: {e:#}");
+        }
+        let request = Request::new(text)
+            .kinds(self.kinds.clone())
+            .within(self.scope())
+            .limit(LIKE_COUNT);
+        let vectors = self.visual.vectors.clone();
+        self.visual.task = Some(cx.spawn(async move |this, cx| {
+            let scored = cx
+                .background_spawn(async move { vectors.like(&hashes) })
+                .await
+                .unwrap_or_default();
+            this.update(cx, |this, cx| {
+                match visual::hits(this.db.conn(), &request, &scored) {
+                    Ok(hits) => {
+                        this.status = count(hits.len());
+                        this.read_row_tags();
+                        let results = hits.into_iter().map(Entry::File).collect();
+                        if fresh {
+                            this.show_results(results, cx);
+                        } else {
+                            this.update_results(results, cx);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("search by look failed: {e:#}");
+                        this.status = format!("search by look failed: {e:#}").into();
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        }));
+        true
+    }
+
+    /// Escape, after everything else it undoes. The results from before the
+    /// last `l` come back as they were, and a search for them that had not
+    /// finished runs again.
+    pub(super) fn leave_like(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(like) = self.visual.likes.pop() else {
+            return;
+        };
+        let before = like.before;
+        self.visual.task = None;
+        self.input.update(cx, |input, cx| {
+            input.set_value(before.text.clone(), window, cx)
+        });
+        self.listing = before.listing;
+        self.status = before.status;
+        self.read_row_tags();
+        let text_hits: Vec<Hit> = before
+            .results
+            .iter()
+            .filter_map(Entry::hit)
+            .cloned()
+            .collect();
+        self.show_results(before.results, cx);
+        self.marked = before.marked;
+        self.select(before.selected, cx);
+        if !before.pending {
+            return;
+        }
+        if self.visual.likes.is_empty() {
+            if !before.listing {
+                let request = Request::new(before.text)
+                    .kinds(self.kinds.clone())
+                    .within(self.scope());
+                self.search_visually(request, text_hits, cx);
+            }
+        } else {
+            self.search_like(false, cx);
+        }
+    }
+
     fn merge_visual(
         &mut self,
         request: Request,
@@ -152,7 +324,7 @@ impl FileBuddy {
             .map(|found| visual::fuse(text, found, self.config.weights.visual, request.limit));
         match merged {
             Ok(hits) => {
-                self.status = super::count(hits.len());
+                self.status = count(hits.len());
                 let results = hits.into_iter().map(Entry::File).collect();
                 // A selection the user has not moved stays on the first result.
                 // Following the old first file down the grid moves the view

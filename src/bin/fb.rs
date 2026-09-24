@@ -5,6 +5,7 @@
 //!                        text and speech last
 //!     fb search <query>  print the ranked results
 //!     fb visual <query>  print the 20 files that look most like the query
+//!     fb like <path>...  the same for the files that look like these files
 //!     fb reindex         rebuild the search index from the tables that own
 //!                        the text, after a rule that shapes it changed
 //!     fb status          counts per state and per stage
@@ -118,22 +119,31 @@ fn main() -> Result<()> {
                 visual::FLOOR,
                 visual::DELTA
             );
-            let paths: HashMap<String, PathBuf> = files::all(db.conn())?
-                .into_iter()
-                .map(|row| (row.hash, row.path))
-                .collect();
-            for (at, scored) in all.iter().enumerate().take(kept.max(20) + 5) {
-                if at == kept {
-                    println!("  ------ cutoff");
+            print_scored(&db, &all, kept)?;
+        }
+        "like" => {
+            let db = Db::open(&db_path)?;
+            let mut vectors = Vectors::default();
+            vectors.refresh(db.conn())?;
+            let rows = files::all(db.conn())?;
+            let mut hashes = Vec::new();
+            for arg in args {
+                let path = dunce::canonicalize(&arg)?;
+                match rows.iter().find(|row| row.path == path) {
+                    Some(row) => hashes.push(row.hash.clone()),
+                    None => anyhow::bail!("{arg} is not in the index"),
                 }
-                let path = paths.get(&scored.hash).map(|p| p.display().to_string());
-                println!(
-                    "{:>7.4}  {:>6.1}s  {}",
-                    scored.score,
-                    scored.time_ms as f64 / 1000.0,
-                    path.unwrap_or_else(|| scored.hash.clone())
-                );
             }
+            let started = Instant::now();
+            let Some(all) = vectors.like(&hashes) else {
+                anyhow::bail!("no frames are embedded for these files");
+            };
+            let searched = started.elapsed();
+            let request = search::Request::new("").limit(visual::LIKE_COUNT);
+            let kept = visual::hits(db.conn(), &request, &all)?.len();
+            let read = started.elapsed() - searched;
+            println!("search {searched:.0?}, files {read:.0?}. {kept} of {} kept", all.len());
+            print_scored(&db, &all, kept)?;
         }
         "status" => {
             let db = Db::open(&db_path)?;
@@ -160,8 +170,31 @@ fn main() -> Result<()> {
             }
         }
         other => {
-            anyhow::bail!("unknown command {other:?}. Use scan, search, visual, reindex or status");
+            anyhow::bail!(
+                "unknown command {other:?}. Use scan, search, visual, like, reindex or status"
+            );
         }
+    }
+    Ok(())
+}
+
+/// The scores best first, with a line where the cutoff falls after `kept`.
+fn print_scored(db: &Db, all: &[visual::Scored], kept: usize) -> Result<()> {
+    let paths: HashMap<String, PathBuf> = files::all(db.conn())?
+        .into_iter()
+        .map(|row| (row.hash, row.path))
+        .collect();
+    for (at, scored) in all.iter().enumerate().take(kept.max(20) + 5) {
+        if at == kept {
+            println!("  ------ cutoff");
+        }
+        let path = paths.get(&scored.hash).map(|p| p.display().to_string());
+        println!(
+            "{:>7.4}  {:>6.1}s  {}",
+            scored.score,
+            scored.time_ms as f64 / 1000.0,
+            path.unwrap_or_else(|| scored.hash.clone())
+        );
     }
     Ok(())
 }

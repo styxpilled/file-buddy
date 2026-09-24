@@ -17,6 +17,10 @@ use crate::search::{Hit, Request, Signal, filters};
 pub const FLOOR: f32 = 0.25;
 /// How far below the best file of a query a file may score and still match.
 pub const DELTA: f32 = 0.03;
+/// How many files a search by look shows, after the chips and the folder. Scores between two files run from
+/// about 0.6 to 0.97 and spread differently for each file, so no cutoff by
+/// score fits them all.
+pub const LIKE_COUNT: usize = 50;
 /// The rank constant of reciprocal rank fusion (Cormack 2009).
 const RRF_K: f64 = 60.0;
 
@@ -68,12 +72,56 @@ impl Vectors {
         self.files.is_empty()
     }
 
+    pub fn contains(&self, hash: &str) -> bool {
+        self.files.contains_key(hash)
+    }
+
     /// The files that match, best first: each file by its best frame, cut at
     /// `max(floor, top - delta)`.
     pub fn search(&self, query: &[f32], floor: f32, delta: f32) -> Vec<Scored> {
+        let mut scored = self.score(query, &[]);
+        cut(&mut scored, floor, delta);
+        scored
+    }
+
+    /// Every other file, best first, by how much it looks like `hashes`.
+    /// `None` when no file of `hashes` has a vector yet.
+    pub fn like(&self, hashes: &[String]) -> Option<Vec<Scored>> {
+        let query = self.mean(hashes)?;
+        Some(self.score(&query, hashes))
+    }
+
+    /// The mean of each file's frames, then the mean of the files, so a video
+    /// of ten frames counts as much as a still of one. Normalized.
+    fn mean(&self, hashes: &[String]) -> Option<Vec<f32>> {
+        let mut sum: Vec<f32> = Vec::new();
+        let mut files = 0;
+        for frames in hashes.iter().filter_map(|hash| self.files.get(hash)) {
+            let Some(first) = frames.first() else {
+                continue;
+            };
+            sum.resize(first.vector.len(), 0.0);
+            let share = 1.0 / frames.len() as f32;
+            for frame in frames {
+                for (total, x) in sum.iter_mut().zip(&frame.vector) {
+                    *total += x * share;
+                }
+            }
+            files += 1;
+        }
+        if files == 0 {
+            return None;
+        }
+        clip::normalize(&mut sum);
+        Some(sum)
+    }
+
+    /// Every file but `skip`, each by its best frame, best first.
+    fn score(&self, query: &[f32], skip: &[String]) -> Vec<Scored> {
         let mut scored: Vec<Scored> = self
             .files
             .iter()
+            .filter(|(hash, _)| !skip.contains(hash))
             .filter_map(|(hash, frames)| {
                 frames
                     .iter()
@@ -87,7 +135,6 @@ impl Vectors {
             })
             .collect();
         scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-        cut(&mut scored, floor, delta);
         scored
     }
 }
@@ -236,10 +283,6 @@ mod tests {
     #[test]
     fn each_file_scores_by_its_best_frame() {
         let mut vectors = Vectors::default();
-        let frame = |time_ms, vector: [f32; 2]| Frame {
-            time_ms,
-            vector: vector.to_vec(),
-        };
         vectors.files.insert(
             "a".into(),
             vec![frame(0, [0.0, 1.0]), frame(500, [1.0, 0.0])],
@@ -261,6 +304,47 @@ mod tests {
                 },
             ]
         );
+    }
+
+    fn frame(time_ms: i64, vector: [f32; 2]) -> Frame {
+        Frame {
+            time_ms,
+            vector: vector.to_vec(),
+        }
+    }
+
+    #[test]
+    fn each_file_counts_once_in_the_mean_of_several() {
+        let mut vectors = Vectors::default();
+        vectors.files.insert(
+            "a".into(),
+            vec![
+                frame(0, [1.0, 0.0]),
+                frame(500, [1.0, 0.0]),
+                frame(900, [1.0, 0.0]),
+            ],
+        );
+        vectors.files.insert("b".into(), vec![frame(0, [0.0, 1.0])]);
+        let mean = vectors.mean(&["a".into(), "b".into()]).unwrap();
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((mean[0] - half).abs() < 1e-6 && (mean[1] - half).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_file_with_no_vectors_gives_no_query() {
+        let vectors = Vectors::default();
+        assert!(vectors.mean(&["a".into()]).is_none());
+    }
+
+    #[test]
+    fn the_query_files_are_left_out() {
+        let mut vectors = Vectors::default();
+        vectors.files.insert("a".into(), vec![frame(0, [1.0, 0.0])]);
+        vectors.files.insert("b".into(), vec![frame(0, [0.6, 0.8])]);
+        vectors.files.insert("c".into(), vec![frame(0, [0.8, 0.6])]);
+        let found = vectors.like(&["a".into(), "b".into()]).unwrap();
+        let hashes: Vec<&str> = found.iter().map(|s| s.hash.as_str()).collect();
+        assert_eq!(hashes, vec!["c"]);
     }
 
     #[test]

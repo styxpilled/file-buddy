@@ -87,7 +87,8 @@ gpui_kit::actions!(
         ReviewLong,
         ReviewFailed,
         ReviewPoorNames,
-        Rescan
+        Rescan,
+        MoreLikeThis
     ]
 );
 
@@ -108,6 +109,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("backspace", GoUp, grid),
         KeyBinding::new("s", CycleSort, grid),
         KeyBinding::new("v", ToggleTable, grid),
+        KeyBinding::new("l", MoreLikeThis, grid),
         KeyBinding::new("ctrl-c", CopyFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-e", RevealFile, Some("FileBuddy")),
         KeyBinding::new("ctrl-o", OpenFile, Some("FileBuddy")),
@@ -245,8 +247,10 @@ impl FileBuddy {
     ) -> Self {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(folders::BROWSE_PLACEHOLDER));
+        // `set_value` sends no `Change`, so this is the user typing.
         cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                this.end_likes();
                 this.run_search(cx);
             }
         })
@@ -339,9 +343,22 @@ impl FileBuddy {
         let results = if folders && self.listing {
             self.list_folder()
         } else {
-            let within = if folders { self.folder.clone() } else { None };
-            self.fetch_hits(text, within, cx)
+            self.fetch_hits(text, self.scope(), cx)
         };
+        self.read_row_tags();
+        results
+    }
+
+    /// The folder a query searches: the open folder on the Folders page.
+    fn scope(&self) -> Option<PathBuf> {
+        if self.page() == Page::Folders {
+            self.folder.clone()
+        } else {
+            None
+        }
+    }
+
+    fn read_row_tags(&mut self) {
         self.row_tags = if self.table_shown() {
             tags::by_hash(self.db.conn()).unwrap_or_else(|e| {
                 log::error!("reading the tags failed: {e:#}");
@@ -350,7 +367,6 @@ impl FileBuddy {
         } else {
             HashMap::new()
         };
-        results
     }
 
     /// The text matches now. The visual matches follow, in `visual`.
@@ -380,7 +396,7 @@ impl FileBuddy {
     /// A new query. Review holds its own results, which a background refresh
     /// must not replace.
     fn run_search(&mut self, cx: &mut Context<Self>) {
-        if self.review().is_none() {
+        if self.review().is_none() && !self.search_like(true, cx) {
             let results = self.fetch_results(cx);
             self.show_results(results, cx);
         }
@@ -388,7 +404,7 @@ impl FileBuddy {
 
     /// The same query again, after the index changed under it.
     fn rerun_search(&mut self, cx: &mut Context<Self>) {
-        if self.review().is_none() {
+        if self.review().is_none() && !self.search_like(false, cx) {
             let results = self.fetch_results(cx);
             self.update_results(results, cx);
         }
@@ -611,6 +627,8 @@ impl FileBuddy {
         } else if !self.marked.is_empty() {
             self.marked.clear();
             cx.notify();
+        } else {
+            self.leave_like(window, cx);
         }
     }
 
@@ -760,6 +778,9 @@ impl Render for FileBuddy {
                 cx.listener(|this, _: &ToggleMark, _, cx| this.toggle_mark(this.selected, cx)),
             )
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
+            .on_action(
+                cx.listener(|this, _: &MoreLikeThis, window, cx| this.more_like_this(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &RenameFile, window, cx| this.open_renamer(window, cx)),
             )

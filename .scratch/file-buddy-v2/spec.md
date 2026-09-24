@@ -121,9 +121,13 @@ matches. The CLIP weight is a fifth weight on the Settings page. `floor` and
 - The query is the mean of the selection's frame vectors. With files marked, it
   is the mean over all the marked files.
 - Each file scores by its best frame. The query files are left out.
-- The same cutoff applies as for a typed query.
-- The search box shows `like: <name>`, or `like: <n> files`. Escape goes back to
-  the results from before.
+- The 50 best files show, after the chips and the Folders scope. There is no
+  cutoff by score: between two files, scores run from about 0.6 to 0.97 and
+  spread differently for each file. See issue 22.
+- The search box shows `like: <name>`, or `like: <n> files`. Typing over it
+  ends the search. Escape goes back to the results from before, with their
+  selection and marks, after it clears the marks. `l` again goes one step
+  deeper, and each escape goes back one step.
 - The chips still filter.
 
 ## Moments
