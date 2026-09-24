@@ -10,6 +10,7 @@ use rusqlite::{Connection, params_from_iter};
 use crate::clip::{self, Frame};
 use crate::db::files::{PRESENT, read_row};
 use crate::db::vectors;
+use crate::media::Kind;
 use crate::search::{Hit, Request, Signal, filters};
 
 /// A file whose best frame scores below this matches nothing. CLIP always has a
@@ -167,6 +168,8 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
     for row in rows {
         let file = row?;
         let at = rank[file.hash.as_str()];
+        // A still has one frame, so a time in it says nothing.
+        let at_ms = (file.kind != Kind::Still).then_some(scored[at].time_ms);
         hits.push((
             at,
             Hit {
@@ -174,6 +177,7 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
                 score: -f64::from(scored[at].score),
                 signal: Signal::Visual,
                 matched: String::new(),
+                at_ms,
             },
         ));
     }
@@ -247,6 +251,7 @@ mod tests {
             score: 0.0,
             signal,
             matched: String::new(),
+            at_ms: None,
         }
     }
 

@@ -168,6 +168,7 @@ impl FileBuddy {
         let kind = hit.file.kind;
         let path = hit.file.path.clone();
         let hash = hit.file.hash.clone();
+        let moment = hit.at_ms;
         // A still image has no clip of its own, so nothing may linger over it.
         if kind == Kind::Still {
             self.player.preview = None;
@@ -196,6 +197,7 @@ impl FileBuddy {
             .take_if(|(at, _)| *at == self.selected)
         {
             self.player.apply(&video);
+            open_at(&video, moment);
             self.player.preview = Some(Preview { hash, video });
             self.schedule_preload(cx);
             cx.notify();
@@ -210,7 +212,10 @@ impl FileBuddy {
             cx.background_executor().timer(PREVIEW_DELAY).await;
             let opened = this
                 .update(cx, |this, _| {
-                    open_video(&path, PREVIEW_BUFFER).inspect(|video| this.player.apply(video))
+                    open_video(&path, PREVIEW_BUFFER).inspect(|video| {
+                        this.player.apply(video);
+                        open_at(video, moment);
+                    })
                 })
                 .ok()
                 .flatten();
@@ -336,6 +341,16 @@ impl FileBuddy {
     pub(super) fn stop_videos(&mut self) {
         self.player.hovered = None;
         self.player.preloaded = None;
+    }
+}
+
+/// A match opens the clip where it matched. A clip already in the pane stays
+/// where the user left it.
+fn open_at(video: &Video, moment: Option<i64>) {
+    if let Some(ms) = moment {
+        video
+            .seek(Duration::from_millis(ms.max(0) as u64), true)
+            .ok();
     }
 }
 

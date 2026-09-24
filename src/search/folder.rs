@@ -212,6 +212,7 @@ pub fn list(
             score: 0.0,
             signal: Signal::Filename,
             matched: String::new(),
+            at_ms: None,
         })
     };
     Ok(folders

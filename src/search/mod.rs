@@ -2,6 +2,7 @@
 //! the user typed into the expression this runs.
 
 pub mod folder;
+pub mod moment;
 pub mod query;
 pub mod visual;
 
@@ -14,7 +15,8 @@ use rusqlite::{Connection, params_from_iter};
 use self::query::{build_match, visual_only};
 use crate::config::Weights;
 use crate::db::files::{self, FileRow, PRESENT, read_row};
-use crate::media::Kind;
+use crate::db::segments;
+use crate::media::{self, Kind};
 
 /// Which column gave a result its best score. The grid shows it as a badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,20 @@ pub struct Hit {
     pub signal: Signal,
     /// The text that matched, from the column the badge names.
     pub matched: String,
+    /// Where in the clip it matched: the speech segment, or the frame that
+    /// looks most like the query.
+    pub at_ms: Option<i64>,
+}
+
+impl Hit {
+    /// The second line of a tile: the time in the clip, then what matched.
+    pub fn snippet(&self) -> String {
+        match self.at_ms {
+            Some(ms) if self.matched.is_empty() => media::clock(ms),
+            Some(ms) => format!("{} {}", media::clock(ms), self.matched),
+            None => self.matched.clone(),
+        }
+    }
 }
 
 /// What to search for. The chips decide `kinds`.
@@ -146,9 +162,18 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
             score: row.get(9)?,
             signal: Signal::COLUMNS[column],
             matched,
+            at_ms: None,
         })
     })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+    let mut hits: Vec<Hit> = rows.collect::<Result<_, _>>()?;
+    for hit in hits.iter_mut().filter(|hit| hit.signal == Signal::Speech) {
+        let spoken = segments::of_hash(conn, &hit.file.hash)?;
+        if let Some(segment) = moment::segment(&spoken, text) {
+            hit.at_ms = Some(segment.start_ms);
+            hit.matched = segment.text.trim().to_string();
+        }
+    }
+    Ok(hits)
 }
 
 /// What the grid shows when the query is empty: the newest files first.
@@ -169,6 +194,7 @@ pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
             file,
             score: 0.0,
             signal: Signal::Filename,
+            at_ms: None,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -206,6 +232,36 @@ fn best_column(scores: [f64; 4]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hit(matched: &str, at_ms: Option<i64>) -> Hit {
+        Hit {
+            file: FileRow {
+                id: 1,
+                path: "C:/clips/a.mp4".into(),
+                hash: "h".into(),
+                filename: "a.mp4".into(),
+                kind: Kind::Video,
+                size: 1,
+                duration: Some(60.0),
+                state: files::State::Ready,
+                mtime: 0,
+            },
+            score: 0.0,
+            signal: Signal::Speech,
+            matched: matched.into(),
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn a_moment_puts_its_time_before_the_match() {
+        assert_eq!(
+            hit("the line you said", Some(42_500)).snippet(),
+            "0:42 the line you said"
+        );
+        assert_eq!(hit("", Some(7_000)).snippet(), "0:07");
+        assert_eq!(hit("a.mp4", None).snippet(), "a.mp4");
+    }
 
     #[test]
     fn the_strongest_column_gives_the_badge() {

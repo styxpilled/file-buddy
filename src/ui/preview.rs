@@ -22,12 +22,13 @@ use crate::paths;
 use crate::search::Hit;
 use crate::search::folder::Entry;
 use crate::ui::{
-    CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer, toggle,
+    CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
+    seek_bar, toggle,
 };
 
-/// What the pane holds besides the stage: the controls above it, and the tabs
-/// and the panel below. The stage gets the rest.
-const CHROME_HEIGHT: f32 = 380.;
+/// What the pane holds besides the stage: the controls above it, and the seek
+/// bar, the tabs and the panel below. The stage gets the rest.
+const CHROME_HEIGHT: f32 = 380. + seek_bar::HEIGHT + 8.;
 const DETAIL_HEIGHT: f32 = 200.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
@@ -69,6 +70,7 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .border_color(cx.theme().border)
         .child(controls(this, cx))
         .child(stage(this, hit, width, height, cx))
+        .child(seek_bar::bar(this, width, cx))
         .child(tabs(this, cx))
         .child(match this.detail {
             Detail::File => file_details(this, hit, cx),
@@ -167,7 +169,8 @@ fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyE
 }
 
 /// The speech of the file, one segment per line. Without segments it says why.
-fn transcript(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
+/// A click on a time seeks the clip there.
+fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let conn = this.db.conn();
     let lines = segments::of_hash(conn, &hit.file.hash).unwrap_or_default();
     if lines.is_empty() {
@@ -183,30 +186,34 @@ fn transcript(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
         return note(this, hit, text, cx);
     }
 
+    let playing = this.player.video_of(&hit.file.hash).is_some();
     panel(this, hit, cx)
-        .children(lines.into_iter().map(|segment| {
+        .children(lines.into_iter().enumerate().map(|(at, segment)| {
+            let start = segment.start_ms;
             h_flex()
                 .w_full()
                 .gap_2()
                 .items_start()
                 .child(
                     div()
+                        .id(("segment-time", at))
                         .flex_shrink_0()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
-                        .child(timestamp(segment.start_ms)),
+                        .when(playing, |time| {
+                            time.cursor_pointer()
+                                .hover(|time| time.text_color(cx.theme().foreground))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.seek_to(start, cx)),
+                                )
+                        })
+                        .child(media::clock(start)),
                 )
                 // Without a zero minimum width a long line pushes past the pane
                 // instead of wrapping.
                 .child(div().flex_1().min_w_0().child(segment.text))
         }))
         .into_any_element()
-}
-
-/// `0:07` or `1:42`.
-fn timestamp(ms: i64) -> String {
-    let seconds = ms / 1000;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
 /// The box the video fits inside. The element letterboxes the frame in the size
@@ -228,7 +235,7 @@ fn stage_size(this: &FileBuddy, window: &Window, cx: &App) -> (f32, f32) {
 }
 
 /// The clip itself once the selection stops moving, the thumbnail until then.
-/// The wheel over it sets the sound level.
+/// The wheel over it sets the sound level, and a click pauses or plays it.
 fn stage(
     this: &FileBuddy,
     hit: &Hit,
@@ -237,6 +244,7 @@ fn stage(
     cx: &mut Context<FileBuddy>,
 ) -> AnyElement {
     let frame = div()
+        .id("stage")
         .w(px(width))
         .h(px(height))
         .rounded(px(4.))
@@ -244,6 +252,12 @@ fn stage(
         .flex()
         .items_center()
         .justify_center()
+        .on_click(cx.listener(|this, _, _, cx| {
+            if this.player.video().is_some() {
+                this.player.toggle_paused();
+                cx.notify();
+            }
+        }))
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
             let up = match event.delta {
                 ScrollDelta::Lines(delta) => delta.y,

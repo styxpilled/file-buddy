@@ -631,3 +631,87 @@ fn repeated_hover_cycles_never_race() {
         );
     }
 }
+
+/// Wait until the seek has put a frame on screen. `None` when it takes longer
+/// than `limit`.
+fn wait_for_seek(video: &Video, limit: Duration) -> Option<Duration> {
+    let started = Instant::now();
+    while video.seeking() {
+        if started.elapsed() > limit {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Some(started.elapsed())
+}
+
+fn wait_for_first_frame(video: &Video) {
+    let started = Instant::now();
+    while video.frame_seq() == 0 && started.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A paused clip, as the side pane holds it, shows the frame at the target.
+#[test]
+fn an_accurate_seek_shows_the_frame_at_the_target() {
+    for path in fixtures(6) {
+        let video = open(&path);
+        video.set_paused(true);
+        wait_for_first_frame(&video);
+
+        let target = video.duration().mul_f64(0.6);
+        video.seek(target, true).expect("seek failed");
+        wait_for_seek(&video, Duration::from_secs(3))
+            .unwrap_or_else(|| panic!("seek never showed a frame ({})", path.display()));
+
+        // Frame times are not always evenly spaced, so the bound is loose. A
+        // keyframe seek misses by seconds.
+        let shown = video.frame_time();
+        assert!(
+            shown <= target && target - shown < Duration::from_millis(100),
+            "seek to {target:?} showed the frame at {shown:?} ({})",
+            path.display()
+        );
+    }
+}
+
+/// How long a seek takes to show its frame, over every clip in `test_videos`:
+/// to a keyframe while paused, then accurate while paused and while playing.
+/// `cargo test --test playback seek_times -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, not a check"]
+fn seek_times() {
+    for path in fixtures(usize::MAX) {
+        let video = open(&path);
+        video.set_paused(true);
+        wait_for_first_frame(&video);
+        let (width, height) = video.size();
+        let mut row = String::new();
+        for (accurate, paused) in [(false, true), (true, true), (true, false)] {
+            video.set_paused(paused);
+            let mut worst = Duration::ZERO;
+            let mut total = Duration::ZERO;
+            for share in [0.25, 0.5, 0.9] {
+                video
+                    .seek(video.duration().mul_f64(share), accurate)
+                    .unwrap();
+                let took = wait_for_seek(&video, Duration::from_secs(5)).unwrap_or(Duration::MAX);
+                worst = worst.max(took);
+                total += took;
+            }
+            row += &format!(
+                "  {:>5.0} / {:>5.0} ms",
+                total.as_secs_f64() * 1000.0 / 3.0,
+                worst.as_secs_f64() * 1000.0
+            );
+        }
+        println!(
+            "{:>4}x{:<4} {:>5.1}s {row}  {}",
+            width,
+            height,
+            video.duration().as_secs_f64(),
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+}

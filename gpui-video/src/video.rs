@@ -151,6 +151,10 @@ const PRESENT_TOLERANCE: f64 = 0.010;
 /// How late a frame has to be before it is skipped instead of presented.
 const SKIP_THRESHOLD: f64 = 0.050;
 
+/// Packets decoded per loop, with no sleep, while an accurate seek decodes up
+/// to its target.
+const SEEK_BURST: usize = 32;
+
 /// One decoder's last second, for `RUST_LOG=gpui_video=debug`. Playback faults
 /// here are all about rates and buffer levels over time, and a single line a
 /// second is what makes them legible.
@@ -232,7 +236,12 @@ impl Default for VideoOptions {
 }
 
 enum DecoderCommand {
-    Seek(i64),
+    /// `accurate` decodes from the keyframe up to the target and drops what
+    /// comes before it. Otherwise playback starts at the keyframe.
+    Seek {
+        timestamp: i64,
+        accurate: bool,
+    },
     Stop,
 }
 
@@ -261,6 +270,9 @@ struct Shared {
     is_paused: AtomicBool,
     is_eos: AtomicBool,
     alive: AtomicBool,
+    /// From a seek until its first frame is presented. A paused element keeps
+    /// asking for frames while this holds.
+    seeking: AtomicBool,
 
     volume: Mutex<f64>,
     muted: AtomicBool,
@@ -286,6 +298,7 @@ impl Shared {
             is_paused: AtomicBool::new(false),
             is_eos: AtomicBool::new(false),
             alive: AtomicBool::new(true),
+            seeking: AtomicBool::new(false),
 
             volume: Mutex::new(0.5),
             muted: AtomicBool::new(false),
@@ -667,7 +680,10 @@ impl Video {
         Ok(())
     }
 
-    pub fn seek(&self, position: impl Into<Position>, _accurate: bool) -> Result<(), Error> {
+    /// Go to `position`. An accurate seek shows the frame at that time, and the
+    /// sound starts there too. A seek that is not accurate starts at the
+    /// keyframe before it, which is faster.
+    pub fn seek(&self, position: impl Into<Position>, accurate: bool) -> Result<(), Error> {
         let seconds = match position.into() {
             Position::Time(duration) => duration.as_secs_f64(),
             Position::Frame(frame) => frame as f64 / self.0.framerate,
@@ -681,12 +697,21 @@ impl Video {
         log::info!("Seeking to {:.2}s ({} us)", seconds, timestamp);
 
         self.0.shared.set_eos(false);
+        self.0.shared.seeking.store(true, Ordering::Release);
         self.0.shared.reset_to(Duration::from_secs_f64(seconds));
 
         self.0
             .command_tx
-            .send(DecoderCommand::Seek(timestamp))
+            .send(DecoderCommand::Seek {
+                timestamp,
+                accurate,
+            })
             .map_err(|_| Error::Sync)
+    }
+
+    /// A seek has not presented its first frame yet.
+    pub fn seeking(&self) -> bool {
+        self.0.shared.seeking.load(Ordering::Acquire)
     }
 
     pub fn restart_stream(&self) -> Result<(), Error> {
@@ -699,6 +724,11 @@ impl Video {
     /// its position, because the decoder stops updating the clock while paused.
     pub fn position(&self) -> Duration {
         *self.0.shared.video_clock.lock()
+    }
+
+    /// The time of the frame on screen.
+    pub fn frame_time(&self) -> Duration {
+        self.0.shared.frame.lock().timestamp
     }
 
     /// Increments every time a new frame is presented. The element uses it to
@@ -794,7 +824,14 @@ impl AudioTrack {
         (Duration::from_secs_f64(seconds), ring.capacity - ring.len)
     }
 
-    fn decode(&mut self, packet: &ffmpeg::Packet, shared: &Shared) -> DecodeResult {
+    /// Decodes one packet into the ring. With `from` set, the sound before that
+    /// time is dropped, and `from` clears once the sound reaches it.
+    fn decode(
+        &mut self,
+        packet: &ffmpeg::Packet,
+        shared: &Shared,
+        from: &mut Option<Duration>,
+    ) -> DecodeResult {
         if let Err(e) = self.decoder.send_packet(packet) {
             log::warn!("Send audio packet error: {:?}", e);
             return DecodeResult::Audio;
@@ -802,9 +839,21 @@ impl AudioTrack {
 
         let mut decoded = FFmpegAudioFrame::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
-            if let Some(pts) = decoded.pts() {
-                *shared.audio_pts.lock() = to_duration(pts, self.time_base);
+            let start = decoded.pts().map(|pts| to_duration(pts, self.time_base));
+            if let Some(start) = start {
+                *shared.audio_pts.lock() = start;
             }
+            let mut skip = 0;
+            if let (Some(target), Some(start)) = (*from, start) {
+                let length = decoded.samples() as f64 / self.decoder.rate().max(1) as f64;
+                let early = target.as_secs_f64() - start.as_secs_f64();
+                if early >= length {
+                    continue;
+                }
+                // Interleaved stereo, so two samples per frame of sound.
+                skip = (early.max(0.0) * self.output_sample_rate as f64) as usize * 2;
+            }
+            *from = None;
 
             // `ResampleContext::run` allocates the output frame with the INPUT
             // sample count, so upsampling 44.1 kHz to a 48 kHz device leaves
@@ -827,7 +876,7 @@ impl AudioTrack {
                     continue;
                 }
             };
-            queue_resampled(&resampled, shared);
+            queue_resampled(&resampled, shared, skip);
 
             while delay.is_some() {
                 let mut tail = packed_stereo_frame(room);
@@ -841,7 +890,7 @@ impl AudioTrack {
                 if tail.samples() == 0 {
                     break;
                 }
-                queue_resampled(&tail, shared);
+                queue_resampled(&tail, shared, 0);
             }
 
             return DecodeResult::Audio;
@@ -866,16 +915,18 @@ fn packed_stereo_frame(samples: usize) -> FFmpegAudioFrame {
     )
 }
 
-/// Interleaved f32 stereo out of a resampled frame, into the ring.
-fn queue_resampled(resampled: &FFmpegAudioFrame, shared: &Shared) {
+/// Interleaved f32 stereo out of a resampled frame, into the ring, without the
+/// first `skip` samples.
+fn queue_resampled(resampled: &FFmpegAudioFrame, shared: &Shared, skip: usize) {
     let sample_count = resampled.samples() * 2;
-    if sample_count == 0 {
+    if sample_count <= skip {
         return;
     }
     let samples: Vec<f32> = resampled
         .data(0)
         .chunks_exact(4)
         .take(sample_count)
+        .skip(skip)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     shared.audio_ring.lock().write(&samples);
@@ -960,28 +1011,44 @@ impl Worker {
                     log::info!("Buffering done ({} frames)", vbuf_len);
                     state.buffering = false;
                     *shared.last_clock_update.lock() = Instant::now();
+                    // Buffering after a seek can outlast the stall grace, and
+                    // the clock must not carry that time.
+                    state.audio_clock_at = Instant::now();
                 }
-                for _ in 0..5 {
+                let seeking = state.video_seek.is_some();
+                for _ in 0..if seeking { SEEK_BURST } else { 5 } {
                     if !self.decode_one(
                         &mut ictx,
                         &mut decoder,
                         &mut scaler,
                         audio.as_mut(),
-                        &mut state.stats,
+                        &mut state,
                     ) {
                         break;
                     }
                 }
-                std::thread::sleep(Duration::from_millis(5));
+                // A paused clip shows the frame of a seek at once. The rest of
+                // the prebuffer is for playing.
+                if paused && state.seek_unshown {
+                    if let Some(first) = shared.frame_buffer.lock().front().cloned() {
+                        shared.present(first);
+                        state.seek_shown(shared);
+                    }
+                }
+                if !seeking {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 continue;
             }
 
             if paused {
                 // A thumbnail paused before the first frame was presented would
                 // otherwise stay blank, because presenting only happens below.
-                if shared.frame.lock().data.is_empty() {
+                // The first frame after a seek is shown the same way.
+                if shared.frame.lock().data.is_empty() || state.seek_unshown {
                     if let Some(first) = shared.frame_buffer.lock().front().cloned() {
                         shared.present(first);
+                        state.seek_shown(shared);
                     }
                 }
                 state.was_paused = true;
@@ -1000,7 +1067,7 @@ impl Worker {
             }
 
             let master_clock = self.master_clock(audio.is_some(), &mut state);
-            self.present_due(master_clock, &mut state.stats);
+            self.present_due(master_clock, &mut state);
             self.pace_decoding(
                 &mut ictx,
                 &mut decoder,
@@ -1034,7 +1101,10 @@ impl Worker {
     ) -> bool {
         while let Ok(command) = self.command_rx.try_recv() {
             match command {
-                DecoderCommand::Seek(timestamp) => {
+                DecoderCommand::Seek {
+                    timestamp,
+                    accurate,
+                } => {
                     log::info!("Seek to {} us", timestamp);
                     if let Err(e) = ictx.seek(timestamp, ..timestamp) {
                         log::error!("Seek failed: {:?}", e);
@@ -1046,7 +1116,13 @@ impl Worker {
                     // front of each buffer can hold pre-seek data.
                     self.shared.frame_buffer.lock().clear();
                     self.shared.audio_ring.lock().clear();
-                    state.restart_at(*self.shared.clock_base.lock());
+                    let target = *self.shared.clock_base.lock();
+                    state.restart_at(target);
+                    state.seek_unshown = true;
+                    if accurate {
+                        state.video_seek = Some(VideoSeek { target, held: None });
+                        state.audio_from = audio.as_ref().map(|_| target);
+                    }
                 }
                 DecoderCommand::Stop => {
                     log::info!("Stopping decoder");
@@ -1138,7 +1214,7 @@ impl Worker {
 
     /// Shows the frame the clock has reached, then throws away any frame that is
     /// already too late to show.
-    fn present_due(&self, master_clock: Duration, stats: &mut LoopStats) {
+    fn present_due(&self, master_clock: Duration, state: &mut LoopState) {
         let shared = &*self.shared;
         let mut buf = shared.frame_buffer.lock();
 
@@ -1153,6 +1229,8 @@ impl Worker {
         let presented = buf.pop_front().expect("front was Some");
         drop(buf);
         shared.present(presented);
+        state.seek_shown(shared);
+        let stats = &mut state.stats;
         stats.presented += 1;
 
         let mut buf = shared.frame_buffer.lock();
@@ -1220,7 +1298,7 @@ impl Worker {
         };
 
         if should_decode {
-            self.decode_one(ictx, decoder, scaler, audio, &mut state.stats);
+            self.decode_one(ictx, decoder, scaler, audio, state);
         }
 
         state.stats.report(video_lead, audio_lead, vbuf_len);
@@ -1234,15 +1312,15 @@ impl Worker {
         decoder: &mut ffmpeg::decoder::Video,
         scaler: &mut ScaleContext,
         audio: Option<&mut AudioTrack>,
-        stats: &mut LoopStats,
+        state: &mut LoopState,
     ) -> bool {
-        match self.decode_next_packet(ictx, decoder, scaler, audio) {
+        match self.decode_next_packet(ictx, decoder, scaler, audio, state) {
             Ok(DecodeResult::Eos) => {
                 self.shared.set_eos(true);
                 false
             }
             Ok(result) => {
-                stats.count(result);
+                state.stats.count(result);
                 true
             }
             Err(e) => {
@@ -1258,30 +1336,42 @@ impl Worker {
         decoder: &mut ffmpeg::decoder::Video,
         scaler: &mut ScaleContext,
         audio: Option<&mut AudioTrack>,
+        state: &mut LoopState,
     ) -> Result<DecodeResult, Error> {
         let Some((stream, packet)) = ictx.packets().next() else {
+            // A target after the last frame. The last frame is on screen there.
+            if let Some((at, frame)) = state.video_seek.take().and_then(|seek| seek.held) {
+                self.buffer_frame(scaler, &frame, at);
+            }
+            state.audio_from = None;
             return Ok(DecodeResult::Eos);
         };
         let stream_index = stream.index();
 
         if stream_index == self.video_stream_index {
-            return Ok(self.decode_video(decoder, scaler, &packet));
+            return Ok(self.decode_video(decoder, scaler, &packet, &mut state.video_seek));
         }
 
         if let Some(track) = audio {
             if stream_index == track.stream_index {
-                return Ok(track.decode(&packet, &self.shared));
+                return Ok(track.decode(&packet, &self.shared, &mut state.audio_from));
             }
         }
 
         Ok(DecodeResult::Video)
     }
 
+    /// Decodes one packet into the frame buffer. During an accurate seek, the
+    /// frames before the target are dropped before they are scaled, except the
+    /// last one: it is on screen at the target if the next frame starts after
+    /// it. Frame times are not always evenly spaced, so only the next frame
+    /// tells.
     fn decode_video(
         &self,
         decoder: &mut ffmpeg::decoder::Video,
         scaler: &mut ScaleContext,
         packet: &ffmpeg::Packet,
+        seek: &mut Option<VideoSeek>,
     ) -> DecodeResult {
         if let Err(e) = decoder.send_packet(packet) {
             log::warn!("Send video packet error: {:?}", e);
@@ -1290,36 +1380,58 @@ impl Worker {
 
         let mut decoded = FFmpegFrame::empty();
         while decoder.receive_frame(&mut decoded).is_ok() {
-            let mut nv12 = FFmpegFrame::empty();
-            if let Err(e) = scaler.run(&decoded, &mut nv12) {
-                log::error!("Scaling error: {:?}", e);
-                continue;
+            let timestamp = to_duration(decoded.pts().unwrap_or(0), self.video_time_base);
+            if let Some(pending) = seek {
+                if timestamp < pending.target {
+                    let frame = std::mem::replace(&mut decoded, FFmpegFrame::empty());
+                    pending.held = Some((timestamp, frame));
+                    continue;
+                }
+                let exact = timestamp == pending.target;
+                let held = seek.take().and_then(|pending| pending.held);
+                if let Some((at, frame)) = held.filter(|_| !exact) {
+                    self.buffer_frame(scaler, &frame, at);
+                }
             }
+            return self.buffer_frame(scaler, &decoded, timestamp);
+        }
 
-            let frame = Frame {
-                data: pack_nv12(&nv12),
-                width: nv12.width(),
-                height: nv12.height(),
-                timestamp: to_duration(decoded.pts().unwrap_or(0), self.video_time_base),
-            };
+        DecodeResult::Video
+    }
 
-            let capacity = self.shared.frame_buffer_capacity.load(Ordering::SeqCst);
-            if capacity == 0 {
-                return DecodeResult::Video;
-            }
-
-            let mut buf = self.shared.frame_buffer.lock();
-            // Drop the newest frame when full. Dropping the front would throw
-            // away the frame that is about to be presented. The lead gate should
-            // keep this from happening: a frame thrown away here leaves a gap in
-            // the picture.
-            if buf.len() >= capacity {
-                return DecodeResult::VideoDropped;
-            }
-            buf.push_back(frame);
+    fn buffer_frame(
+        &self,
+        scaler: &mut ScaleContext,
+        decoded: &FFmpegFrame,
+        timestamp: Duration,
+    ) -> DecodeResult {
+        let mut nv12 = FFmpegFrame::empty();
+        if let Err(e) = scaler.run(decoded, &mut nv12) {
+            log::error!("Scaling error: {:?}", e);
             return DecodeResult::Video;
         }
 
+        let frame = Frame {
+            data: pack_nv12(&nv12),
+            width: nv12.width(),
+            height: nv12.height(),
+            timestamp,
+        };
+
+        let capacity = self.shared.frame_buffer_capacity.load(Ordering::SeqCst);
+        if capacity == 0 {
+            return DecodeResult::Video;
+        }
+
+        let mut buf = self.shared.frame_buffer.lock();
+        // Drop the newest frame when full. Dropping the front would throw
+        // away the frame that is about to be presented. The lead gate should
+        // keep this from happening: a frame thrown away here leaves a gap in
+        // the picture.
+        if buf.len() >= capacity {
+            return DecodeResult::VideoDropped;
+        }
+        buf.push_back(frame);
         DecodeResult::Video
     }
 }
@@ -1350,6 +1462,13 @@ fn pack_nv12(frame: &FFmpegFrame) -> Vec<u8> {
     data
 }
 
+/// An accurate seek that has not reached its frame yet.
+struct VideoSeek {
+    target: Duration,
+    /// The last frame before the target so far, not yet scaled.
+    held: Option<(Duration, FFmpegFrame)>,
+}
+
 /// The decoder loop's own running state, separate from what the handle sees.
 struct LoopState {
     buffering: bool,
@@ -1359,6 +1478,12 @@ struct LoopState {
     audio_clock_at: Instant,
     last_master: Duration,
     stats: LoopStats,
+    /// Where an accurate seek starts each stream. What comes before is dropped.
+    video_seek: Option<VideoSeek>,
+    audio_from: Option<Duration>,
+    /// A seek was handled and none of its frames is presented yet. The first
+    /// one is presented even while paused.
+    seek_unshown: bool,
 }
 
 impl Default for LoopState {
@@ -1370,6 +1495,9 @@ impl Default for LoopState {
             audio_clock_at: Instant::now(),
             last_master: Duration::ZERO,
             stats: LoopStats::default(),
+            video_seek: None,
+            audio_from: None,
+            seek_unshown: false,
         }
     }
 }
@@ -1380,5 +1508,14 @@ impl LoopState {
         self.last_audio_clock = position;
         self.audio_clock_at = Instant::now();
         self.last_master = position;
+        self.video_seek = None;
+        self.audio_from = None;
+    }
+
+    fn seek_shown(&mut self, shared: &Shared) {
+        if self.seek_unshown {
+            self.seek_unshown = false;
+            shared.seeking.store(false, Ordering::Release);
+        }
     }
 }

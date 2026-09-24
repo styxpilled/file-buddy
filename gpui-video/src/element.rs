@@ -276,7 +276,8 @@ impl Element for VideoElement {
         // would otherwise hold the window at the display refresh rate forever.
         // A video that starts paused is the exception: it must keep asking until
         // the decoder presents its first frame, or it stays blank.
-        if !self.video.paused() || self.video.frame_seq() == 0 {
+        // A seek on a paused video is the same.
+        if !self.video.paused() || self.video.frame_seq() == 0 || self.video.seeking() {
             window.request_animation_frame();
         }
     }

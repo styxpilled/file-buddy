@@ -10,6 +10,7 @@ mod player;
 mod preview;
 mod renamer;
 mod review;
+mod seek_bar;
 mod settings;
 mod table;
 mod tagger;
@@ -36,6 +37,7 @@ use self::indexing::Indexer;
 use self::player::Player;
 use self::renamer::Renamer;
 use self::review::Review;
+use self::seek_bar::SeekBar;
 use self::settings::Settings;
 use self::tagger::Tagger;
 use self::visual::Visual;
@@ -88,7 +90,9 @@ gpui_kit::actions!(
         ReviewFailed,
         ReviewPoorNames,
         Rescan,
-        MoreLikeThis
+        MoreLikeThis,
+        SkipBack,
+        SkipForward
     ]
 );
 
@@ -105,6 +109,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f", FocusQuery, grid),
         KeyBinding::new("m", ToggleMuted, grid),
         KeyBinding::new("space", TogglePaused, grid),
+        KeyBinding::new("shift-left", SkipBack, grid),
+        KeyBinding::new("shift-right", SkipForward, grid),
         KeyBinding::new("enter", Activate, grid),
         KeyBinding::new("backspace", GoUp, grid),
         KeyBinding::new("s", CycleSort, grid),
@@ -166,6 +172,7 @@ pub struct FileBuddy {
     /// Tiles across the grid, from the width of the last frame.
     columns: usize,
     player: Player,
+    seek_bar: SeekBar,
     indexer: Indexer,
     status: SharedString,
     /// A confirmation, shown in place of the result count until it expires. The
@@ -273,6 +280,7 @@ impl FileBuddy {
             kinds: vec![Kind::Video, Kind::Animated, Kind::Still],
             columns: 1,
             player: Player::default(),
+            seek_bar: SeekBar::new(cx),
             indexer: Indexer::new(config.paused),
             status: "".into(),
             notice: None,
@@ -719,6 +727,7 @@ impl Render for FileBuddy {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.hold_focus(window, cx);
         self.sync_placeholder(window, cx);
+        self.sync_seek_bar(window, cx);
         let width = self.grid_width(window, cx);
         self.columns = self.column_count(window, cx);
 
@@ -742,6 +751,8 @@ impl Render for FileBuddy {
                 this.player.toggle_paused();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &SkipBack, _, cx| this.skip(false, cx)))
+            .on_action(cx.listener(|this, _: &SkipForward, _, cx| this.skip(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleAutoplay, _, cx| {
                 this.player.toggle_autoplay();
                 cx.notify();

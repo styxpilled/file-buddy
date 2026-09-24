@@ -182,7 +182,7 @@ fn file_line(this: &FileBuddy, hit: &Hit, pending: bool, cx: &App) -> AnyElement
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .truncate()
-                .child(hit.matched.clone()),
+                .child(hit.snippet()),
         )
         .into_any_element()
 }

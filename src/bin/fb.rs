@@ -93,10 +93,12 @@ fn main() -> Result<()> {
                 hits = visual::fuse(hits, found, config.weights.visual, request.limit);
             }
             for hit in hits {
+                let at = hit.at_ms.map(file_buddy::media::clock).unwrap_or_default();
                 println!(
-                    "{:>8.3}  {:<12} {}",
+                    "{:>8.3}  {:<12} {:>5}  {}",
                     hit.score,
                     hit.signal.as_str(),
+                    at,
                     hit.file.path.display()
                 );
             }
@@ -142,7 +144,10 @@ fn main() -> Result<()> {
             let request = search::Request::new("").limit(visual::LIKE_COUNT);
             let kept = visual::hits(db.conn(), &request, &all)?.len();
             let read = started.elapsed() - searched;
-            println!("search {searched:.0?}, files {read:.0?}. {kept} of {} kept", all.len());
+            println!(
+                "search {searched:.0?}, files {read:.0?}. {kept} of {} kept",
+                all.len()
+            );
             print_scored(&db, &all, kept)?;
         }
         "status" => {

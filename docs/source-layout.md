@@ -83,6 +83,7 @@ Two things follow from that:
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
         folder.rs     one folder of the roots, and why a file in it is not found
+        moment.rs     the speech segment that a match came from
         visual.rs     the vectors in memory, the cutoff, the merge with the
                       text matches, and the search by the look of files
       ui/             the window. The only directory that knows about GPUI
@@ -92,6 +93,7 @@ Two things follow from that:
         tile.rs       one result: thumbnail, hover video, badge, matched text
         table.rs      the table view of Browse, Folders and Review
         preview.rs    the side pane and its three tabs
+        seek_bar.rs   the bar under the clip in the pane, and the skip keys
         player.rs     the clip in the pane, the file opened ahead, the tile
                       that plays, and the sound
         indexing.rs   the scan, the watcher and the text stages while the

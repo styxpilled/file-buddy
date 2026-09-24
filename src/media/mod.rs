@@ -59,6 +59,17 @@ pub fn duration(seconds: f64) -> String {
     }
 }
 
+/// A point in a clip: `0:07`, `1:42`, or `1:02:30` from an hour.
+pub fn clock(ms: i64) -> String {
+    let total = ms.max(0) / 1000;
+    let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
 impl FromStr for Kind {
     type Err = anyhow::Error;
 
@@ -84,6 +95,15 @@ mod tests {
         assert_eq!(duration(59.96), "1:00");
         assert_eq!(duration(301.0), "5:01");
         assert_eq!(duration(3750.0), "1:02:30");
+    }
+
+    #[test]
+    fn a_point_in_a_clip_counts_whole_seconds() {
+        assert_eq!(clock(0), "0:00");
+        assert_eq!(clock(7_999), "0:07");
+        assert_eq!(clock(102_000), "1:42");
+        assert_eq!(clock(3_750_000), "1:02:30");
+        assert_eq!(clock(-5), "0:00");
     }
 
     #[test]

@@ -10,6 +10,10 @@
 #                            its top left corner, which is where a picture of
 #                            the window measures from too
 #   dblclick:<x>,<y>         the same, twice, fast enough to be a double click
+#   down:<x>,<y>             press the left button at a point, for a drag
+#   move:<x>,<y>             move the pointer there in small steps, so a drag
+#                            sees the moves between
+#   up                       release the left button
 #   scroll:<x>,<y>,<notches> turn the wheel over a point inside the window.
 #                            A positive count turns it away from the hand
 #   hover:<x>,<y>            move the pointer to a point inside the window and
@@ -92,6 +96,23 @@ function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$count = 1) {
     }
 }
 
+function Move-InWindow([IntPtr]$hwnd, [int]$x, [int]$y) {
+    $rect = New-Object Drive.Win+RECT
+    [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+    $from = [System.Windows.Forms.Cursor]::Position
+    $toX = $rect.Left + $x
+    $toY = $rect.Top + $y
+    for ($i = 1; $i -le 20; $i++) {
+        $atX = [int]($from.X + ($toX - $from.X) * $i / 20)
+        $atY = [int]($from.Y + ($toY - $from.Y) * $i / 20)
+        # SetCursorPos alone sends no move while a button is down, so the
+        # move is sent as input.
+        [Drive.Win]::SetCursorPos($atX, $atY) | Out-Null
+        [Drive.Win]::mouse_event(0x0001, 0, 0, 0, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 25
+    }
+}
+
 function Scroll-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$notches) {
     $rect = New-Object Drive.Win+RECT
     [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
@@ -170,6 +191,23 @@ try {
             'dblclick' {
                 $x, $y = $value -split ',', 2
                 Click-InWindow $application ([int]$x) ([int]$y) 2
+                Start-Sleep -Milliseconds $SettleMs
+            }
+            'down' {
+                $x, $y = $value -split ',', 2
+                $rect = New-Object Drive.Win+RECT
+                [Drive.Win]::GetWindowRect($application, [ref]$rect) | Out-Null
+                [Drive.Win]::SetCursorPos($rect.Left + [int]$x, $rect.Top + [int]$y) | Out-Null
+                Start-Sleep -Milliseconds 120
+                [Drive.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 120
+            }
+            'move' {
+                $x, $y = $value -split ',', 2
+                Move-InWindow $application ([int]$x) ([int]$y)
+            }
+            'up' {
+                [Drive.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
                 Start-Sleep -Milliseconds $SettleMs
             }
             'scroll' {
