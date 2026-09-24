@@ -4,6 +4,7 @@
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::db::ocr;
 use crate::media::filename;
 use crate::ocr::noise;
 
@@ -32,17 +33,12 @@ pub fn refresh(conn: &Connection, file_id: i64) -> Result<()> {
         [&hash],
         |row| row.get(0),
     )?;
-    // The `ocr` table keeps every line the recognizer read, one per line. The
-    // index takes the lines worth searching and holds them on one line, because
-    // a snippet is shown in a single row of a tile.
-    let read: Option<String> = conn
-        .query_row("SELECT text FROM ocr WHERE hash = ?1", [&hash], |row| {
-            row.get(0)
-        })
-        .optional()?;
-    let ocr = read
-        .unwrap_or_default()
-        .lines()
+    // The `ocr` table keeps every line the recognizer read. The index takes the
+    // lines worth searching and holds them on one line, because a snippet is
+    // shown in a single row of a tile.
+    let ocr = ocr::of_hash(conn, &hash)?
+        .into_iter()
+        .map(|line| line.text)
         .filter(|line| !noise::is_noise(line))
         .collect::<Vec<_>>()
         .join(" ");
@@ -93,7 +89,8 @@ pub fn rebuild(conn: &Connection) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{Db, ocr};
+    use crate::db::Db;
+    use crate::db::ocr::Line;
 
     fn seeded() -> Db {
         let db = Db::open_in_memory().unwrap();
@@ -119,7 +116,11 @@ mod tests {
         ocr::replace(
             db.conn(),
             "h",
-            &["TikTok".into(), "@ mangoslug".into(), "the caption".into()],
+            &[
+                Line::new(0, "TikTok"),
+                Line::new(0, "@ mangoslug"),
+                Line::new(500, "the caption"),
+            ],
         )
         .unwrap();
 
@@ -128,16 +129,23 @@ mod tests {
         assert_eq!(indexed_ocr(&db), "the caption");
         // The rule may change, and rereading every file to change it is the
         // cost this avoids.
-        assert_eq!(
-            ocr::of_hash(db.conn(), "h").unwrap(),
-            ["TikTok", "@ mangoslug", "the caption"]
-        );
+        let kept: Vec<String> = ocr::of_hash(db.conn(), "h")
+            .unwrap()
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+        assert_eq!(kept, ["TikTok", "@ mangoslug", "the caption"]);
     }
 
     #[test]
     fn the_index_holds_the_ocr_lines_on_one_line() {
         let db = seeded();
-        ocr::replace(db.conn(), "h", &["first line".into(), "second line".into()]).unwrap();
+        ocr::replace(
+            db.conn(),
+            "h",
+            &[Line::new(0, "first line"), Line::new(900, "second line")],
+        )
+        .unwrap();
 
         refresh_hash(db.conn(), "h").unwrap();
 

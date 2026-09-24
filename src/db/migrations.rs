@@ -15,6 +15,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(MARK_A_GONE_FILE_MISSING),
         M::up(RECORD_NO_SPEECH_PROB),
         M::up(ADD_THE_CLIP_STAGE),
+        M::up(OCR_LINES_WITH_TIMES),
     ])
 }
 
@@ -89,6 +90,36 @@ SELECT hash, 'clip',
        CASE state WHEN 'skipped' THEN error END,
        unixepoch()
 FROM jobs WHERE stage = 'ocr';
+"#;
+
+/// Issue 24. One row per line, with the time of the first frame that shows it.
+/// The lines already read move over with no time, so search keeps them until
+/// the file is read again, which every file is.
+const OCR_LINES_WITH_TIMES: &str = r#"
+CREATE TABLE ocr_lines (
+    id      INTEGER PRIMARY KEY,
+    hash    TEXT NOT NULL,
+    time_ms INTEGER,
+    text    TEXT NOT NULL
+);
+
+INSERT INTO ocr_lines (hash, time_ms, text)
+WITH RECURSIVE split (hash, line, rest) AS (
+    SELECT hash, '', text || char(10) FROM ocr
+    UNION ALL
+    SELECT hash,
+           substr(rest, 1, instr(rest, char(10)) - 1),
+           substr(rest, instr(rest, char(10)) + 1)
+    FROM split WHERE rest <> ''
+)
+SELECT hash, NULL, line FROM split WHERE line <> '';
+
+DROP TABLE ocr;
+ALTER TABLE ocr_lines RENAME TO ocr;
+CREATE INDEX ocr_hash ON ocr (hash);
+
+UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
+WHERE stage = 'ocr' AND state = 'done';
 "#;
 
 const INITIAL: &str = r#"
@@ -171,5 +202,33 @@ mod tests {
     #[test]
     fn the_migrations_are_valid() {
         migrations().validate().unwrap();
+    }
+
+    #[test]
+    fn the_ocr_text_moves_to_one_row_per_line() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Version 9 is the last with one row of text per file.
+        migrations().to_version(&mut conn, 9).unwrap();
+        conn.execute(
+            "INSERT INTO ocr (hash, text) VALUES ('h', 'first' || char(10) || 'second'), ('e', '')",
+            [],
+        )
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+
+        let lines: Vec<(String, Option<i64>, String)> = conn
+            .prepare("SELECT hash, time_ms, text FROM ocr ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            lines,
+            vec![
+                ("h".into(), None, "first".into()),
+                ("h".into(), None, "second".into())
+            ]
+        );
     }
 }

@@ -8,6 +8,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::db::files::FileRow;
+use crate::db::ocr::Line;
 use crate::db::{fts, ocr as ocr_rows};
 use crate::ffmpeg::frames;
 use crate::ocr;
@@ -19,11 +20,11 @@ pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
     let mut lines = Vec::new();
     let mut read = 0;
     let mut failure = None;
-    for frame in &frames.paths {
+    for (time_ms, frame) in &frames.paths {
         match engine.read(frame) {
             Ok(found) => {
                 read += 1;
-                lines.extend(found);
+                lines.extend(found.into_iter().map(|text| Line::new(*time_ms, text)));
             }
             // One unreadable frame is not a failed file. Every frame is.
             Err(e) => {
@@ -49,15 +50,19 @@ pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
 /// A line with fewer letters than this says nothing worth indexing.
 const MIN_LETTERS: usize = 3;
 
-/// Every line the recognizer read, each one once. What is worth searching is
-/// decided where the index is built, in `ocr::noise`, so a change to that rule
-/// does not send every file through the recognizer again.
-fn clean(lines: Vec<String>) -> Vec<String> {
+/// Every line the recognizer read, each one once, at the first frame that
+/// shows it. What is worth searching is decided where the index is built, in
+/// `ocr::noise`, so a change to that rule does not send every file through the
+/// recognizer again.
+fn clean(lines: Vec<Line>) -> Vec<Line> {
     let mut seen = HashSet::new();
     lines
         .into_iter()
-        .map(|line| line.trim().to_string())
-        .filter(|line| is_text(line) && seen.insert(line.to_lowercase()))
+        .map(|line| Line {
+            text: line.text.trim().to_string(),
+            ..line
+        })
+        .filter(|line| is_text(&line.text) && seen.insert(line.text.to_lowercase()))
         .collect()
 }
 
@@ -74,7 +79,10 @@ mod tests {
     use super::*;
 
     fn clean_all(lines: &[&str]) -> Vec<String> {
-        clean(lines.iter().map(|l| l.to_string()).collect())
+        clean(lines.iter().map(|l| Line::new(0, *l)).collect())
+            .into_iter()
+            .map(|line| line.text)
+            .collect()
     }
 
     #[test]
@@ -95,6 +103,19 @@ mod tests {
         assert_eq!(
             clean_all(&["we lost 40 percent"]),
             vec!["we lost 40 percent"]
+        );
+    }
+
+    #[test]
+    fn a_line_keeps_the_time_of_the_first_frame_that_shows_it() {
+        let lines = clean(vec![
+            Line::new(0, "the intro"),
+            Line::new(2000, "Hold on there"),
+            Line::new(4000, "hold on there"),
+        ]);
+        assert_eq!(
+            lines,
+            vec![Line::new(0, "the intro"), Line::new(2000, "Hold on there")]
         );
     }
 

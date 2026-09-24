@@ -1,12 +1,11 @@
-//! Where in a clip a speech match is. FTS5 finds the file by the joined text of
-//! its segments, so the segment is found again here, by the same words.
+//! Where in a clip a match is. FTS5 finds the file by the joined text of its
+//! speech segments or screen lines, so the one that matched is found again
+//! here, by the same words.
 
-use crate::speech::Segment;
-
-/// The segment that holds the most words of the query, the first of them on a
-/// tie. `None` when no segment holds any. The words match as prefixes, as they
-/// do in the index.
-pub fn segment<'a>(segments: &'a [Segment], query: &str) -> Option<&'a Segment> {
+/// The item whose text holds the most words of the query, the first of them on
+/// a tie. `None` when none holds any. The words match as prefixes, as they do
+/// in the index.
+pub fn best<'a, T>(items: &'a [T], text: impl Fn(&T) -> &str, query: &str) -> Option<&'a T> {
     let terms: Vec<Vec<String>> = query
         .split_whitespace()
         .filter(|word| !matches!(word.split_once(':'), Some(("tag" | "tags", _))))
@@ -15,8 +14,8 @@ pub fn segment<'a>(segments: &'a [Segment], query: &str) -> Option<&'a Segment> 
         .collect();
     let mut best = None;
     let mut most = 0;
-    for segment in segments {
-        let words = tokens(&segment.text);
+    for item in items {
+        let words = tokens(text(item));
         let held = terms
             .iter()
             .filter(|term| {
@@ -26,7 +25,7 @@ pub fn segment<'a>(segments: &'a [Segment], query: &str) -> Option<&'a Segment> 
             .count();
         if held > most {
             most = held;
-            best = Some(segment);
+            best = Some(item);
         }
     }
     best
@@ -43,6 +42,7 @@ fn tokens(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::speech::Segment;
 
     fn at(start_ms: i64, text: &str) -> Segment {
         Segment {
@@ -55,7 +55,7 @@ mod tests {
     }
 
     fn start(segments: &[Segment], query: &str) -> Option<i64> {
-        segment(segments, query).map(|s| s.start_ms)
+        best(segments, |s| &s.text, query).map(|s| s.start_ms)
     }
 
     #[test]

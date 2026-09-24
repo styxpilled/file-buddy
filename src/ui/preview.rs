@@ -16,7 +16,7 @@ use crate::db::files::{FileRow, State};
 use crate::db::review::Group;
 use crate::db::{ocr as ocr_rows, segments, tags};
 use crate::index::jobs::{self, Stage};
-use crate::media;
+use crate::media::{self, Kind};
 use crate::ocr::noise;
 use crate::paths;
 use crate::search::Hit;
@@ -137,8 +137,9 @@ fn file_details(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> Any
         .into_any_element()
 }
 
-/// What the recognizer read, line by line. A line the index leaves out is
-/// struck through, so the pane shows what was found and what can be searched.
+/// What the recognizer read, line by line, with the time of the first frame
+/// that shows it. A line the index leaves out is struck through, so the pane
+/// shows what was found and what can be searched.
 fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let conn = this.db.conn();
     let lines = ocr_rows::of_hash(conn, &hit.file.hash).unwrap_or_default();
@@ -155,21 +156,29 @@ fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyE
         return note(this, hit, text, cx);
     }
 
+    // A still has one frame, so a time in it says nothing.
+    let timed = hit.file.kind != Kind::Still;
     panel(this, hit, cx)
-        .children(lines.into_iter().map(|line| {
-            let dropped = noise::is_noise(&line);
-            div()
-                .w_full()
-                .when(dropped, |row| {
-                    row.text_color(cx.theme().muted_foreground).line_through()
+        .children(lines.into_iter().enumerate().map(|(at, line)| {
+            let dropped = noise::is_noise(&line.text);
+            let text = div()
+                .when(dropped, |text| {
+                    text.text_color(cx.theme().muted_foreground).line_through()
                 })
-                .child(line)
+                .child(line.text);
+            timed_row(
+                this,
+                hit,
+                ("line-time", at),
+                line.time_ms.filter(|_| timed),
+                text,
+                cx,
+            )
         }))
         .into_any_element()
 }
 
 /// The speech of the file, one segment per line. Without segments it says why.
-/// A click on a time seeks the clip there.
 fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let conn = this.db.conn();
     let lines = segments::of_hash(conn, &hit.file.hash).unwrap_or_default();
@@ -186,33 +195,56 @@ fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyEl
         return note(this, hit, text, cx);
     }
 
-    let playing = this.player.video_of(&hit.file.hash).is_some();
     panel(this, hit, cx)
         .children(lines.into_iter().enumerate().map(|(at, segment)| {
-            let start = segment.start_ms;
-            h_flex()
-                .w_full()
-                .gap_2()
-                .items_start()
-                .child(
-                    div()
-                        .id(("segment-time", at))
-                        .flex_shrink_0()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .when(playing, |time| {
-                            time.cursor_pointer()
-                                .hover(|time| time.text_color(cx.theme().foreground))
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.seek_to(start, cx)),
-                                )
-                        })
-                        .child(media::clock(start)),
-                )
-                // Without a zero minimum width a long line pushes past the pane
-                // instead of wrapping.
-                .child(div().flex_1().min_w_0().child(segment.text))
+            let text = div().child(segment.text);
+            timed_row(
+                this,
+                hit,
+                ("segment-time", at),
+                Some(segment.start_ms),
+                text,
+                cx,
+            )
         }))
+        .into_any_element()
+}
+
+/// A line of a tab with its time in front. A click on the time seeks the clip
+/// there. A line with no time keeps the column, so the text lines up.
+fn timed_row(
+    this: &FileBuddy,
+    hit: &Hit,
+    id: (&'static str, usize),
+    time_ms: Option<i64>,
+    text: Div,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
+    let playing = this.player.video_of(&hit.file.hash).is_some();
+    let time = div()
+        .id(id)
+        .flex_shrink_0()
+        .min_w(px(28.))
+        .text_xs()
+        .text_color(cx.theme().muted_foreground);
+    let time = match time_ms {
+        Some(ms) => time
+            .when(playing, |time| {
+                time.cursor_pointer()
+                    .hover(|time| time.text_color(cx.theme().foreground))
+                    .on_click(cx.listener(move |this, _, _, cx| this.seek_to(ms, cx)))
+            })
+            .child(media::clock(ms)),
+        None => time,
+    };
+    h_flex()
+        .w_full()
+        .gap_2()
+        .items_start()
+        .child(time)
+        // Without a zero minimum width a long line pushes past the pane
+        // instead of wrapping.
+        .child(text.flex_1().min_w_0())
         .into_any_element()
 }
 

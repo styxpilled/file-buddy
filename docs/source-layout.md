@@ -53,7 +53,8 @@ Two things follow from that:
         tags.rs       tags and `file_tags`
         review.rs     the four Review groups, each file with its reason
         segments.rs   speech segments
-        ocr.rs        the on-screen text of a file
+        ocr.rs        the on-screen text of a file, one row per line with its
+                      time
         vectors.rs    the CLIP vector of each sampled frame
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
@@ -83,7 +84,7 @@ Two things follow from that:
         mod.rs        the query against `fts` and `files`
         query.rs      what the user typed becomes an FTS5 expression
         folder.rs     one folder of the roots, and why a file in it is not found
-        moment.rs     the speech segment that a match came from
+        moment.rs     the speech segment or screen line that a match came from
         visual.rs     the vectors in memory, the cutoff, the merge with the
                       text matches, and the search by the look of files
       ui/             the window. The only directory that knows about GPUI

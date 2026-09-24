@@ -15,8 +15,9 @@ use rusqlite::{Connection, params_from_iter};
 use self::query::{build_match, visual_only};
 use crate::config::Weights;
 use crate::db::files::{self, FileRow, PRESENT, read_row};
-use crate::db::segments;
+use crate::db::{ocr, segments};
 use crate::media::{self, Kind};
+use crate::ocr::noise;
 
 /// Which column gave a result its best score. The grid shows it as a badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,14 +167,38 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
         })
     })?;
     let mut hits: Vec<Hit> = rows.collect::<Result<_, _>>()?;
-    for hit in hits.iter_mut().filter(|hit| hit.signal == Signal::Speech) {
-        let spoken = segments::of_hash(conn, &hit.file.hash)?;
-        if let Some(segment) = moment::segment(&spoken, text) {
-            hit.at_ms = Some(segment.start_ms);
-            hit.matched = segment.text.trim().to_string();
-        }
+    for hit in &mut hits {
+        find_moment(conn, hit, text)?;
     }
     Ok(hits)
+}
+
+/// The speech segment or the screen line that matched, as the time and the
+/// text of the hit. The index leaves some screen lines out, so they cannot be
+/// what matched.
+fn find_moment(conn: &Connection, hit: &mut Hit, query: &str) -> Result<()> {
+    let (at_ms, matched) = match hit.signal {
+        Signal::Speech => {
+            let spoken = segments::of_hash(conn, &hit.file.hash)?;
+            match moment::best(&spoken, |s| &s.text, query) {
+                Some(segment) => (Some(segment.start_ms), segment.text.clone()),
+                None => return Ok(()),
+            }
+        }
+        Signal::Ocr => {
+            let mut lines = ocr::of_hash(conn, &hit.file.hash)?;
+            lines.retain(|line| !noise::is_noise(&line.text));
+            match moment::best(&lines, |line| &line.text, query) {
+                Some(line) => (line.time_ms, line.text.clone()),
+                None => return Ok(()),
+            }
+        }
+        _ => return Ok(()),
+    };
+    // A still has one frame, so a time in it says nothing.
+    hit.at_ms = at_ms.filter(|_| hit.file.kind != Kind::Still);
+    hit.matched = matched.trim().to_string();
+    Ok(())
 }
 
 /// What the grid shows when the query is empty: the newest files first.

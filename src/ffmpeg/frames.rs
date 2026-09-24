@@ -15,10 +15,11 @@ const MAX_FRAMES: u32 = 10;
 /// and not 10 copies of the same one.
 const MAX_FPS: f64 = 4.0;
 
-/// Extracted frames, in order. The directory goes with them.
+/// Extracted frames, in order, each with its time in the file. The directory
+/// goes with them.
 pub struct Frames {
     dir: PathBuf,
-    pub paths: Vec<PathBuf>,
+    pub paths: Vec<(i64, PathBuf)>,
 }
 
 impl Drop for Frames {
@@ -44,7 +45,8 @@ pub fn sample(source: &Path, hash: &str, duration: Option<f64>) -> Result<Frames
         .arg("-i")
         .arg(source)
         .args(["-map", "0:v:0", "-an", "-sn", "-dn"]);
-    match rate(duration) {
+    let fps = rate(duration);
+    match fps {
         Some(fps) => command
             .args(["-vf", &format!("fps={fps:.6}")])
             .args(["-frames:v", &MAX_FRAMES.to_string()]),
@@ -59,7 +61,11 @@ pub fn sample(source: &Path, hash: &str, duration: Option<f64>) -> Result<Frames
         .filter(|path| path.extension().is_some_and(|e| e == "png"))
         .collect();
     paths.sort();
-    frames.paths = paths;
+    frames.paths = paths
+        .into_iter()
+        .enumerate()
+        .map(|(i, path)| (frame_time(i, fps), path))
+        .collect();
     Ok(frames)
 }
 
@@ -95,8 +101,7 @@ pub fn pixels(source: &Path, duration: Option<f64>, size: u32) -> Result<Vec<Pix
         .chunks_exact(frame_len)
         .enumerate()
         .map(|(i, rgb)| Pixels {
-            // The `fps` filter puts frame n at n / fps.
-            time_ms: fps.map_or(0, |fps| (i as f64 / fps * 1000.0).round() as i64),
+            time_ms: frame_time(i, fps),
             rgb: rgb.to_vec(),
         })
         .collect())
@@ -113,6 +118,11 @@ fn scratch_dir(hash: &str) -> PathBuf {
         "file-buddy-ocr-{hash}-{}-{call}",
         std::process::id()
     ))
+}
+
+/// The `fps` filter puts frame n at n / fps. A still has one frame, at 0.
+fn frame_time(n: usize, fps: Option<f64>) -> i64 {
+    fps.map_or(0, |fps| (n as f64 / fps * 1000.0).round() as i64)
 }
 
 /// The rate that spreads `MAX_FRAMES` over the whole file.
