@@ -26,7 +26,10 @@ Two things follow from that:
       config.rs       the TOML file, the ignore globs, the bm25 weights
       paths.rs        the data directory, the thumbnail cache, the config file,
                       the speech model
-      bin/fb.rs       a headless front end: scan, search, reindex, status
+      bin/fb.rs       a headless front end: scan, search, reindex, status, and
+                      the worker processes
+      worker.rs       a model in a child `fb` process, one JSON line each way
+      speech.rs       whisper-rs: the model the `whisper` worker loads once
       actions/        what the user does to a file on disk
         clipboard.rs  the Windows clipboard, which GPUI cannot do
         rename.rs     a new name on disk and in the index, never over a file
@@ -49,10 +52,10 @@ Two things follow from that:
         ocr.rs        the on-screen text of a file
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
+        audio.rs      the first audio track as 16 kHz mono samples
         frames.rs     the frames OCR reads, spread over the duration
         probe.rs      ffprobe and its JSON
         thumbnail.rs  the `thumbnail` filter
-        whisper.rs    the `whisper` filter and its output
       ocr/            the recognizer, behind one interface
         mod.rs        the `Engine` trait and the recognizer of this machine
         windows.rs    `Windows.Media.Ocr` through `windows-rs`
@@ -62,9 +65,10 @@ Two things follow from that:
         jobs.rs       the durable queue
         scan.rs       the walk over the roots
         watch.rs      the watcher over the roots and the incremental scan
-        pipeline.rs   the worker pool. When a stage runs, and what a failure means
+        pipeline.rs   the thread pool. When a stage runs, and what a failure means
         stages/       what a stage produces
-          mod.rs      one arm per stage, and the file each job reads
+          mod.rs      one arm per stage, the file each job reads, and the
+                      worker processes of a stage run
           probe.rs
           whisper.rs  the rules that drop hallucinated text
           ocr.rs      the line filter and the deduplication

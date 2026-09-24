@@ -12,7 +12,9 @@ pub mod media;
 pub mod ocr;
 pub mod paths;
 pub mod search;
+pub mod speech;
 pub mod ui;
+pub mod worker;
 
 // Re-exported so a test or a front end needs no direct dependency on it, and
 // so only one build of SQLite exists.

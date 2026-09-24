@@ -9,6 +9,7 @@ mod probe;
 mod whisper;
 
 use std::path::Path;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -16,14 +17,29 @@ use rusqlite::Connection;
 use crate::db::files::{self, FileRow};
 use crate::ffmpeg::thumbnail;
 use crate::index::jobs::{Job, Stage};
+use crate::worker::Worker;
+
+/// The worker processes of one stage run. A process starts on its first job and
+/// stops when this is dropped.
+pub struct Workers {
+    whisper: Mutex<Worker>,
+}
+
+impl Default for Workers {
+    fn default() -> Self {
+        Self {
+            whisper: Mutex::new(Worker::new(&["worker", "whisper"])),
+        }
+    }
+}
 
 /// Run one claimed job. The error text ends up in the `jobs` row.
-pub fn run(conn: &Connection, cache: &Path, job: &Job) -> Result<()> {
+pub fn run(conn: &Connection, cache: &Path, workers: &Workers, job: &Job) -> Result<()> {
     let source = source(conn, &job.hash)?;
     match job.stage {
         Stage::Probe => probe::run(conn, &source),
         Stage::Thumbnail => thumbnail::generate(&source.path, &source.hash, cache),
-        Stage::Whisper => whisper::run(conn, &source),
+        Stage::Whisper => whisper::run(conn, &source, &workers.whisper),
         Stage::Ocr => ocr::run(conn, &source),
     }
 }

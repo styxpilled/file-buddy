@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 
 use file_buddy::config::Weights;
 use file_buddy::db::files::State;
@@ -80,6 +81,9 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        // The worker processes are `fb`, which is not next to the test binary.
+        // SAFETY: every test sets the same value.
+        unsafe { std::env::set_var("FILE_BUDDY_FB", env!("CARGO_BIN_EXE_fb")) };
         let temp = tempfile::tempdir().unwrap();
         let clips = temp.path().join("clips");
         std::fs::create_dir_all(&clips).unwrap();
@@ -108,11 +112,11 @@ impl Harness {
     }
 
     fn transcribe(&self) {
-        index::transcribe(&self.db_path, &self.cache).unwrap();
+        index::transcribe(&self.db_path, &self.cache, &AtomicBool::new(false)).unwrap();
     }
 
     fn read_text(&self) {
-        index::read_text(&self.db_path, &self.cache).unwrap();
+        index::read_text(&self.db_path, &self.cache, &AtomicBool::new(false)).unwrap();
     }
 
     fn job(&self, path: &Path, stage: Stage) -> (String, i64) {
@@ -410,6 +414,15 @@ fn speech_is_transcribed_once_and_found() {
 
     assert_eq!(harness.job(&speech, Stage::Whisper), ("done".into(), 1));
     assert_eq!(harness.find("brown fox"), vec!["fox clip.mp4"]);
+    let db = harness.db();
+    let row = files::by_path(db.conn(), &speech).unwrap().unwrap();
+    let segments = file_buddy::db::segments::of_hash(db.conn(), &row.hash).unwrap();
+    assert!(
+        segments
+            .iter()
+            .all(|s| s.confidence.is_some_and(|c| c < 0.0) && s.no_speech_prob.is_some()),
+        "{segments:?}"
+    );
 
     harness.scan();
     harness.transcribe();
@@ -471,6 +484,19 @@ fn on_screen_text_is_read_once_and_found() {
     harness.scan();
     harness.read_text();
     assert_eq!(harness.job(&captioned, Stage::Ocr), ("done".into(), 1));
+}
+
+#[test]
+fn a_paused_stage_starts_no_job() {
+    let harness = Harness::new();
+    harness.scan();
+    let stats = index::read_text(&harness.db_path, &harness.cache, &AtomicBool::new(true)).unwrap();
+    assert_eq!(stats.done, 0);
+    let still = harness.clips.join(STILL);
+    assert_eq!(harness.job(&still, Stage::Ocr), ("pending".into(), 0));
+
+    harness.read_text();
+    assert_eq!(harness.job(&still, Stage::Ocr), ("done".into(), 1));
 }
 
 #[test]

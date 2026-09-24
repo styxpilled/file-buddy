@@ -33,11 +33,12 @@ impl Stage {
         }
     }
 
-    /// How many of this stage may run at once.
+    /// How many of this stage may run at once. Whisper has one worker process,
+    /// which takes one file at a time.
     pub fn concurrency(self) -> usize {
         match self {
             Stage::Probe | Stage::Thumbnail => 8,
-            Stage::Whisper => 2,
+            Stage::Whisper => 1,
             Stage::Ocr => 4,
         }
     }

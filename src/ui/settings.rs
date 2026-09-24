@@ -1,6 +1,7 @@
 //! The Settings page. It edits the fields of `file-buddy.toml`: the folders to
-//! index, the ignore globs and the search weights. Nothing is written until
-//! Save, and Save writes nothing that `Config::edited` refuses.
+//! index, the ignore globs, the search weights and the paused stages. A switch
+//! that pauses a stage is written at once. Nothing else is written until Save,
+//! and Save writes nothing that `Config::edited` refuses.
 
 use std::path::PathBuf;
 
@@ -8,9 +9,11 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, PathPromptOptions, Window, div, px};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 
-use crate::config::Config;
+use crate::config::{Config, Paused};
+use crate::index::jobs::Stage;
 use crate::paths;
 use crate::ui::{FileBuddy, Mode};
 
@@ -43,7 +46,7 @@ impl Settings {
     }
 
     /// The form as `Config::edited` checks it.
-    fn edited(&self, cx: &App) -> anyhow::Result<Config> {
+    fn edited(&self, paused: Paused, cx: &App) -> anyhow::Result<Config> {
         let ignore = self.ignore.read(cx).value().to_string();
         let weights = self
             .weights
@@ -53,6 +56,7 @@ impl Settings {
             self.roots.clone(),
             &ignore,
             weights.each_ref().map(String::as_str),
+            paused,
         )
     }
 }
@@ -78,7 +82,7 @@ impl FileBuddy {
         let Some(settings) = self.settings() else {
             return;
         };
-        let config = match settings.edited(cx) {
+        let config = match settings.edited(self.config.paused, cx) {
             Ok(config) => config,
             Err(e) => {
                 self.flash(e.to_string(), true, cx);
@@ -169,6 +173,7 @@ pub fn page(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                     .child(Textarea::new(&settings.ignore)),
                 )
                 .child(weights(settings, cx))
+                .child(stages(this.config.paused, cx))
                 .child(footer(cx)),
         )
         .into_any_element()
@@ -241,6 +246,31 @@ fn weights(settings: &Settings, cx: &App) -> AnyElement {
                     .child(div().w(px(WEIGHT_WIDTH)).text_sm().child(name))
                     .child(div().w(px(WEIGHT_WIDTH)).child(Input::new(input).small()))
             }),
+    )
+    .into_any_element()
+}
+
+fn stages(paused: Paused, cx: &mut Context<FileBuddy>) -> AnyElement {
+    section(
+        "Paused stages",
+        "A paused stage starts no new job. A job that runs now finishes. This applies at once, without Save.",
+        cx,
+    )
+    .children(
+        [
+            (Stage::Ocr, paused.ocr, "Screen text (OCR)"),
+            (Stage::Whisper, paused.whisper, "Speech (Whisper)"),
+        ]
+        .map(|(stage, checked, label)| {
+            Switch::new(stage.as_str())
+                .small()
+                .checked(checked)
+                .label(label)
+                .cursor_pointer()
+                .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+                    this.pause_stage(stage, *checked, cx)
+                }))
+        }),
     )
     .into_any_element()
 }

@@ -7,23 +7,33 @@
 //!     fb reindex         rebuild the search index from the tables that own
 //!                        the text, after a rule that shapes it changed
 //!     fb status          counts per state and per stage
+//!     fb worker whisper  the speech worker process, which the pipeline starts
+
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 use file_buddy::config::Config;
 use file_buddy::db::{Db, files, fts};
 use file_buddy::index::jobs::{self, Stage};
 use file_buddy::index::{self, scan};
-use file_buddy::{paths, search};
+use file_buddy::{paths, search, speech};
 
 fn main() -> Result<()> {
     env_logger::init();
+
+    let mut args = std::env::args().skip(1);
+    let command = args.next().unwrap_or_else(|| "status".into());
+    if command == "worker" {
+        return match args.next().as_deref() {
+            Some("whisper") => speech::serve(),
+            other => anyhow::bail!("unknown worker {other:?}. Use whisper"),
+        };
+    }
 
     let config = Config::load_or_create(&paths::config_path()?)?;
     let db_path = paths::database_path()?;
     let cache = paths::thumbnail_dir()?;
 
-    let mut args = std::env::args().skip(1);
-    let command = args.next().unwrap_or_else(|| "status".into());
     match command.as_str() {
         "scan" => {
             let mut db = Db::open(&db_path)?;
@@ -41,11 +51,11 @@ fn main() -> Result<()> {
                 stages.thumbnail.done,
                 stages.thumbnail.failed
             );
-            match index::read_text(&db_path, &cache) {
+            match index::read_text(&db_path, &cache, &AtomicBool::new(config.paused.ocr)) {
                 Ok(ocr) => println!("ocr: {} done, {} failed", ocr.done, ocr.failed),
                 Err(e) => println!("ocr: {e:#}"),
             }
-            match index::transcribe(&db_path, &cache) {
+            match index::transcribe(&db_path, &cache, &AtomicBool::new(config.paused.whisper)) {
                 Ok(whisper) => {
                     println!("whisper: {} done, {} failed", whisper.done, whisper.failed)
                 }

@@ -19,6 +19,7 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 | `ready-for-agent` | Fully specified, ready for an AFK agent  |
 | `ready-for-human` | Requires human implementation            |
 | `wontfix`         | Will not be actioned                     |
+| `done`            | Implemented and verified                 |
 
 ## When a skill says "publish to the issue tracker"
 

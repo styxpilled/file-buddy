@@ -13,6 +13,7 @@ pub fn migrations() -> Migrations<'static> {
         M::up(REREAD_TEXT_WITHOUT_THE_WATERMARK),
         M::up(RESTORE_EVERY_OCR_LINE),
         M::up(MARK_A_GONE_FILE_MISSING),
+        M::up(RECORD_NO_SPEECH_PROB),
     ])
 }
 
@@ -62,6 +63,10 @@ WHERE stage = 'ocr' AND state = 'done';
 const MARK_A_GONE_FILE_MISSING: &str = r#"
 ALTER TABLE files ADD COLUMN missing_at INTEGER;
 CREATE INDEX files_missing ON files (missing_at);
+"#;
+
+const RECORD_NO_SPEECH_PROB: &str = r#"
+ALTER TABLE segments ADD COLUMN no_speech_prob REAL;
 "#;
 
 const INITIAL: &str = r#"

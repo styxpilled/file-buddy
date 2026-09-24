@@ -1,14 +1,20 @@
-//! Speech. The filter gives no probabilities, so the text is cleaned by rules:
-//! known hallucination phrases, sound tags, and the short last window that the
-//! model fills with words that were never said.
+//! Speech. The text is cleaned by rules: known hallucination phrases, sound
+//! tags, and the short last window that the model fills with words that were
+//! never said. The rules came from the FFmpeg filter, and no segment is dropped
+//! by its probabilities until they have been read over the real collection.
 
-use anyhow::Result;
+use std::sync::Mutex;
+
+use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 
 use crate::db::files::FileRow;
 use crate::db::{fts, segments};
-use crate::ffmpeg::whisper::{self, Segment, WINDOW_SECONDS};
-use crate::paths;
+use crate::speech::{Request, Segment};
+use crate::worker::Worker;
+
+/// The length of one transcription window, in seconds.
+const WINDOW_SECONDS: i64 = 30;
 
 /// A last window shorter than this holds no speech worth keeping, and the model
 /// hallucinates in it ("Thank you.", "Bye.").
@@ -37,9 +43,15 @@ const HALLUCINATIONS: &[&str] = &[
     "laughter",
 ];
 
-pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
-    let model = paths::whisper_model()?;
-    let kept = clean(whisper::transcribe(&source.path, &model)?, source.duration);
+pub fn run(conn: &Connection, source: &FileRow, worker: &Mutex<Worker>) -> Result<()> {
+    let request = Request {
+        path: source.path.clone(),
+    };
+    let segments = worker
+        .lock()
+        .map_err(|_| anyhow!("the whisper worker lock is poisoned"))?
+        .call(&request)?;
+    let kept = clean(segments, source.duration);
     if kept.is_empty() {
         log::info!("no speech found in {}", source.path.display());
     }
@@ -78,7 +90,7 @@ fn clean(segments: Vec<Segment>, duration: Option<f64>) -> Vec<Segment> {
 
 /// Where the last window starts, when it is too short to trust.
 fn short_tail_start(duration_ms: i64) -> Option<i64> {
-    let window_ms = i64::from(WINDOW_SECONDS) * 1000;
+    let window_ms = WINDOW_SECONDS * 1000;
     let tail_ms = duration_ms % window_ms;
     (duration_ms > window_ms && tail_ms > 0 && tail_ms < SHORT_TAIL_MS)
         .then_some(duration_ms - tail_ms)
@@ -129,6 +141,8 @@ mod tests {
             start_ms,
             end_ms,
             text: text.into(),
+            confidence: None,
+            no_speech_prob: None,
         }
     }
 

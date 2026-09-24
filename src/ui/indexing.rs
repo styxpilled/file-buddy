@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -11,6 +13,7 @@ use globset::GlobSet;
 use gpui::Context;
 use gpui::prelude::*;
 
+use crate::config::Paused;
 use crate::db::Db;
 use crate::index::jobs::{self, Stage};
 use crate::index::watch::{self, WatchStats, Watcher};
@@ -38,11 +41,51 @@ pub(super) struct Indexer {
     retried: HashSet<PathBuf>,
     /// The expensive stage that runs in the background, if one does.
     stage: Option<Stage>,
+    /// Text was asked for while speech ran, so it runs when speech ends.
+    ocr_after: bool,
+    /// The workers of a stage read these before each claim.
+    ocr_paused: Arc<AtomicBool>,
+    whisper_paused: Arc<AtomicBool>,
     /// How far that stage is, or why it cannot run.
     pub progress: Option<Notice>,
 }
 
+impl Indexer {
+    pub(super) fn new(paused: Paused) -> Self {
+        Self {
+            ocr_paused: Arc::new(AtomicBool::new(paused.ocr)),
+            whisper_paused: Arc::new(AtomicBool::new(paused.whisper)),
+            ..Self::default()
+        }
+    }
+
+    fn paused(&self, stage: Stage) -> &Arc<AtomicBool> {
+        match stage {
+            Stage::Ocr => &self.ocr_paused,
+            _ => &self.whisper_paused,
+        }
+    }
+}
+
 impl FileBuddy {
+    /// Hold a stage back, or let it go on. A job that runs finishes, and the
+    /// rest wait in the queue.
+    pub(super) fn pause_stage(&mut self, stage: Stage, paused: bool, cx: &mut Context<Self>) {
+        match stage {
+            Stage::Ocr => self.config.paused.ocr = paused,
+            _ => self.config.paused.whisper = paused,
+        }
+        self.indexer.paused(stage).store(paused, Ordering::Relaxed);
+        if let Err(e) = paths::config_path().and_then(|path| self.config.write(&path)) {
+            log::error!("saving the settings failed: {e:#}");
+            self.flash(format!("saving failed: {e}"), true, cx);
+        }
+        if !paused {
+            self.index_text(stage, cx);
+        }
+        cx.notify();
+    }
+
     /// Bring the collection up to date, then show it. Without this the window
     /// shows what the last run indexed.
     pub(super) fn rescan(&mut self, cx: &mut Context<Self>) {
@@ -177,7 +220,14 @@ impl FileBuddy {
     /// speech is hours. The queue is durable, so a restart continues it, and a
     /// run that is already going picks up the jobs a later scan queues.
     fn index_text(&mut self, stage: Stage, cx: &mut Context<Self>) {
-        if self.indexer.stage.is_some() {
+        if let Some(running) = self.indexer.stage {
+            self.indexer.ocr_after |= stage == Stage::Ocr && running != Stage::Ocr;
+            return;
+        }
+        if self.indexer.paused(stage).load(Ordering::Relaxed) {
+            if stage == Stage::Ocr {
+                self.index_text(Stage::Whisper, cx);
+            }
             return;
         }
         if stage == Stage::Whisper
@@ -200,10 +250,11 @@ impl FileBuddy {
         self.indexer.stage = Some(stage);
         let db_path = self.db_path.clone();
         let cache = self.cache.clone();
+        let paused = self.indexer.paused(stage).clone();
         let work = cx.background_spawn(async move {
             match stage {
-                Stage::Ocr => index::read_text(&db_path, &cache),
-                _ => index::transcribe(&db_path, &cache),
+                Stage::Ocr => index::read_text(&db_path, &cache, &paused),
+                _ => index::transcribe(&db_path, &cache, &paused),
             }
         });
         let progress = cx.spawn(async move |this, cx| {
@@ -258,6 +309,8 @@ impl FileBuddy {
                 this.rerun_search(cx);
                 if stage == Stage::Ocr {
                     this.index_text(Stage::Whisper, cx);
+                } else if std::mem::take(&mut this.indexer.ocr_after) {
+                    this.index_text(Stage::Ocr, cx);
                 }
             })
             .ok();

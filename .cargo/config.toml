@@ -5,3 +5,8 @@ FFMPEG_INCLUDE_DIR = "C:\\Users\\styx\\dev\\file-buddy\\ffmpeg\\include"
 
 LIBCLANG_PATH = "C:\\Program Files\\LLVM\\bin"
 BINDGEN_EXTRA_CLANG_ARGS = "-I C:\\Users\\styx\\dev\\file-buddy\\ffmpeg\\lib"
+
+# whisper-rs builds whisper.cpp with CMake. The Visual Studio generator fails on
+# the deep paths of the Vulkan shader build, because MSBuild's file tracker has
+# the 260 character limit.
+CMAKE_GENERATOR = "Ninja"

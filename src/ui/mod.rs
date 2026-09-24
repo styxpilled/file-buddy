@@ -257,7 +257,7 @@ impl FileBuddy {
             kinds: vec![Kind::Video, Kind::Animated, Kind::Still],
             columns: 1,
             player: Player::default(),
-            indexer: Indexer::default(),
+            indexer: Indexer::new(config.paused),
             status: "".into(),
             notice: None,
             notice_task: None,
