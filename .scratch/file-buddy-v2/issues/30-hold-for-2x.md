@@ -31,15 +31,21 @@ count of the audio device (`master_clock` in `gpui-video/src/video.rs`), and
 `speed` scales only the wall clock that a silent clip uses. The device plays at
 its own rate, so the video followed the sound at 1x.
 
-A clean 2x with sound needs a tempo filter (`atempo`) in the decoder, and the
-clock would have to count the filter's output. That is much more work than the
-spec asks for, so the sound is muted during the hold:
+The first version muted the sound during the hold. The second keeps it:
 
-- `gpui-video` is audible only at 1x. At any other speed, a clip with sound
-  runs on the wall clock like a silent clip. Its audio packets are dropped,
-  and the audio callback plays silence.
-- Going back to 1x does an accurate seek to the current time, so the audio
-  clock and the sound start again in sync. This is inside `set_speed`.
+- `gpui-video/src/stretch.rs` stretches the sound to the speed at the same
+  pitch, with WSOLA. Windows are 20 ms with a 10 ms hop. Each window goes
+  where it best continues the last one, within 5 ms of its nominal place.
+  Browsers use the same method for `playbackRate`.
+- It runs in the audio callback. The ring keeps 1x sound, and at 2x the
+  callback takes twice as many samples for each block it plays. The clock
+  counts the 1x samples used, so it stays right at any speed, and the video
+  follows it as before.
+- A speed change acts on the next block, with no seek. Back at 1x, the sound
+  the stretcher took from the ring and did not play is played first. A clear
+  of the ring (a seek or a loop) empties the stretcher.
+- Unit tests: 2x halves the length and keeps the pitch of a sine, no jump
+  between samples, and the unplayed sound comes back.
 
 ### Done
 
@@ -58,5 +64,6 @@ spec asks for, so the sound is muted during the hold:
 Checked in the window with a 9.6 s clip with sound: taps play and pause. A
 2 s space hold from paused, with key repeats, moved the clip from 0:01 to 0:05,
 and the clip stayed paused afterwards. A 1.5 s mouse hold from playing moved
-it from 0:01 to 0:04 and went on at 1x. The sound after a hold was not
-checked by ear.
+it from 0:01 to 0:04 and went on at 1x. The same checks pass with the stretched sound:
+a 2 s hold from paused moved it from 0:00 to 0:03 and stayed paused, and a
+1.5 s mouse hold from playing moved it from 0:05 to 0:09.

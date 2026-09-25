@@ -1,3 +1,4 @@
+use crate::stretch::Stretcher;
 use crate::Error;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Stream, StreamConfig};
@@ -59,6 +60,8 @@ struct AudioRingBuffer {
     read_pos: usize,
     write_pos: usize,
     len: usize,
+    /// Counts the clears, so the audio callback knows to drop what it holds.
+    clears: u64,
 }
 
 impl AudioRingBuffer {
@@ -69,6 +72,7 @@ impl AudioRingBuffer {
             read_pos: 0,
             write_pos: 0,
             len: 0,
+            clears: 0,
         }
     }
 
@@ -117,6 +121,7 @@ impl AudioRingBuffer {
         self.read_pos = 0;
         self.write_pos = 0;
         self.len = 0;
+        self.clears += 1;
     }
 }
 
@@ -307,13 +312,6 @@ impl Shared {
 
     fn speed(&self) -> f64 {
         f64::from_bits(self.speed_bits.load(Ordering::SeqCst))
-    }
-
-    /// The sound plays only at 1x. The clock is the audio device's sample
-    /// count, which cannot go faster, so at any other speed the clip runs on
-    /// wall time with no sound.
-    fn audible(&self) -> bool {
-        self.speed() == 1.0
     }
 
     fn paused(&self) -> bool {
@@ -521,16 +519,46 @@ impl Video {
             buffer_size: cpal::BufferSize::Default,
         };
 
+        // Away from 1x the sound is stretched to the speed at the same pitch.
+        // The clock counts the 1x samples used, so it stays right at any speed.
+        let mut stretcher = Stretcher::new(sample_rate);
+        // What the stretcher took from the ring and did not play, for 1x.
+        let mut unplayed: Vec<f32> = Vec::new();
+        let mut clears = 0;
         let stream = device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if shared.paused() || !shared.audible() {
+                    if shared.paused() {
                         data.fill(0.0);
                         return;
                     }
 
-                    let read_count = shared.audio_ring.lock().read(data);
+                    let speed = shared.speed();
+                    let mut ring = shared.audio_ring.lock();
+                    if ring.clears != clears {
+                        clears = ring.clears;
+                        stretcher.reset();
+                        unplayed.clear();
+                    }
+                    if speed == 1.0 && !stretcher.idle() {
+                        let mut rest = stretcher.unplayed();
+                        rest.append(&mut unplayed);
+                        unplayed = rest;
+                    }
+                    let pull = |slice: &mut [f32]| {
+                        let n = unplayed.len().min(slice.len());
+                        slice[..n].copy_from_slice(&unplayed[..n]);
+                        unplayed.drain(..n);
+                        n + ring.read(&mut slice[n..])
+                    };
+                    let read_count = if speed == 1.0 {
+                        let mut pull = pull;
+                        pull(data)
+                    } else {
+                        stretcher.process(data, speed, pull) as usize
+                    };
+                    drop(ring);
 
                     if shared.muted.load(Ordering::Acquire) {
                         data.fill(0.0);
@@ -679,21 +707,12 @@ impl Video {
         }
 
         log::info!("Setting speed to {:.2}x", speed);
-        let shared = &self.0.shared;
-        let was_audible = shared.audible();
-        // The wall clock goes on from the time the audio clock reached.
-        *shared.last_clock_update.lock() = Instant::now();
-        shared.speed_bits.store(speed.to_bits(), Ordering::SeqCst);
-        if !self.0.has_audio || was_audible == shared.audible() {
-            return Ok(());
-        }
-        if was_audible {
-            shared.audio_ring.lock().clear();
-            return Ok(());
-        }
-        // The sound of the fast part was dropped, so the audio clock starts
-        // again from here, with the sound decoded from this time.
-        self.seek(self.position(), true)
+        self.0
+            .shared
+            .speed_bits
+            .store(speed.to_bits(), Ordering::SeqCst);
+        *self.0.shared.last_clock_update.lock() = Instant::now();
+        Ok(())
     }
 
     /// Go to `position`. An accurate seek shows the frame at that time, and the
@@ -1002,11 +1021,9 @@ impl Worker {
             if self.handle_commands(&mut ictx, &mut decoder, &mut audio, &mut state) {
                 return Ok(());
             }
-            // Away from 1x the sound is dropped, not decoded.
-            let audible = shared.audible();
 
             if shared.eos()
-                && self.drained(audible && audio.is_some())
+                && self.drained(audio.is_some())
                 && !self.restart_loop(&mut ictx, &mut decoder, &mut audio, &mut state)
             {
                 continue;
@@ -1039,7 +1056,7 @@ impl Worker {
                         &mut ictx,
                         &mut decoder,
                         &mut scaler,
-                        audio.as_mut().filter(|_| audible),
+                        audio.as_mut(),
                         &mut state,
                     ) {
                         break;
@@ -1084,13 +1101,13 @@ impl Worker {
                 state.was_paused = false;
             }
 
-            let master_clock = self.master_clock(audible && audio.is_some(), &mut state);
+            let master_clock = self.master_clock(audio.is_some(), &mut state);
             self.present_due(master_clock, &mut state);
             self.pace_decoding(
                 &mut ictx,
                 &mut decoder,
                 &mut scaler,
-                audio.as_mut().filter(|_| audible),
+                audio.as_mut(),
                 master_clock,
                 &mut state,
             );
