@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, Entity, FocusHandle, Focusable, ScrollStrategy,
+    App, Context, ElementId, Entity, FocusHandle, Focusable, KeyUpEvent, ScrollStrategy,
     SharedString, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
@@ -37,7 +37,7 @@ use gpui_kit::component::{
 };
 
 use self::indexing::Indexer;
-use self::player::Player;
+use self::player::{Player, PressFrom};
 use self::renamer::Renamer;
 use self::review::Review;
 use self::rows::RowEditor;
@@ -738,6 +738,9 @@ impl Render for FileBuddy {
         let width = self.grid_width(window, cx);
         self.columns = self.column_count(window, cx);
         self.step_autoscroll(window, cx);
+        if self.player.pressed() && !window.is_window_active() {
+            self.player.cancel_press();
+        }
 
         v_flex()
             .key_context("FileBuddy")
@@ -768,9 +771,19 @@ impl Render for FileBuddy {
                 this.player.toggle_muted();
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &TogglePaused, _, cx| {
-                this.player.toggle_paused();
-                cx.notify();
+            .on_action(
+                cx.listener(|this, _: &TogglePaused, _, cx| this.press_play(PressFrom::Key, cx)),
+            )
+            .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
+                let key = &event.keystroke.key;
+                let bound = cx
+                    .key_bindings()
+                    .borrow()
+                    .bindings_for_action(&TogglePaused)
+                    .any(|binding| binding.keystrokes().last().is_some_and(|k| k.key() == key));
+                if bound {
+                    this.release_play(PressFrom::Key, cx);
+                }
             }))
             .on_action(cx.listener(|this, _: &SkipBack, _, cx| this.skip(false, cx)))
             .on_action(cx.listener(|this, _: &SkipForward, _, cx| this.skip(true, cx)))

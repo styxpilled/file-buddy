@@ -28,6 +28,10 @@ const PRELOAD_BUFFER: usize = 8;
 const PREVIEW_BUFFER: usize = 120;
 /// One notch of the wheel, or one press of `ctrl-up`.
 const VOLUME_STEP: f64 = 0.05;
+/// A press on space or on the clip that lasts longer than this plays the clip
+/// fast until the release. A shorter one is a tap, which toggles pause.
+const HOLD_DELAY: Duration = Duration::from_millis(250);
+const HOLD_SPEED: f64 = 2.0;
 
 pub(super) struct Player {
     preview: Option<Preview>,
@@ -48,6 +52,21 @@ pub(super) struct Player {
     /// it, and it never touches a tile.
     pub autoplay: bool,
     pub paused: bool,
+    /// Space or the mouse button, down on the clip.
+    press: Option<Press>,
+    hold_task: Option<Task<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PressFrom {
+    Key,
+    Mouse,
+}
+
+struct Press {
+    from: PressFrom,
+    /// It lasted long enough to be a hold, and the clip plays fast.
+    fast: bool,
 }
 
 /// The clip in the side pane, with the identity of what it holds. Identity is
@@ -72,6 +91,8 @@ impl Default for Player {
             volume: 0.5,
             autoplay: false,
             paused: true,
+            press: None,
+            hold_task: None,
         }
     }
 }
@@ -142,6 +163,75 @@ impl Player {
         format!("{}%", (self.volume * 100.).round() as u32).into()
     }
 
+    /// Returns false if a press is already down. Key repeat sends the action
+    /// again, and it must not start a second press.
+    fn press(&mut self, from: PressFrom) -> bool {
+        if self.press.is_some() {
+            return false;
+        }
+        self.press = Some(Press { from, fast: false });
+        true
+    }
+
+    /// The press became a hold. `paused` stays what the user chose, so the
+    /// release can go back to it.
+    fn speed_up(&mut self) {
+        let Some(press) = &mut self.press else {
+            return;
+        };
+        press.fast = true;
+        if let Some(video) = self.video() {
+            video.set_paused(false);
+            video.set_speed(HOLD_SPEED).ok();
+        }
+    }
+
+    /// A tap toggles pause. A hold goes back to 1x and to the pause from
+    /// before it.
+    fn release(&mut self, from: PressFrom) {
+        if self.press.as_ref().is_some_and(|press| press.from == from) {
+            self.end_press(true);
+        }
+    }
+
+    /// The window lost focus, so no release will come. A hold ends, and a tap
+    /// does nothing.
+    pub fn cancel_press(&mut self) {
+        self.end_press(false);
+    }
+
+    fn end_press(&mut self, tap: bool) {
+        self.hold_task = None;
+        let Some(press) = self.press.take() else {
+            return;
+        };
+        if !press.fast {
+            if tap {
+                self.toggle_paused();
+            }
+            return;
+        }
+        if let Some(video) = self.video() {
+            video.set_speed(1.0).ok();
+            video.set_paused(self.paused);
+        }
+    }
+
+    /// A new clip in the pane. The press was for the old one.
+    fn drop_press(&mut self) {
+        self.press = None;
+        self.hold_task = None;
+    }
+
+    pub fn pressed(&self) -> bool {
+        self.press.is_some()
+    }
+
+    #[cfg(test)]
+    fn holding(&self) -> bool {
+        self.press.as_ref().is_some_and(|press| press.fast)
+    }
+
     /// Keep the tile that plays and the file opened ahead only where `keep`
     /// says their row still holds the file they were opened for.
     pub fn retain(&mut self, keep: impl Fn(usize) -> bool) {
@@ -155,6 +245,27 @@ impl Player {
 }
 
 impl FileBuddy {
+    /// Space down, or the mouse button down on the clip. Held past
+    /// `HOLD_DELAY`, it plays the clip fast.
+    pub(super) fn press_play(&mut self, from: PressFrom, cx: &mut Context<Self>) {
+        if !self.player.press(from) {
+            return;
+        }
+        self.player.hold_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(HOLD_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.player.speed_up();
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    pub(super) fn release_play(&mut self, from: PressFrom, cx: &mut Context<Self>) {
+        self.player.release(from);
+        cx.notify();
+    }
+
     /// The side pane plays the selection, after it stops moving. The clip on
     /// screen stays there, silent, until the new one has a frame to show.
     /// Clearing it first left the stage empty for a moment, which flashed.
@@ -186,6 +297,7 @@ impl FileBuddy {
             self.schedule_preload(cx);
             return;
         }
+        self.player.drop_press();
 
         // The walk asks the user to name what they see, so the clip plays.
         self.player.paused = !(self.player.autoplay || self.walking());
@@ -374,5 +486,58 @@ fn open_video(path: &Path, buffer: usize) -> Option<Video> {
             log::warn!("cannot play {}: {e}", path.display());
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn player(paused: bool) -> Player {
+        Player {
+            paused,
+            ..Player::default()
+        }
+    }
+
+    #[test]
+    fn a_tap_toggles_pause() {
+        let mut player = player(true);
+        assert!(player.press(PressFrom::Key));
+        player.release(PressFrom::Key);
+        assert!(!player.paused);
+        assert!(!player.holding());
+    }
+
+    #[test]
+    fn a_hold_goes_back_to_the_state_from_before() {
+        for paused in [true, false] {
+            let mut player = player(paused);
+            player.press(PressFrom::Mouse);
+            player.speed_up();
+            assert!(player.holding());
+            player.release(PressFrom::Mouse);
+            assert_eq!(player.paused, paused);
+            assert!(!player.holding());
+        }
+    }
+
+    #[test]
+    fn key_repeat_does_not_start_a_second_press() {
+        let mut player = player(true);
+        assert!(player.press(PressFrom::Key));
+        assert!(!player.press(PressFrom::Key));
+        player.release(PressFrom::Key);
+        assert!(!player.paused);
+    }
+
+    #[test]
+    fn a_release_of_the_other_input_does_nothing() {
+        let mut player = player(true);
+        player.press(PressFrom::Key);
+        player.release(PressFrom::Mouse);
+        assert!(player.paused);
+        player.release(PressFrom::Key);
+        assert!(!player.paused);
     }
 }

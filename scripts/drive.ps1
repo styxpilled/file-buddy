@@ -6,6 +6,10 @@
 #
 # Steps run in order:
 #   keys:<SendKeys string>   what to type. See SendKeys for {ESC}, {DOWN}, {TAB}
+#   kdown:<virtual key>      press a key and hold it, by its virtual-key code
+#                            in decimal: 32 is space. A second kdown of the
+#                            same key is a key repeat
+#   kup:<virtual key>        release it
 #   click:<x>,<y>            click at a point inside the window, measured from
 #                            its top left corner, which is where a picture of
 #                            the window measures from too
@@ -51,6 +55,7 @@ $signature = @'
 [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
 [DllImport("user32.dll")] public static extern bool GetCursorInfo(ref CURSORINFO info);
 [DllImport("user32.dll")] public static extern IntPtr LoadCursor(IntPtr instance, IntPtr name);
@@ -181,6 +186,15 @@ try {
         switch ($kind) {
             'keys' {
                 [System.Windows.Forms.SendKeys]::SendWait($value)
+                Start-Sleep -Milliseconds $SettleMs
+            }
+            'kdown' {
+                [Drive.Win]::keybd_event([byte]$value, 0, 0, [UIntPtr]::Zero)
+                Start-Sleep -Milliseconds 30
+            }
+            'kup' {
+                # KEYEVENTF_KEYUP.
+                [Drive.Win]::keybd_event([byte]$value, 0, 2, [UIntPtr]::Zero)
                 Start-Sleep -Milliseconds $SettleMs
             }
             'shot' {

@@ -309,6 +309,13 @@ impl Shared {
         f64::from_bits(self.speed_bits.load(Ordering::SeqCst))
     }
 
+    /// The sound plays only at 1x. The clock is the audio device's sample
+    /// count, which cannot go faster, so at any other speed the clip runs on
+    /// wall time with no sound.
+    fn audible(&self) -> bool {
+        self.speed() == 1.0
+    }
+
     fn paused(&self) -> bool {
         self.is_paused.load(Ordering::Acquire)
     }
@@ -518,7 +525,7 @@ impl Video {
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if shared.paused() {
+                    if shared.paused() || !shared.audible() {
                         data.fill(0.0);
                         return;
                     }
@@ -672,12 +679,21 @@ impl Video {
         }
 
         log::info!("Setting speed to {:.2}x", speed);
-        self.0
-            .shared
-            .speed_bits
-            .store(speed.to_bits(), Ordering::SeqCst);
-        *self.0.shared.last_clock_update.lock() = Instant::now();
-        Ok(())
+        let shared = &self.0.shared;
+        let was_audible = shared.audible();
+        // The wall clock goes on from the time the audio clock reached.
+        *shared.last_clock_update.lock() = Instant::now();
+        shared.speed_bits.store(speed.to_bits(), Ordering::SeqCst);
+        if !self.0.has_audio || was_audible == shared.audible() {
+            return Ok(());
+        }
+        if was_audible {
+            shared.audio_ring.lock().clear();
+            return Ok(());
+        }
+        // The sound of the fast part was dropped, so the audio clock starts
+        // again from here, with the sound decoded from this time.
+        self.seek(self.position(), true)
     }
 
     /// Go to `position`. An accurate seek shows the frame at that time, and the
@@ -986,9 +1002,11 @@ impl Worker {
             if self.handle_commands(&mut ictx, &mut decoder, &mut audio, &mut state) {
                 return Ok(());
             }
+            // Away from 1x the sound is dropped, not decoded.
+            let audible = shared.audible();
 
             if shared.eos()
-                && self.drained(audio.is_some())
+                && self.drained(audible && audio.is_some())
                 && !self.restart_loop(&mut ictx, &mut decoder, &mut audio, &mut state)
             {
                 continue;
@@ -1021,7 +1039,7 @@ impl Worker {
                         &mut ictx,
                         &mut decoder,
                         &mut scaler,
-                        audio.as_mut(),
+                        audio.as_mut().filter(|_| audible),
                         &mut state,
                     ) {
                         break;
@@ -1066,13 +1084,13 @@ impl Worker {
                 state.was_paused = false;
             }
 
-            let master_clock = self.master_clock(audio.is_some(), &mut state);
+            let master_clock = self.master_clock(audible && audio.is_some(), &mut state);
             self.present_due(master_clock, &mut state);
             self.pace_decoding(
                 &mut ictx,
                 &mut decoder,
                 &mut scaler,
-                audio.as_mut(),
+                audio.as_mut().filter(|_| audible),
                 master_clock,
                 &mut state,
             );

@@ -4,8 +4,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ScrollDelta, ScrollWheelEvent, SharedString,
-    Stateful, Window, div, img, px,
+    AnyElement, App, ClickEvent, Context, Div, MouseButton, ScrollDelta, ScrollWheelEvent,
+    SharedString, Stateful, Window, div, img, px,
 };
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
@@ -22,6 +22,7 @@ use crate::media::{self, Kind};
 use crate::paths;
 use crate::search::Hit;
 use crate::search::folder::Entry;
+use crate::ui::player::PressFrom;
 use crate::ui::rows::{RowInput, Target};
 use crate::ui::{
     CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
@@ -330,7 +331,8 @@ fn stage_size(this: &FileBuddy, window: &Window, cx: &App) -> (f32, f32) {
 }
 
 /// The clip itself once the selection stops moving, the thumbnail until then.
-/// The wheel over it sets the sound level, and a click pauses or plays it.
+/// The wheel over it sets the sound level. A click pauses or plays it, and a
+/// press held longer plays it fast until the release.
 fn stage(
     this: &FileBuddy,
     hit: &Hit,
@@ -347,12 +349,22 @@ fn stage(
         .flex()
         .items_center()
         .justify_center()
-        .on_click(cx.listener(|this, _, _, cx| {
-            if this.player.video().is_some() {
-                this.player.toggle_paused();
-                cx.notify();
-            }
-        }))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                if this.player.video().is_some() {
+                    this.press_play(PressFrom::Mouse, cx);
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
+        )
         .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
             let up = match event.delta {
                 ScrollDelta::Lines(delta) => delta.y,
