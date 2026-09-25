@@ -1,6 +1,6 @@
 # 28 - Browse the whole collection
 
-Status: ready-for-agent
+Status: done
 
 Depends on nothing.
 
@@ -51,3 +51,29 @@ If a number is bad, record it here and fix that one thing. Do not add paging
 without a measured reason.
 
 ## Comments
+
+### Done (2026-09-25)
+
+- `browse` has no LIMIT now. `Request` has a `sort`, which only Browse uses.
+  The SQL orders by the sort, then by `lower(filename)`, then by path.
+  `lower()` folds ASCII letters only, and the folder sort folds all of
+  Unicode. So two names that differ only in the case of a non-ASCII letter
+  can tie in a different order. This did not seem worth a custom collation.
+- `FileBuddy` keeps `browse_sort` (starts on Recent) and `folder_sort` (starts
+  on Name). `s` and the buttons change the sort of the page that is open.
+- The bar was already one piece of code for every page (`header::bar`).
+  Browse puts `All files` at the left and the sort buttons at the right. The
+  buttons go while a query is typed.
+
+### Measured
+
+3427 files, debug build, 60 Hz display.
+
+| What | Result |
+| --- | --- |
+| Fetch and show Browse | 8 to 10 ms |
+| Refresh (`rerun_search`, the same path as the 30 s refresh) | 8 to 16 ms |
+| Grid: scrollbar drag top to bottom, then 4 s of autoscroll | median frame 16.5 ms, p95 17.0 ms, max 49 ms |
+| Table: the same | median 16.5 ms, p95 17.0 ms, max 49 ms |
+
+No number is bad, so there is no paging.

@@ -294,6 +294,9 @@ impl FileBuddy {
     }
 
     pub(super) fn set_hovered(&mut self, index: usize, hovered: bool, cx: &mut Context<Self>) {
+        if !self.autoscroll_hover(index, hovered) {
+            return;
+        }
         let playing = self.player.hovered.as_ref().map(|(at, _)| *at);
         if !hovered {
             if playing == Some(index) {

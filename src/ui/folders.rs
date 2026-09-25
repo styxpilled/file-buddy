@@ -35,10 +35,9 @@ impl FileBuddy {
                 .map(Entry::Folder)
                 .collect();
         };
-        let listed = self
-            .config
-            .ignore_set()
-            .and_then(|ignore| listing::list(self.db.conn(), dir, &ignore, &self.kinds, self.sort));
+        let listed = self.config.ignore_set().and_then(|ignore| {
+            listing::list(self.db.conn(), dir, &ignore, &self.kinds, self.folder_sort)
+        });
         match listed {
             Ok(entries) => {
                 let folders = entries
@@ -108,12 +107,25 @@ impl FileBuddy {
         }
     }
 
+    /// The sort of the page. Browse and Folders each keep their own.
+    pub(super) fn sort(&self) -> Sort {
+        match self.page() {
+            Page::Folders => self.folder_sort,
+            _ => self.browse_sort,
+        }
+    }
+
     /// `s`, or a sort button. The selection stays on the same entry.
     pub(super) fn set_sort(&mut self, sort: Sort, window: &mut Window, cx: &mut Context<Self>) {
-        if self.page() != Page::Folders || self.sort == sort {
+        let kept = match self.page() {
+            Page::Folders => &mut self.folder_sort,
+            Page::Browse => &mut self.browse_sort,
+            Page::Review | Page::Settings => return,
+        };
+        if *kept == sort {
             return;
         }
-        self.sort = sort;
+        *kept = sort;
         self.rerun_search(cx);
         self.reveal_selection(window, cx);
     }
@@ -172,14 +184,14 @@ pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .into_any_element()
 }
 
-/// The sort only orders a folder. A query keeps its ranking, so the sort
-/// buttons go while one is typed.
+/// The sort only orders a folder or Browse with nothing typed. A query keeps
+/// its ranking, so the sort buttons go while one is typed.
 pub fn sort_buttons(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
         .gap_1()
         .when(this.listing, |buttons| {
             buttons.children(Sort::ALL.map(|sort| {
-                toggle(sort.label(), sort.label(), this.sort == sort)
+                toggle(sort.label(), sort.label(), this.sort() == sort)
                     .xsmall()
                     .tooltip("S")
                     .on_click(

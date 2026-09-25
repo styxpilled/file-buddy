@@ -2,6 +2,7 @@
 //! holds one part of the window: the methods that change its state and the
 //! functions that draw it.
 
+mod autoscroll;
 mod folders;
 mod grid;
 mod header;
@@ -25,8 +26,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, Entity, FocusHandle, Focusable, ScrollStrategy, SharedString,
-    Subscription, Task, Window, div, px,
+    App, Context, ElementId, Entity, FocusHandle, Focusable, ScrollStrategy,
+    SharedString, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
@@ -132,6 +133,7 @@ pub struct FileBuddy {
     focus: FocusHandle,
     panes: Entity<ResizableState>,
     scroll: VirtualListScrollHandle,
+    autoscroll: Option<autoscroll::Autoscroll>,
     results: Vec<Entry>,
     /// Nothing is typed, so the results are a list and not the answer to a
     /// query: the newest files on Browse, or a folder on the Folders page.
@@ -165,8 +167,10 @@ pub struct FileBuddy {
     /// The folder the Folders page shows, or `None` for the list of roots. It
     /// stays when the page closes, so the page opens where the user left it.
     folder: Option<PathBuf>,
-    /// The order of a folder on the Folders page. A query keeps its ranking.
-    sort: Sort,
+    /// The order of a folder on the Folders page, and of Browse with nothing
+    /// typed. A query keeps its ranking.
+    folder_sort: Sort,
+    browse_sort: Sort,
     /// A table in place of the grid, on every page with results.
     table: bool,
     /// The tags of each file, by hash, while the table shows them.
@@ -261,6 +265,7 @@ impl FileBuddy {
             focus: cx.focus_handle(),
             panes: cx.new(|_| ResizableState::default()),
             scroll: VirtualListScrollHandle::new(),
+            autoscroll: None,
             results: Vec::new(),
             listing: false,
             selected: 0,
@@ -280,7 +285,8 @@ impl FileBuddy {
             _key_capture: settings::capture_keys(cx),
             menu_open: false,
             folder: None,
-            sort: Sort::default(),
+            folder_sort: Sort::Name,
+            browse_sort: Sort::Recent,
             table: false,
             row_tags: HashMap::new(),
             detail: Detail::File,
@@ -376,7 +382,8 @@ impl FileBuddy {
     ) -> Vec<Entry> {
         let request = search::Request::new(text)
             .kinds(self.kinds.clone())
-            .within(within);
+            .within(within)
+            .sort(self.browse_sort);
         match search::search(self.db.conn(), &request, &self.config.weights) {
             Ok(hits) => {
                 self.status = count(hits.len());
@@ -613,6 +620,9 @@ impl FileBuddy {
     /// Escape, wherever it comes from. It undoes one thing at a time, the most
     /// recent first, so a person leaning on it ends up back at a plain grid.
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.end_autoscroll(cx) {
+            return;
+        }
         if self.tagger.is_some() {
             self.close_tagger(window, cx);
         } else if self.renamer.is_some() {
@@ -727,6 +737,7 @@ impl Render for FileBuddy {
         self.sync_seek_bar(window, cx);
         let width = self.grid_width(window, cx);
         self.columns = self.column_count(window, cx);
+        self.step_autoscroll(window, cx);
 
         v_flex()
             .key_context("FileBuddy")
@@ -779,7 +790,7 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
             .on_action(cx.listener(|this, _: &GoUp, window, cx| this.go_up(window, cx)))
             .on_action(cx.listener(|this, _: &CycleSort, window, cx| {
-                this.set_sort(this.sort.next(), window, cx)
+                this.set_sort(this.sort().next(), window, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleTable, window, cx| {
                 this.set_table(!this.table, window, cx)

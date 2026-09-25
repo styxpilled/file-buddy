@@ -48,3 +48,37 @@ fixed or written up here with the reason it is not a real problem at the scale
 of the collection.
 
 ## Comments
+
+### 2026-09-25: thumbnails (user note)
+
+After issue 28, memory grew a lot. Browse now lists all 3427 files, and a
+scroll through the list loads each thumbnail. The user thinks the thumbnails
+cause it. Investigate the memory as a whole, and also look at the thumbnails
+in particular.
+
+What is known now, not measured:
+
+- `ffmpeg::thumbnail` writes a JPEG with the long edge at most 480 px
+  (`MAX_EDGE`). The cache holds 3375 of them, 65 MB on disk.
+- A tile shows the picture in at most 216 x 120 px (`TILE_WIDTH - 4`,
+  `TILE_HEIGHT - 4`).
+- Decoded as RGBA, a 480 x 270 thumbnail is about 0.5 MB. If the window keeps
+  every decoded thumbnail, one scroll through the whole list holds about
+  1.7 GB. At 216 x 120 it is about 0.1 MB each, about 0.35 GB for all.
+- `tile::thumbnail` uses `img(path)`. Find out if GPUI keeps each decoded image
+  in its asset cache for the life of the window, and if it frees any of them.
+
+Ideas from the user:
+
+- Make the thumbnail files smaller, because the tiles are small. Check the
+  display scale first: at 150 % or 200 % a tile needs more pixels. The side
+  pane also shows the thumbnail (`preview.rs`, while no clip plays), at the
+  full width of the pane, so it needs the large one. Two sizes, or the pane
+  reads something else. A new size needs the old files made again, or made
+  again when they are next shown.
+- Drop decoded thumbnails that have not been shown for some time, so that
+  memory stays flat on a long scroll.
+
+Measure memory before and after a scroll from the top to the bottom of Browse,
+in the grid and in the table. The table shows no thumbnails, so it is the
+control.

@@ -10,7 +10,7 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex, 
 use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 
-use super::tile;
+use super::{autoscroll, tile};
 use crate::db::files::{FileRow, State};
 use crate::media;
 use crate::search::folder::Entry;
@@ -43,17 +43,17 @@ pub fn table(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .border_color(cx.theme().border),
         )
         .child(
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .child(
+            div().flex_1().min_h_0().child(
+                autoscroll::attach(
+                    this,
                     v_virtual_list(cx.entity(), "table", sizes, |this, range, _, cx| {
                         range.map(|index| row(this, index, cx)).collect()
                     })
                     .track_scroll(&this.scroll),
+                    cx,
                 )
                 .vertical_scrollbar(&*this.scroll),
+            ),
         )
         .into_any_element()
 }

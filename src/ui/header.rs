@@ -1,8 +1,8 @@
 //! The header: the page tabs, what the page puts beside them, the notices and
 //! the window buttons. It is the title bar too: Windows draws none, and a drag
 //! on the header moves the window. Under it, on every page with results, the
-//! bar: the breadcrumb of the Folders page, the sort, the chips, the view
-//! buttons and the count.
+//! bar: the breadcrumb of the Folders page or `All files` on Browse, the sort,
+//! the chips, the view buttons and the count.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, MouseDownEvent, SharedString, Window, WindowControlArea, div, px};
@@ -184,11 +184,13 @@ pub fn bar(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .py_2()
         .items_center()
         .text_sm()
-        .when(this.page() == Page::Folders, |bar| {
-            bar.child(folders::breadcrumb(this, cx))
+        .map(|bar| match this.page() {
+            Page::Folders => bar.child(folders::breadcrumb(this, cx)),
+            Page::Browse => bar.child("All files"),
+            Page::Review | Page::Settings => bar,
         })
         .child(div().flex_1())
-        .when(this.page() == Page::Folders, |bar| {
+        .when(matches!(this.page(), Page::Browse | Page::Folders), |bar| {
             bar.child(folders::sort_buttons(this, cx))
         })
         .child(chips(this, cx))

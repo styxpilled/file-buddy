@@ -14,11 +14,14 @@
 #   move:<x>,<y>             move the pointer there in small steps, so a drag
 #                            sees the moves between
 #   up                       release the left button
+#   mclick:<x>,<y>           click the middle button at a point
+#   mdown:<x>,<y>            press the middle button at a point
+#   mup                      release the middle button
 #   scroll:<x>,<y>,<notches> turn the wheel over a point inside the window.
 #                            A positive count turns it away from the hand
 #   hover:<x>,<y>            move the pointer to a point inside the window and
-#                            print the cursor it shows there: hand, arrow or
-#                            other. A picture does not hold the cursor
+#                            print the cursor it shows there: hand, arrow,
+#                            updown or other. A picture does not hold the cursor
 #   shot:<name>              save <OutDir>/<name>.png of the application window
 #   wait:<milliseconds>      wait longer than the settle time
 #
@@ -84,14 +87,15 @@ function Get-MainWindow([string]$name) {
     return $process.MainWindowHandle
 }
 
-function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$count = 1) {
+# The flags of the left button. The middle button is 0x0020 and 0x0040.
+function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$count = 1, [uint32]$down = 0x0002, [uint32]$up = 0x0004) {
     $rect = New-Object Drive.Win+RECT
     [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
     [Drive.Win]::SetCursorPos($rect.Left + $x, $rect.Top + $y) | Out-Null
     Start-Sleep -Milliseconds 120
     for ($i = 0; $i -lt $count; $i++) {
-        [Drive.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
-        [Drive.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+        [Drive.Win]::mouse_event($down, 0, 0, 0, [UIntPtr]::Zero)
+        [Drive.Win]::mouse_event($up, 0, 0, 0, [UIntPtr]::Zero)
         Start-Sleep -Milliseconds 60
     }
 }
@@ -136,10 +140,11 @@ function Get-CursorAt([IntPtr]$hwnd, [int]$x, [int]$y) {
     $info = New-Object Drive.Win+CURSORINFO
     $info.Size = [System.Runtime.InteropServices.Marshal]::SizeOf($info)
     [Drive.Win]::GetCursorInfo([ref]$info) | Out-Null
-    # IDC_HAND and IDC_ARROW. The system shares one handle for each.
+    # IDC_HAND, IDC_ARROW and IDC_SIZENS. The system shares one handle for each.
     switch ($info.Cursor) {
         ([Drive.Win]::LoadCursor([IntPtr]::Zero, [IntPtr]32649)) { return 'hand' }
         ([Drive.Win]::LoadCursor([IntPtr]::Zero, [IntPtr]32512)) { return 'arrow' }
+        ([Drive.Win]::LoadCursor([IntPtr]::Zero, [IntPtr]32645)) { return 'updown' }
         default { return 'other' }
     }
 }
@@ -193,21 +198,28 @@ try {
                 Click-InWindow $application ([int]$x) ([int]$y) 2
                 Start-Sleep -Milliseconds $SettleMs
             }
-            'down' {
+            'mclick' {
+                $x, $y = $value -split ',', 2
+                Click-InWindow $application ([int]$x) ([int]$y) 1 0x0020 0x0040
+                Start-Sleep -Milliseconds $SettleMs
+            }
+            { $_ -in 'down', 'mdown' } {
+                $flag = if ($kind -eq 'mdown') { 0x0020 } else { 0x0002 }
                 $x, $y = $value -split ',', 2
                 $rect = New-Object Drive.Win+RECT
                 [Drive.Win]::GetWindowRect($application, [ref]$rect) | Out-Null
                 [Drive.Win]::SetCursorPos($rect.Left + [int]$x, $rect.Top + [int]$y) | Out-Null
                 Start-Sleep -Milliseconds 120
-                [Drive.Win]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+                [Drive.Win]::mouse_event($flag, 0, 0, 0, [UIntPtr]::Zero)
                 Start-Sleep -Milliseconds 120
             }
             'move' {
                 $x, $y = $value -split ',', 2
                 Move-InWindow $application ([int]$x) ([int]$y)
             }
-            'up' {
-                [Drive.Win]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+            { $_ -in 'up', 'mup' } {
+                $flag = if ($kind -eq 'mup') { 0x0040 } else { 0x0004 }
+                [Drive.Win]::mouse_event($flag, 0, 0, 0, [UIntPtr]::Zero)
                 Start-Sleep -Milliseconds $SettleMs
             }
             'scroll' {

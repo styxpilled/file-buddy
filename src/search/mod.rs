@@ -17,6 +17,7 @@ use crate::config::Weights;
 use crate::db::files::{self, FileRow, PRESENT, read_row};
 use crate::db::{ocr, segments};
 use crate::media::{self, Kind};
+use crate::search::folder::Sort;
 
 /// Which column gave a result its best score. The grid shows it as a badge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +78,10 @@ pub struct Request {
     pub kinds: Vec<Kind>,
     /// Only files under this folder, at any depth.
     pub within: Option<PathBuf>,
+    /// The most results of a query. Browse lists every file.
     pub limit: usize,
+    /// The order of Browse. A query keeps its ranking.
+    pub sort: Sort,
 }
 
 impl Request {
@@ -87,6 +91,7 @@ impl Request {
             kinds: Vec::new(),
             within: None,
             limit: 500,
+            sort: Sort::Recent,
         }
     }
 
@@ -102,6 +107,11 @@ impl Request {
 
     pub fn limit(mut self, limit: usize) -> Self {
         self.limit = limit;
+        self
+    }
+
+    pub fn sort(mut self, sort: Sort) -> Self {
+        self.sort = sort;
         self
     }
 }
@@ -200,15 +210,18 @@ fn find_moment(conn: &Connection, hit: &mut Hit, query: &str) -> Result<()> {
     Ok(())
 }
 
-/// What the grid shows when the query is empty: the newest files first.
+/// What the grid shows when the query is empty: every file, in the order of
+/// the sort.
 pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
     let mut values = Vec::new();
     let filter = filters(request, &mut values, "");
-    values.push(Value::Integer(request.limit as i64));
-    let sql = format!(
-        "{PRESENT}{filter} ORDER BY mtime DESC LIMIT ?{}",
-        values.len()
-    );
+    let order = match request.sort {
+        Sort::Name => "",
+        Sort::Recent => "mtime DESC, ",
+        Sort::Size => "size DESC, ",
+    };
+    // Ties go by name, as in a folder.
+    let sql = format!("{PRESENT}{filter} ORDER BY {order}lower(filename), path");
 
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
@@ -291,5 +304,33 @@ mod tests {
     fn the_strongest_column_gives_the_badge() {
         let column = best_column([0.0, -1.5, -0.2, 0.0]);
         assert_eq!(Signal::COLUMNS[column], Signal::Filename);
+    }
+
+    #[test]
+    fn browse_lists_every_file_in_the_order_of_the_sort() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let files = [("b.mp4", 30, 5), ("A.mp4", 10, 5), ("c.mp4", 30, 900)];
+        for (name, mtime, size) in files {
+            let path = PathBuf::from(format!("C:/clips/{name}"));
+            let scanned = files::Scanned {
+                path: &path,
+                hash: name,
+                kind: Kind::Video,
+                size,
+                mtime,
+            };
+            files::upsert(db.conn(), &scanned).unwrap();
+        }
+        let names = |sort| {
+            let request = Request::new("").limit(1).sort(sort);
+            browse(db.conn(), &request)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.file.filename)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(Sort::Name), ["A.mp4", "b.mp4", "c.mp4"]);
+        assert_eq!(names(Sort::Recent), ["b.mp4", "c.mp4", "A.mp4"]);
+        assert_eq!(names(Sort::Size), ["c.mp4", "A.mp4", "b.mp4"]);
     }
 }
