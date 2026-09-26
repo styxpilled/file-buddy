@@ -18,6 +18,7 @@ mod seek_bar;
 mod settings;
 mod table;
 mod tagger;
+mod thumbnails;
 mod tile;
 mod visual;
 
@@ -46,6 +47,7 @@ use self::rows::RowEditor;
 use self::seek_bar::SeekBar;
 use self::settings::Settings;
 use self::tagger::Tagger;
+use self::thumbnails::Thumbnails;
 use self::visual::Visual;
 use crate::actions::clipboard;
 use crate::config::Config;
@@ -184,6 +186,7 @@ pub struct FileBuddy {
     detail: Detail,
     visual: Visual,
     travel: Travel,
+    thumbnails: Entity<Thumbnails>,
 }
 
 /// The status line for a number of results.
@@ -259,6 +262,9 @@ impl FileBuddy {
         })
         .detach();
 
+        let thumbnails = Thumbnails::new(cx);
+        cx.observe(&thumbnails, |_, _, cx| cx.notify()).detach();
+
         let mut this = Self {
             db,
             db_path: db_path.to_path_buf(),
@@ -297,6 +303,7 @@ impl FileBuddy {
             detail: Detail::File,
             visual: Visual::default(),
             travel: Travel::default(),
+            thumbnails,
         };
         this.run_search(cx);
         this.load_visual(cx);
@@ -719,6 +726,7 @@ impl FileBuddy {
 
 impl Render for FileBuddy {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        gpui_video::release_unused(window, cx);
         self.sync_rows();
         self.hold_focus(window, cx);
         self.sync_placeholder(window, cx);

@@ -75,3 +75,8 @@ fn model(name: &str, what: &str, exists: impl Fn(&Path) -> bool) -> Result<PathB
 pub fn thumbnail_path(cache: &Path, hash: &str) -> PathBuf {
     cache.join(&hash[..2]).join(format!("{hash}.jpg"))
 }
+
+/// The smaller thumbnail a tile shows, beside the full one.
+pub fn tile_path(cache: &Path, hash: &str) -> PathBuf {
+    cache.join(&hash[..2]).join(format!("{hash}.tile.jpg"))
+}

@@ -391,7 +391,12 @@ fn stage(
             let thumbnail = paths::thumbnail_path(&this.cache, &hit.file.hash);
             if thumbnail.is_file() {
                 frame
-                    .child(img(thumbnail).max_w(px(width)).max_h(px(height)))
+                    .child(
+                        img(thumbnail)
+                            .image_cache(&this.thumbnails)
+                            .max_w(px(width))
+                            .max_h(px(height)),
+                    )
                     .into_any_element()
             } else {
                 frame.into_any_element()

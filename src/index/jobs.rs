@@ -86,6 +86,20 @@ pub fn enqueue(conn: &Connection, hash: &str, stage: Stage) -> Result<()> {
     Ok(())
 }
 
+/// Queue a stage again whose result is gone, such as a thumbnail missing from
+/// the cache. A job that is done runs again. A failed one stays failed, so a
+/// file FFmpeg cannot open is not tried on every scan.
+pub fn redo(conn: &Connection, hash: &str, stage: Stage) -> Result<()> {
+    conn.execute(
+        "INSERT INTO jobs (hash, stage, state, updated_at) VALUES (?1, ?2, 'pending', ?3)
+         ON CONFLICT (hash, stage) DO UPDATE SET state = 'pending', attempts = 0, error = NULL,
+             updated_at = ?3
+         WHERE state = 'done'",
+        params![hash, stage.as_str(), now()],
+    )?;
+    Ok(())
+}
+
 /// Record a stage as not applicable to this file, with the reason.
 pub fn skip(conn: &Connection, hash: &str, stage: Stage, reason: &str) -> Result<()> {
     conn.execute(
@@ -240,6 +254,27 @@ mod tests {
         enqueue(db.conn(), "h", Stage::Probe).unwrap();
         assert_eq!(claim(db.conn_mut(), Stage::Probe, 8).unwrap().len(), 1);
         assert!(claim(db.conn_mut(), Stage::Probe, 8).unwrap().is_empty());
+    }
+
+    #[test]
+    fn redo_runs_a_done_job_again_but_not_a_failed_one() {
+        let mut db = db();
+        enqueue(db.conn(), "h", Stage::Thumbnail).unwrap();
+        claim(db.conn_mut(), Stage::Thumbnail, 8).unwrap();
+        finish(db.conn(), "h", Stage::Thumbnail).unwrap();
+        redo(db.conn(), "h", Stage::Thumbnail).unwrap();
+        assert_eq!(claim(db.conn_mut(), Stage::Thumbnail, 8).unwrap().len(), 1);
+
+        for _ in 0..MAX_ATTEMPTS {
+            fail(db.conn(), "h", Stage::Thumbnail, "broken").unwrap();
+            claim(db.conn_mut(), Stage::Thumbnail, 8).unwrap();
+        }
+        redo(db.conn(), "h", Stage::Thumbnail).unwrap();
+        assert!(
+            claim(db.conn_mut(), Stage::Thumbnail, 8)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

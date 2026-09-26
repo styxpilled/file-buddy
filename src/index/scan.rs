@@ -107,7 +107,7 @@ pub(crate) fn visit(
     }
     // A moved thumbnail cache is the usual reason a known file needs this again.
     if !thumbnail::exists(&hash, cache) {
-        jobs::enqueue(conn, &hash, Stage::Thumbnail)?;
+        jobs::redo(conn, &hash, Stage::Thumbnail)?;
     }
     Ok((id, outcome))
 }

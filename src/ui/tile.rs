@@ -205,15 +205,21 @@ pub(super) fn stray_color(why: Stray, cx: &App) -> Hsla {
     }
 }
 
-fn thumbnail(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
-    let path = paths::thumbnail_path(&this.cache, &hit.file.hash);
-    if path.is_file() {
-        return img(path)
+fn thumbnail(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+    if !paths::thumbnail_path(&this.cache, &hit.file.hash).is_file() {
+        return placeholder(hit.file.kind.label(), cx);
+    }
+    let tile = this.thumbnails.update(cx, |thumbnails, cx| {
+        thumbnails.tile(&hit.file.hash, &this.cache, cx)
+    });
+    match tile {
+        Some(path) => img(path)
+            .image_cache(&this.thumbnails)
             .max_w(px(TILE_WIDTH - 4.))
             .max_h(px(TILE_HEIGHT - 4.))
-            .into_any_element();
+            .into_any_element(),
+        None => div().into_any_element(),
     }
-    placeholder(hit.file.kind.label(), cx)
 }
 
 fn placeholder(text: &str, cx: &App) -> AnyElement {

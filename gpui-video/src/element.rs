@@ -1,7 +1,9 @@
 use crate::video::Video;
 use gpui::{
-    Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Window,
+    Element, ElementId, EntityId, Global, GlobalElementId, InspectorElementId, IntoElement,
+    LayoutId, Window,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use yuv::{yuv_nv12_to_bgra, YuvBiPlanarImage, YuvConversionMode, YuvRange, YuvStandardMatrix};
 
@@ -16,6 +18,39 @@ struct CachedFrame {
     width: u32,
     height: u32,
     image: Arc<gpui::RenderImage>,
+}
+
+/// The frame each video element holds in the sprite atlas. GPUI drops the state
+/// of an element that leaves the tree without a word, and the texture of its
+/// frame would stay in the atlas for the life of the window.
+#[derive(Default)]
+struct Shown {
+    frames: HashMap<EntityId, Arc<gpui::RenderImage>>,
+    painted: HashSet<EntityId>,
+}
+
+impl Global for Shown {}
+
+/// Free the frames of the video elements that were not painted in the last
+/// frame. Call it once per frame, before the videos paint.
+pub fn release_unused(window: &mut Window, cx: &mut gpui::App) {
+    let Some(shown) = cx.try_global::<Shown>() else {
+        return;
+    };
+    if shown.frames.len() == shown.painted.len() {
+        cx.global_mut::<Shown>().painted.clear();
+        return;
+    }
+    let shown = cx.global_mut::<Shown>();
+    let painted = std::mem::take(&mut shown.painted);
+    let gone: Vec<_> = shown
+        .frames
+        .extract_if(|id, _| !painted.contains(id))
+        .map(|(_, image)| image)
+        .collect();
+    for image in gone {
+        cx.drop_image(image, Some(window));
+    }
 }
 
 pub struct VideoElement {
@@ -119,12 +154,18 @@ impl VideoElement {
 
         let cache: gpui::Entity<Option<CachedFrame>> = window.use_state(cx, |_, _| None);
         let id = self.video.id();
+        let key = cache.entity_id();
+        cx.default_global::<Shown>().painted.insert(key);
 
         if let Some(hit) = cache
             .read(cx)
             .clone()
             .filter(|c| c.video == id && c.seq == seq)
         {
+            cx.global_mut::<Shown>()
+                .frames
+                .entry(key)
+                .or_insert_with(|| hit.image.clone());
             return Some(hit);
         }
 
@@ -147,6 +188,9 @@ impl VideoElement {
         if let Some(previous) = previous {
             cx.drop_image(previous.image, Some(window));
         }
+        cx.default_global::<Shown>()
+            .frames
+            .insert(key, fresh.image.clone());
 
         Some(fresh)
     }

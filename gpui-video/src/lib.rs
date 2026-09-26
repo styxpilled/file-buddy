@@ -58,7 +58,7 @@ mod error;
 mod stretch;
 mod video;
 
-pub use element::{video, VideoElement};
+pub use element::{release_unused, video, VideoElement};
 pub use error::Error;
 pub use video::{Position, Video, VideoOptions};
 

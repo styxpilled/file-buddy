@@ -16,7 +16,20 @@ use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// Written out when it drops. The application can quit without returning from
+/// `run`, so quitting drops it too.
+#[cfg(feature = "dhat-heap")]
+static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
+
 fn main() -> Result<()> {
+    #[cfg(feature = "dhat-heap")]
+    {
+        *PROFILER.lock().unwrap() = Some(dhat::Profiler::builder().trim_backtraces(None).build());
+    }
     // Started from a terminal, as `cargo run` does, the log goes there. Started
     // from Explorer there is no console to attach to, and the call fails.
     // SAFETY: nothing holds a handle to a console yet.
@@ -33,6 +46,12 @@ fn main() -> Result<()> {
         .with_assets(Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            #[cfg(feature = "dhat-heap")]
+            cx.on_app_quit(|_| {
+                PROFILER.lock().unwrap().take();
+                async {}
+            })
+            .detach();
             Theme::change(ThemeMode::Dark, None, cx);
             Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
             for problem in ui::bind_keys(&config.keys, cx) {
@@ -62,5 +81,7 @@ fn main() -> Result<()> {
             .expect("failed to open the window");
             cx.activate(true);
         });
+    #[cfg(feature = "dhat-heap")]
+    PROFILER.lock().unwrap().take();
     Ok(())
 }

@@ -110,6 +110,8 @@ Two things follow from that:
         indexing.rs   the scan, the watcher and the text stages while the
                       window is open
         tagger.rs     the tag input and its autocomplete
+        thumbnails.rs the decoded thumbnails, at most 200, the least recently
+                      shown dropped first
         renamer.rs    the rename input in the side pane
         folders.rs    the Folders page: the folder, the breadcrumb, the sort
         review.rs     the Review page, its groups and the rename walk
