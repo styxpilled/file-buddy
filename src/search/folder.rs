@@ -33,9 +33,7 @@ pub enum Entry {
 pub enum Sort {
     #[default]
     Name,
-    /// The newest first.
     Recent,
-    /// The largest first.
     Size,
 }
 
@@ -213,6 +211,7 @@ pub fn list(
             signal: Signal::Filename,
             matched: String::new(),
             at_ms: None,
+            named: false,
         })
     };
     Ok(folders

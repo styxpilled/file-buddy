@@ -57,6 +57,9 @@ pub struct Hit {
     /// Where in the clip it matched: the speech segment, or the frame that
     /// looks most like the query.
     pub at_ms: Option<i64>,
+    /// The query matched a tag or the filename, whatever the badge says. Such a
+    /// file stays above the others when the visual hits merge in.
+    pub named: bool,
 }
 
 impl Hit {
@@ -173,6 +176,8 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
             signal: Signal::COLUMNS[column],
             matched,
             at_ms: None,
+            // A column that did not match scores zero.
+            named: scores[0] != 0.0 || scores[1] != 0.0,
         })
     })?;
     let mut hits: Vec<Hit> = rows.collect::<Result<_, _>>()?;
@@ -232,6 +237,7 @@ pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
             score: 0.0,
             signal: Signal::Filename,
             at_ms: None,
+            named: false,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -287,6 +293,7 @@ mod tests {
             signal: Signal::Speech,
             matched: matched.into(),
             at_ms,
+            named: false,
         }
     }
 

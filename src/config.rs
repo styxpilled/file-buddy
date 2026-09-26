@@ -48,7 +48,8 @@ pub struct Weights {
     pub visual: f64,
 }
 
-/// Below 1, so a word in a filename or a tag still puts that file first.
+/// Below 1, so a text match counts for more than a look. A filename or tag
+/// match stays first whatever this is (`search::visual::fuse`).
 fn default_visual_weight() -> f64 {
     0.5
 }

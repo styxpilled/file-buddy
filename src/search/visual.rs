@@ -178,6 +178,7 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
                 signal: Signal::Visual,
                 matched: String::new(),
                 at_ms,
+                named: false,
             },
         ));
     }
@@ -192,6 +193,12 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
 /// Merge the FTS list and the visual list by weighted reciprocal rank fusion.
 /// The FTS list has weight 1. A file in both lists keeps its text match, which
 /// says more than a look does.
+///
+/// A file whose name or tags match stays above every file that matched only by
+/// speech, screen text or look. Fusion keeps only ranks, and with `RRF_K` at 60
+/// they are close together: the best visual rank added to text rank 17 beat
+/// text rank 1, so a screen text match went over the files named for the
+/// query.
 pub fn fuse(text: Vec<Hit>, visual: Vec<Hit>, visual_weight: f64, limit: usize) -> Vec<Hit> {
     let mut merged: Vec<(f64, Hit)> = Vec::new();
     let mut at: HashMap<i64, usize> = HashMap::new();
@@ -210,7 +217,7 @@ pub fn fuse(text: Vec<Hit>, visual: Vec<Hit>, visual_weight: f64, limit: usize) 
         }
     }
     // Stable, so a tie keeps text before visual.
-    merged.sort_by(|a, b| b.0.total_cmp(&a.0));
+    merged.sort_by(|a, b| b.1.named.cmp(&a.1.named).then(b.0.total_cmp(&a.0)));
     merged
         .into_iter()
         .take(limit)
@@ -249,6 +256,7 @@ mod tests {
                 mtime: 0,
             },
             score: 0.0,
+            named: matches!(signal, Signal::Tags | Signal::Filename),
             signal,
             matched: String::new(),
             at_ms: None,
@@ -361,11 +369,30 @@ mod tests {
 
     #[test]
     fn a_file_in_both_lists_rises_and_keeps_its_text_badge() {
-        let text = vec![hit(1, Signal::Filename), hit(2, Signal::Speech)];
+        let text = vec![hit(1, Signal::Ocr), hit(2, Signal::Speech)];
         let visual = vec![hit(2, Signal::Visual)];
         let merged = fuse(text, visual, 0.5, 10);
         assert_eq!(ids(&merged), vec![2, 1]);
         assert_eq!(merged[0].signal, Signal::Speech);
+    }
+
+    #[test]
+    fn a_look_does_not_lift_screen_text_over_a_name() {
+        // "funny": four files named for it, then a picture whose text says it
+        // and which also looks it.
+        let mut text: Vec<Hit> = (1..=4).map(|id| hit(id, Signal::Filename)).collect();
+        text.extend((5..=20).map(|id| hit(id, Signal::Speech)));
+        text.push(hit(21, Signal::Ocr));
+        let visual = vec![hit(21, Signal::Visual)];
+        let merged = fuse(text, visual, 0.5, 100);
+        assert_eq!(ids(&merged)[..5], [1, 2, 3, 4, 21]);
+    }
+
+    #[test]
+    fn a_look_still_orders_the_named_files() {
+        let text = vec![hit(1, Signal::Filename), hit(2, Signal::Tags)];
+        let visual = vec![hit(2, Signal::Visual)];
+        assert_eq!(ids(&fuse(text, visual, 0.5, 10)), vec![2, 1]);
     }
 
     #[test]

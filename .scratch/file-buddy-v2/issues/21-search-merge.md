@@ -58,3 +58,19 @@ results. `FLOOR` stays at 0.25 and `DELTA` at 0.03, and the visual hits keep
 merging in after the text matches. The user saw what may be a memory leak.
 Issue 32 investigates it.
 
+
+### Fix, 2026-09-25: a look lifted screen text over names
+
+The user searched `funny`. After the visual merge, a picture with "funny" in
+its screen text went to the top, over four files with "funny" in the name.
+RRF keeps only ranks, and with `k = 60` they are close: the picture was text
+rank 17 (1/78) and visual rank 1 (0.5/61), which is 0.021 against 0.016 for
+text rank 1. The weight below 1 did not keep names first, as the config
+comment said.
+
+Now `Hit::named` is set when the query matched a tag or the filename, from the
+column scores and not from the badge. `fuse` puts every named file above every
+file that is not, and the fused score orders each group. A look still lifts a
+speech or screen text match over other such matches, and orders the named
+files among themselves. The test of a speech match rising over a filename
+match now uses a screen text match in its place.

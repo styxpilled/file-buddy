@@ -103,7 +103,9 @@ impl FileBuddy {
         self.update_index(
             move |db, ignore, cache| scan::scan(db, &roots, ignore, cache),
             |this, scanned, cx| {
-                this.run_search(cx);
+                // The same query over a fresher index. The user may have
+                // clicked a tile while the scan ran, so the selection stays.
+                this.rerun_search(cx);
                 match scanned {
                     Err(e) => this.status = format!("scan failed: {e:#}").into(),
                     Ok(_) => this.index_text(Stage::Ocr, cx),
@@ -160,7 +162,7 @@ impl FileBuddy {
                 Ok((stats, retry)) => {
                     this.requeue(retry);
                     if !stats.is_empty() {
-                        this.run_search(cx);
+                        this.rerun_search(cx);
                         this.flash(summary(&stats), false, cx);
                         this.index_text(Stage::Ocr, cx);
                     }

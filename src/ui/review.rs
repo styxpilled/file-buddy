@@ -127,6 +127,7 @@ fn entries(items: [Vec<Item>; 4], group: Group) -> Vec<Entry> {
                 score: 0.0,
                 signal: Signal::Filename,
                 at_ms: None,
+                named: false,
             })
         })
         .collect()
