@@ -1,5 +1,5 @@
-//! The Review page: the files that need a person, in four groups. Its tabs take
-//! the place of the search box, and the chips limit every group. The Poor names group is the
+//! The Review page: the files that need a person, in four groups. Its tabs are
+//! at the left of the bar over the results, and the chips limit every group. The Poor names group is the
 //! rename walk: the clip plays, and a saved name moves on to the next file.
 
 use gpui::prelude::*;
@@ -143,7 +143,7 @@ pub fn tabs(review: &Review, cx: &mut Context<FileBuddy>) -> AnyElement {
                     format!("{}  {count}", group.label()),
                     review.group == group,
                 )
-                .small()
+                .xsmall()
                 .tooltip(format!("Alt+{}", at + 1))
                 .on_click(
                     cx.listener(move |this, _, window, cx| {

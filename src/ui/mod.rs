@@ -53,7 +53,7 @@ use crate::media::Kind;
 use crate::search::folder::{Entry, Sort};
 use crate::search::{self, Hit};
 
-const SIDE_PANE_WIDTH: f32 = 340.;
+const SIDE_PANE_WIDTH: f32 = 390.;
 /// How long a confirmation stays in the header before the result count comes
 /// back. Long enough to read, short enough that it never looks like the state.
 const NOTICE_LIFE: Duration = Duration::from_millis(2200);

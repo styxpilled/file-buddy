@@ -43,7 +43,7 @@ fn main() -> Result<()> {
                 focus: true,
                 window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                     None,
-                    size(px(1280.), px(800.)),
+                    size(px(1335.), px(800.)),
                     cx,
                 ))),
                 // The header is the title bar, with its own window buttons.

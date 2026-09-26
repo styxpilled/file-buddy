@@ -31,7 +31,8 @@ const VOLUME_STEP: f64 = 0.05;
 /// A press on space or on the clip that lasts longer than this plays the clip
 /// fast until the release. A shorter one is a tap, which toggles pause.
 const HOLD_DELAY: Duration = Duration::from_millis(250);
-const HOLD_SPEED: f64 = 2.0;
+/// The speed of a hold, and of the speed button when it is on.
+const FAST: f64 = 2.0;
 
 pub(super) struct Player {
     preview: Option<Preview>,
@@ -52,6 +53,9 @@ pub(super) struct Player {
     /// it, and it never touches a tile.
     pub autoplay: bool,
     pub paused: bool,
+    /// 1x or 2x, from the speed button. Kept across selections, as the sound
+    /// is. A hold plays at 2x whatever it is, and goes back to it.
+    pub speed: f64,
     /// Space or the mouse button, down on the clip.
     press: Option<Press>,
     hold_task: Option<Task<()>>,
@@ -91,6 +95,7 @@ impl Default for Player {
             volume: 0.5,
             autoplay: false,
             paused: true,
+            speed: 1.0,
             press: None,
             hold_task: None,
         }
@@ -114,6 +119,7 @@ impl Player {
     fn apply(&self, video: &Video) {
         video.set_muted(self.muted);
         video.set_volume(self.volume);
+        video.set_speed(self.speed).ok();
         video.set_paused(self.paused);
     }
 
@@ -163,6 +169,25 @@ impl Player {
         format!("{}%", (self.volume * 100.).round() as u32).into()
     }
 
+    /// The speed button: 1x or 2x.
+    pub fn toggle_speed(&mut self) {
+        self.speed = if self.speed == 1.0 { FAST } else { 1.0 };
+        if !self.holding()
+            && let Some(video) = self.video()
+        {
+            video.set_speed(self.speed).ok();
+        }
+    }
+
+    /// The speed the clip plays at now, for the speed button.
+    pub fn speed_label(&self) -> &'static str {
+        if self.holding() || self.speed != 1.0 {
+            "2x"
+        } else {
+            "1x"
+        }
+    }
+
     /// Returns false if a press is already down. Key repeat sends the action
     /// again, and it must not start a second press.
     fn press(&mut self, from: PressFrom) -> bool {
@@ -182,7 +207,7 @@ impl Player {
         press.fast = true;
         if let Some(video) = self.video() {
             video.set_paused(false);
-            video.set_speed(HOLD_SPEED).ok();
+            video.set_speed(FAST).ok();
         }
     }
 
@@ -212,7 +237,7 @@ impl Player {
             return;
         }
         if let Some(video) = self.video() {
-            video.set_speed(1.0).ok();
+            video.set_speed(self.speed).ok();
             video.set_paused(self.paused);
         }
     }
@@ -227,7 +252,6 @@ impl Player {
         self.press.is_some()
     }
 
-    #[cfg(test)]
     fn holding(&self) -> bool {
         self.press.as_ref().is_some_and(|press| press.fast)
     }
@@ -539,5 +563,20 @@ mod tests {
         assert!(player.paused);
         player.release(PressFrom::Key);
         assert!(!player.paused);
+    }
+
+    #[test]
+    fn the_speed_button_shows_the_speed_and_a_hold_goes_back_to_it() {
+        let mut player = player(false);
+        assert_eq!(player.speed_label(), "1x");
+        player.press(PressFrom::Key);
+        player.speed_up();
+        assert_eq!(player.speed_label(), "2x");
+        player.release(PressFrom::Key);
+        assert_eq!(player.speed_label(), "1x");
+        player.toggle_speed();
+        assert_eq!(player.speed_label(), "2x");
+        player.toggle_speed();
+        assert_eq!(player.speed, 1.0);
     }
 }

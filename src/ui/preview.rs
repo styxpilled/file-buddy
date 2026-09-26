@@ -35,6 +35,8 @@ const CHROME_HEIGHT: f32 = 380. + seek_bar::HEIGHT + 8.;
 const DETAIL_HEIGHT: f32 = 200.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
+/// The Play and Pause button, with room for the longer label.
+const PAUSE_WIDTH: f32 = 76.;
 
 const DETAILS: [(Detail, &str); 3] = [
     (Detail::File, "File"),
@@ -405,6 +407,7 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let player = &this.player;
     let playable = player.video().is_some();
     h_flex()
+        .w_full()
         .gap_2()
         .child(
             toggle("preview-autoplay", "Autoplay", player.autoplay)
@@ -418,6 +421,8 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .child(
             Button::new("preview-pause")
                 .small()
+                // As wide as Pause, so the row does not move when it changes.
+                .w(px(PAUSE_WIDTH))
                 .disabled(!playable)
                 .when(playable, |button| button.cursor_pointer())
                 .icon(if player.paused {
@@ -443,12 +448,24 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 })),
         )
         .child(
+            Button::new("preview-speed")
+                .small()
+                .cursor_pointer()
+                .label(player.speed_label())
+                .tooltip("Speed. Hold space or the clip for 2x")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.player.toggle_speed();
+                    cx.notify();
+                })),
+        )
+        .child(
             div()
                 .min_w(px(56.))
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(player.volume_label()),
         )
+        .child(div().flex_1())
         .child(file_menu(this, cx))
         .into_any_element()
 }

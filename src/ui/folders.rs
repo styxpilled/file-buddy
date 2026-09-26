@@ -134,7 +134,7 @@ impl FileBuddy {
     pub(super) fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted: SharedString = match (self.page(), &self.folder) {
             (Page::Folders, None) => "search in directories".into(),
-            (Page::Folders, Some(dir)) => format!("Search in {}", display(dir)).into(),
+            (Page::Folders, Some(dir)) => display(dir).into(),
             _ => BROWSE_PLACEHOLDER.into(),
         };
         if self.placeholder != wanted {

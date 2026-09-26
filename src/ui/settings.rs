@@ -384,7 +384,7 @@ fn weights(settings: &Settings, cx: &App) -> AnyElement {
 fn stages(paused: Paused, cx: &mut Context<FileBuddy>) -> AnyElement {
     section(
         "Paused stages",
-        "A paused stage starts no new job. A job that runs now finishes. This applies at once, without Save.",
+        "A paused stage doesn't start any new jobs.",
         cx,
     )
     .children(

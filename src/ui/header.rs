@@ -1,8 +1,8 @@
 //! The header: the page tabs, what the page puts beside them, the notices and
 //! the window buttons. It is the title bar too: Windows draws none, and a drag
 //! on the header moves the window. Under it, on every page with results, the
-//! bar: the breadcrumb of the Folders page or `All files` on Browse, the sort,
-//! the chips, the view buttons and the count.
+//! bar: the breadcrumb of the Folders page, `All files` on Browse or the groups
+//! of Review, the sort, the chips, the view buttons and the count.
 
 use gpui::prelude::*;
 use gpui::{AnyElement, Context, MouseDownEvent, SharedString, Window, WindowControlArea, div, px};
@@ -54,8 +54,7 @@ pub fn header(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) ->
         .border_color(cx.theme().border)
         .child(div().occlude().child(pages(this, cx)))
         .map(|header| match &this.mode {
-            Mode::Review(state) => header.child(div().occlude().child(review::tabs(state, cx))),
-            Mode::Settings(_) => header,
+            Mode::Review(_) | Mode::Settings(_) => header,
             Mode::Browse | Mode::Folders => header.child(
                 div()
                     .occlude()
@@ -63,7 +62,9 @@ pub fn header(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) ->
                     .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                         this.blur_query(window, cx)
                     }))
-                    .child(Input::new(&this.input)),
+                    // The X at its right clears the query, for a hand that is on the
+                    // mouse only.
+                    .child(Input::new(&this.input).cleanable(true)),
             ),
         })
         .child(div().flex_1())
@@ -184,10 +185,11 @@ pub fn bar(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .py_2()
         .items_center()
         .text_sm()
-        .map(|bar| match this.page() {
-            Page::Folders => bar.child(folders::breadcrumb(this, cx)),
-            Page::Browse => bar.child("All files"),
-            Page::Review | Page::Settings => bar,
+        .map(|bar| match &this.mode {
+            Mode::Folders => bar.child(folders::breadcrumb(this, cx)),
+            Mode::Browse => bar.child("All files"),
+            Mode::Review(state) => bar.child(review::tabs(state, cx)),
+            Mode::Settings(_) => bar,
         })
         .child(div().flex_1())
         .when(matches!(this.page(), Page::Browse | Page::Folders), |bar| {
