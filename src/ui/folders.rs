@@ -78,6 +78,9 @@ impl FileBuddy {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if folder != self.folder {
+            self.record_step(cx);
+        }
         let left = std::mem::replace(&mut self.folder, folder);
         self.end_likes();
         if !self.input.read(cx).value().is_empty() {

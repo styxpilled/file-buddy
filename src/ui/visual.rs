@@ -40,16 +40,36 @@ pub(super) struct Visual {
     likes: Vec<Like>,
 }
 
-/// A search by the look of files, and the results it replaced.
-struct Like {
+impl Visual {
+    /// The searches by look as a history step keeps them.
+    pub(super) fn likes_without_results(&self) -> Vec<Like> {
+        self.likes
+            .iter()
+            .map(|like| Like {
+                label: like.label.clone(),
+                hashes: like.hashes.clone(),
+                text: like.text.clone(),
+                before: None,
+            })
+            .collect()
+    }
+
+    pub(super) fn set_likes(&mut self, likes: Vec<Like>) {
+        self.likes = likes;
+    }
+}
+
+/// A search by the look of files, and the query and results it replaced.
+pub(super) struct Like {
     label: String,
     hashes: Vec<String>,
-    before: Before,
+    text: String,
+    /// `None` in a history step, which keeps only the query.
+    before: Option<Before>,
 }
 
 /// What escape brings back.
 struct Before {
-    text: String,
     results: Vec<Entry>,
     selected: usize,
     marked: HashSet<String>,
@@ -197,8 +217,9 @@ impl FileBuddy {
             })
             .collect();
         let label = like_label(&names);
+        self.record_step(cx);
+        let text = self.input.read(cx).value().to_string();
         let before = Before {
-            text: self.input.read(cx).value().to_string(),
             results: self.results.clone(),
             selected: self.selected,
             marked: self.marked.clone(),
@@ -215,7 +236,8 @@ impl FileBuddy {
         self.visual.likes.push(Like {
             label,
             hashes,
-            before,
+            text,
+            before: Some(before),
         });
         self.run_search(cx);
     }
@@ -280,11 +302,14 @@ impl FileBuddy {
         let Some(like) = self.visual.likes.pop() else {
             return;
         };
-        let before = like.before;
         self.visual.task = None;
         self.input.update(cx, |input, cx| {
-            input.set_value(before.text.clone(), window, cx)
+            input.set_value(like.text.clone(), window, cx)
         });
+        let Some(before) = like.before else {
+            self.run_search(cx);
+            return;
+        };
         self.listing = before.listing;
         self.status = before.status;
         self.read_row_tags();
@@ -302,7 +327,7 @@ impl FileBuddy {
         }
         if self.visual.likes.is_empty() {
             if !before.listing {
-                let request = Request::new(before.text)
+                let request = Request::new(like.text)
                     .kinds(self.kinds.clone())
                     .within(self.scope());
                 self.search_visually(request, text_hits, cx);
@@ -331,7 +356,7 @@ impl FileBuddy {
                 // for no reason the user can see.
                 let untouched = self.selected == 0;
                 self.update_results(results, cx);
-                if untouched && self.selected != 0 {
+                if !self.land_late(cx) && untouched && self.selected != 0 {
                     self.selected = 0;
                     self.scroll.scroll_to_item(0, ScrollStrategy::Top);
                     self.schedule_preview(cx);

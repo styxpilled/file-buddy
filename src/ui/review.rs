@@ -31,8 +31,16 @@ impl FileBuddy {
     }
 
     /// A tab of Review, from a click or `alt-1` to `alt-4`. It opens Review
-    /// when it is closed. With no group it opens on the first that holds a file.
-    pub(super) fn show_group(
+    /// when it is closed.
+    pub(super) fn show_group(&mut self, group: Group, window: &mut Window, cx: &mut Context<Self>) {
+        if self.review().is_none_or(|review| review.group != group) {
+            self.record_step(cx);
+        }
+        self.open_group(Some(group), window, cx);
+    }
+
+    /// With no group, Review opens on the first that holds a file.
+    pub(super) fn open_group(
         &mut self,
         group: Option<Group>,
         window: &mut Window,
@@ -146,9 +154,7 @@ pub fn tabs(review: &Review, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .xsmall()
                 .tooltip(format!("Alt+{}", at + 1))
                 .on_click(
-                    cx.listener(move |this, _, window, cx| {
-                        this.show_group(Some(group), window, cx)
-                    }),
+                    cx.listener(move |this, _, window, cx| this.show_group(group, window, cx)),
                 )
             },
         ))

@@ -97,6 +97,8 @@ Two things follow from that:
                       buttons. It is the title bar. Also the bar over the
                       results: chips, view buttons, count
         grid.rs       the virtual grid of results
+        history.rs    back and forward: the steps, and the state each one
+                      brings back
         tile.rs       one result: thumbnail, hover video, badge, matched text
         table.rs      the table view of Browse, Folders and Review
         preview.rs    the side pane and its three tabs

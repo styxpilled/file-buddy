@@ -64,8 +64,7 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("add_row", Rows, AddRow, ["l"]),
 ];
 
-/// The keys that cannot change, with the action that holds each. The history
-/// keys are held for issue 31.
+/// The keys that cannot change, with the action that holds each.
 const FIXED: &[(&str, &str)] = &[
     ("left", "select_left"),
     ("right", "select_right"),
@@ -114,6 +113,8 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         // list takes the ones the input leaves alone.
         KeyBinding::new("alt-down", NextSuggestion, window),
         KeyBinding::new("alt-up", PreviousSuggestion, window),
+        KeyBinding::new("alt-left", HistoryBack, window),
+        KeyBinding::new("alt-right", HistoryForward, window),
         KeyBinding::new("up", RowUp, rows),
         KeyBinding::new("down", RowDown, rows),
         KeyBinding::new("enter", EditRow, rows),

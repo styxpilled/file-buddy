@@ -1,6 +1,6 @@
 # 31 - Back and forward history
 
-Status: ready-for-agent
+Status: done
 
 Depends on nothing. Read the History section of the v2 spec first. If 22 is
 done, "more like this" is a step too. If not, add it in 22.
@@ -41,3 +41,35 @@ XBUTTON1 and XBUTTON2 to it.
   missing folder.
 
 ## Comments
+
+### Built (2026-09-26)
+
+`src/ui/history.rs` holds the steps. A step saves the page, the folder, the
+query, the searches by look, the Review group, the selected entry and the scroll
+offset. The results come back from a new search, not from memory, so 100 steps
+of Browse with 3,416 files hold no results.
+
+- A step restored into "more like this" keeps the query of each search by look,
+  but not the results it replaced. Escape there runs the search from before
+  again, so its selection starts at the top.
+- If the selected file of a step is a visual match, it is not in the text
+  matches that show first. The selection moves to it when the visual matches
+  merge in.
+- gpui-component binds `alt-left` and `alt-right` in the text input only on
+  macOS, so on Windows they are free everywhere.
+
+Checked in the window with `alt-left` and `alt-right`: Browse to Folders, a
+folder, a query typed there, Backspace, then back three times and forward
+twice. Each step brought back its page, folder, query, selection and scroll.
+Also checked: back from inside the search box, back from a Review group to the
+first group, and back and forward over "more like this". The mouse buttons are
+not checked, because `scripts/drive.ps1` cannot press them.
+
+### Mouse buttons over the header (2026-09-26)
+
+The mouse buttons worked only over the page, not over the header. The header
+parts that take a click use `occlude()`, which also hides them from the root
+element, so a listener on the root never fired. The listener is now a
+window-level `on_mouse_event`, as autoscroll uses. The empty header space is
+still the title bar to Windows, which sends `WM_NCXBUTTONDOWN` there, and
+gpui-windows does not pass that on. Not fixed.

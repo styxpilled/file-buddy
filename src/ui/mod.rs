@@ -6,6 +6,7 @@ mod autoscroll;
 mod folders;
 mod grid;
 mod header;
+mod history;
 mod indexing;
 mod keys;
 mod player;
@@ -36,6 +37,7 @@ use gpui_kit::component::{
     v_flex,
 };
 
+use self::history::Travel;
 use self::indexing::Indexer;
 use self::player::{Player, PressFrom};
 use self::renamer::Renamer;
@@ -108,7 +110,9 @@ gpui_kit::actions!(
         KeyRowDown,
         CaptureKey,
         RemoveKey,
-        ResetKeys
+        ResetKeys,
+        HistoryBack,
+        HistoryForward
     ]
 );
 
@@ -179,6 +183,7 @@ pub struct FileBuddy {
     /// stepping through the results keeps reading the same kind of thing.
     detail: Detail,
     visual: Visual,
+    travel: Travel,
 }
 
 /// The status line for a number of results.
@@ -291,6 +296,7 @@ impl FileBuddy {
             row_tags: HashMap::new(),
             detail: Detail::File,
             visual: Visual::default(),
+            travel: Travel::default(),
         };
         this.run_search(cx);
         this.load_visual(cx);
@@ -313,27 +319,8 @@ impl FileBuddy {
         if page == self.page() {
             return;
         }
-        self.tagger = None;
-        self.renamer = None;
-        window.focus(&self.focus, cx);
-        match page {
-            Page::Browse => {
-                self.mode = Mode::Browse;
-                self.run_search(cx);
-            }
-            Page::Folders => {
-                self.mode = Mode::Folders;
-                self.run_search(cx);
-            }
-            Page::Review => self.show_group(None, window, cx),
-            Page::Settings => {
-                self.mode = Mode::Settings(Box::new(Settings::new(&self.config, window, cx)));
-                self.listing = false;
-                // Nothing plays behind the form, and no key acts on a file that
-                // cannot be seen.
-                self.show_results(Vec::new(), cx);
-            }
-        }
+        self.record_step(cx);
+        self.enter_page(page, None, window, cx);
     }
 
     /// The results of the query, or the contents of the folder on the Folders
@@ -424,6 +411,7 @@ impl FileBuddy {
         // different set of files, so the promise cannot be kept.
         self.marked.clear();
         self.scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.land();
         self.schedule_preview(cx);
         cx.notify();
     }
@@ -824,6 +812,14 @@ impl Render for FileBuddy {
             )
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
             .on_action(
+                cx.listener(|this, _: &HistoryBack, window, cx| this.go_history(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &HistoryForward, window, cx| {
+                    this.go_history(true, window, cx)
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &MoreLikeThis, window, cx| this.more_like_this(window, cx)),
             )
             .on_action(
@@ -859,16 +855,16 @@ impl Render for FileBuddy {
                 this.rescan(cx);
             }))
             .on_action(cx.listener(|this, _: &ReviewDuplicates, window, cx| {
-                this.show_group(Some(Group::Duplicates), window, cx)
+                this.show_group(Group::Duplicates, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ReviewLong, window, cx| {
-                this.show_group(Some(Group::Long), window, cx)
+                this.show_group(Group::Long, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ReviewFailed, window, cx| {
-                this.show_group(Some(Group::Failed), window, cx)
+                this.show_group(Group::Failed, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ReviewPoorNames, window, cx| {
-                this.show_group(Some(Group::PoorNames), window, cx)
+                this.show_group(Group::PoorNames, window, cx)
             }))
             .on_action(cx.listener(|this, _: &NextSuggestion, _, cx| this.move_highlight(true, cx)))
             .on_action(
@@ -899,6 +895,7 @@ impl Render for FileBuddy {
                 ),
             })
             .child(tagger::panel(self, cx))
+            .child(history::mouse_buttons(cx))
     }
 }
 
