@@ -10,7 +10,7 @@ use gpui::{App, Global, KeyBinding, Keystroke};
 use super::*;
 
 /// Where an action works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Scope {
     Window,
     /// The rows of the Speech and Text tabs, while they have the cursor.
@@ -53,6 +53,8 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("tag_files", Window, TagFiles, ["t"]),
     action!("toggle_mark", Window, ToggleMark, ["x"]),
     action!("rename_file", Window, RenameFile, ["r", "ctrl-r", "f2"]),
+    action!("trash_files", Window, TrashFiles, ["delete"]),
+    action!("delete_files", Window, DeleteFiles, ["shift-delete"]),
     action!("review_duplicates", Window, ReviewDuplicates, ["alt-1"]),
     action!("review_long", Window, ReviewLong, ["alt-2"]),
     action!("review_failed", Window, ReviewFailed, ["alt-3"]),
@@ -243,10 +245,12 @@ pub(super) fn resolve(changes: &BTreeMap<String, Vec<String>>) -> Keymap {
         .collect();
 
     // The defaults hold their keys first, so a change that takes a key from
-    // another action is the one that loses it.
+    // another action is the one that loses it. The rows are a context inside
+    // the window, and their keys win there, so a key can have one action in
+    // each.
     let mut order: Vec<usize> = (0..ACTIONS.len()).collect();
     order.sort_by_key(|at| changes.contains_key(ACTIONS[*at].name));
-    let mut holder: HashMap<String, usize> = HashMap::new();
+    let mut holder: HashMap<(Scope, String), usize> = HashMap::new();
     let mut conflicts = Vec::new();
     for at in order {
         let name = ACTIONS[at].name;
@@ -260,14 +264,15 @@ pub(super) fn resolve(changes: &BTreeMap<String, Vec<String>>) -> Keymap {
                 ));
                 return false;
             }
-            if let Some(other) = holder.get(key) {
+            let scope = ACTIONS[at].scope;
+            if let Some(other) = holder.get(&(scope, key.clone())) {
                 conflicts.push(format!(
                     "{key} is on both {} and {name}",
                     ACTIONS[*other].name
                 ));
                 return false;
             }
-            holder.insert(key.clone(), at);
+            holder.insert((scope, key.clone()), at);
             true
         });
     }
@@ -369,6 +374,18 @@ mod tests {
         );
         assert_eq!(keys(&keymap, "toggle_mark"), ["x"]);
         assert_eq!(keys(&keymap, "rename_file"), ["f2"]);
+    }
+
+    #[test]
+    fn the_rows_and_the_window_can_share_a_key() {
+        let keymap = resolve(&BTreeMap::new());
+        assert_eq!(keys(&keymap, "trash_files"), ["delete"]);
+        assert_eq!(keys(&keymap, "delete_row"), ["delete"]);
+        let keymap = resolve(&changes(&[("rescan", &["delete"])]));
+        assert_eq!(
+            keymap.conflicts,
+            ["delete is on both trash_files and rescan"]
+        );
     }
 
     #[test]

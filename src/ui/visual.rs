@@ -72,7 +72,7 @@ pub(super) struct Like {
 struct Before {
     results: Vec<Entry>,
     selected: usize,
-    marked: HashSet<String>,
+    marked: HashSet<i64>,
     listing: bool,
     status: SharedString,
     /// The search for these results had not finished, so they are not all

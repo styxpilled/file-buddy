@@ -3,6 +3,7 @@
 //! functions that draw it.
 
 mod autoscroll;
+mod delete;
 mod folders;
 mod grid;
 mod header;
@@ -50,6 +51,7 @@ use self::tagger::Tagger;
 use self::thumbnails::Thumbnails;
 use self::visual::Visual;
 use crate::actions::clipboard;
+use crate::actions::delete::Mode as DeleteMode;
 use crate::config::Config;
 use crate::db::review::Group;
 use crate::db::{Db, tags};
@@ -114,7 +116,9 @@ gpui_kit::actions!(
         RemoveKey,
         ResetKeys,
         HistoryBack,
-        HistoryForward
+        HistoryForward,
+        TrashFiles,
+        DeleteFiles
     ]
 );
 
@@ -157,9 +161,10 @@ pub struct FileBuddy {
     /// count is the state; this is the answer to the key that was just pressed.
     notice: Option<Notice>,
     notice_task: Option<Task<()>>,
-    /// Files marked for one bulk action, by hash. A hash survives a new search
-    /// and a rename; a grid index survives neither.
-    marked: HashSet<String>,
+    /// Files marked for one bulk action, by row id. An id survives a new search
+    /// and a rename; a grid index survives neither. A hash would mark every
+    /// copy of a duplicate at once.
+    marked: HashSet<i64>,
     tagger: Option<Tagger>,
     renamer: Option<Renamer>,
     /// The cursor on the rows of the Speech or Text tab.
@@ -187,6 +192,8 @@ pub struct FileBuddy {
     visual: Visual,
     travel: Travel,
     thumbnails: Entity<Thumbnails>,
+    /// A delete runs in the shell, and a second one waits until it is done.
+    deleting: bool,
 }
 
 /// The status line for a number of results.
@@ -304,6 +311,7 @@ impl FileBuddy {
             visual: Visual::default(),
             travel: Travel::default(),
             thumbnails,
+            deleting: false,
         };
         this.run_search(cx);
         this.load_visual(cx);
@@ -446,11 +454,11 @@ impl FileBuddy {
                 .zip(results.get(at))
                 .is_some_and(|(was, now)| was.key() == now.key())
         });
-        self.marked.retain(|hash| {
+        self.marked.retain(|id| {
             results
                 .iter()
                 .filter_map(Entry::hit)
-                .any(|hit| hit.file.hash == *hash)
+                .any(|hit| hit.file.id == *id)
         });
 
         // The selection can land on a different file even when the row number
@@ -696,11 +704,19 @@ impl FileBuddy {
 
     /// The files a bulk action works on: everything marked, or the selection
     /// when nothing is marked. Acting on the selection while marks exist would
-    /// be a quiet way to tag the wrong file.
+    /// be a quiet way to tag the wrong file. Tags and looks belong to the bytes,
+    /// so two marked copies of one file are one target.
     fn action_targets(&self) -> Vec<String> {
         if !self.marked.is_empty() {
-            let mut hashes: Vec<String> = self.marked.iter().cloned().collect();
+            let mut hashes: Vec<String> = self
+                .results
+                .iter()
+                .filter_map(Entry::hit)
+                .filter(|hit| self.is_marked(hit))
+                .map(|hit| hit.file.hash.clone())
+                .collect();
             hashes.sort();
+            hashes.dedup();
             return hashes;
         }
         self.selected_hit()
@@ -712,15 +728,15 @@ impl FileBuddy {
         let Some(hit) = self.hit_at(index) else {
             return;
         };
-        let hash = hit.file.hash.clone();
-        if !self.marked.remove(&hash) {
-            self.marked.insert(hash);
+        let id = hit.file.id;
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
         }
         cx.notify();
     }
 
     fn is_marked(&self, hit: &Hit) -> bool {
-        self.marked.contains(&hit.file.hash)
+        self.marked.contains(&hit.file.id)
     }
 }
 
@@ -796,6 +812,14 @@ impl Render for FileBuddy {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
+            .on_action(
+                cx.listener(|this, _: &TrashFiles, _, cx| this.delete_files(DeleteMode::Trash, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &DeleteFiles, _, cx| {
+                    this.delete_files(DeleteMode::Delete, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
             .on_action(cx.listener(|this, _: &GoUp, window, cx| this.go_up(window, cx)))
             .on_action(cx.listener(|this, _: &CycleSort, window, cx| {

@@ -36,6 +36,7 @@ Two things follow from that:
         text.rs       the tokenizer and the text encoder, for search
       actions/        what the user does to a file on disk
         clipboard.rs  the Windows clipboard, which GPUI cannot do
+        delete.rs     to the recycle bin, or for good, through the Windows shell
         rename.rs     a new name on disk and in the index, never over a file
       media/          what a file is
         mod.rs        the three kinds
@@ -113,6 +114,8 @@ Two things follow from that:
         thumbnails.rs the decoded thumbnails, at most 200, the least recently
                       shown dropped first
         renamer.rs    the rename input in the side pane
+        delete.rs     `delete` and `shift-delete` on the marked files or the
+                      selection
         folders.rs    the Folders page: the folder, the breadcrumb, the sort
         review.rs     the Review page, its groups and the rename walk
         settings.rs   the Settings page

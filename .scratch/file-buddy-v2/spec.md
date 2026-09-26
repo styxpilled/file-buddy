@@ -16,6 +16,7 @@ The facts and measurements behind these decisions are in `research.md`.
 - "No semantic or vector search." Lifted. See CLIP.
 - "No moment-level results." Lifted in part. A match opens the clip at its time,
   but a result is still a file. The application does not rank moments.
+- "The application never deletes a file." Lifted. See Delete.
 
 ## Worker processes
 
@@ -199,6 +200,23 @@ through a history, as in a browser.
   memory only. A folder that no longer exists is skipped.
 - Back and forward close an open panel or input and navigate at once.
 
+## Delete
+
+- `delete` moves the file to the recycle bin, with no dialog, as in Explorer.
+  `shift-delete` deletes it for good, after the Windows confirmation dialog.
+- With files marked, both act on every marked result. Otherwise they act on
+  the selection. A mark is on one file, not on every copy of its bytes, so one
+  copy of a duplicate can go.
+- The file menu in the side pane has Trash and Delete, which do the same as the
+  keys.
+- The Windows shell does the work, so its dialogs appear as in Explorer: the
+  permanent delete confirmation, a file in use, a file too large for the
+  recycle bin.
+- A clip that plays a deleted file closes first, because FFmpeg holds the file
+  open.
+- A deleted file leaves the index as a file the watcher finds gone does. Its
+  tags stay with its bytes, in case it comes back.
+
 ## Custom keys
 
 The window keys can change. The keys in the v1 spec are the defaults.
@@ -238,7 +256,10 @@ The keys inside the text inputs belong to gpui-component and do not change.
   takes a letter the user types. `shift` alone does not count, because `shift-a`
   types `A`. The user never sees GPUI contexts.
 - **Conflicts.** Two actions on one key, or a key that a fixed action holds,
-  stop the save. The error names both actions.
+  stop the save. The error names both actions. The rows of the Speech and Text
+  tabs are a context inside the window, and their keys win there, so a key can
+  have one action in each: `delete` trashes a file, and deletes a row while the
+  rows have the cursor.
 - **No key sequences.** Only single keys with modifiers.
 - **Settings.** A Keys section lists each action that can change, with its
   keys. Up or down on the page, outside a field, goes into the list. Enter
@@ -323,3 +344,4 @@ Issues continue from v1, in `issues/`:
 | 29 | Preview seek bar, skip and click to pause. Build it before 23, which needs accurate seeks |
 | 30 | Hold for 2x speed |
 | 31 | Back and forward history |
+| 34 | Delete to the recycle bin, or for good |

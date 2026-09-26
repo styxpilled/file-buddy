@@ -160,12 +160,9 @@ impl Player {
         }
     }
 
-    /// The level as the header shows it. A muted clip says so, because the
-    /// number alone would not explain the silence.
+    /// The level as the pane shows it. The pane strikes it through while the
+    /// clip is muted, because the number alone would not explain the silence.
     pub fn volume_label(&self) -> SharedString {
-        if self.muted {
-            return "muted".into();
-        }
         format!("{}%", (self.volume * 100.).round() as u32).into()
     }
 

@@ -7,10 +7,11 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Div, MouseButton, ScrollDelta, ScrollWheelEvent,
     SharedString, Stateful, Window, div, img, px,
 };
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
-use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
 use crate::db::edits::{self, Row, Table};
@@ -25,8 +26,8 @@ use crate::search::folder::Entry;
 use crate::ui::player::PressFrom;
 use crate::ui::rows::{RowInput, Target};
 use crate::ui::{
-    CopyFile, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH, renamer,
-    seek_bar, toggle,
+    CopyFile, DeleteFiles, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH,
+    TrashFiles, renamer, seek_bar, toggle,
 };
 
 /// What the pane holds besides the stage: the controls above it, and the seek
@@ -37,6 +38,10 @@ const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
 /// The Play and Pause button, with room for the longer label.
 const PAUSE_WIDTH: f32 = 76.;
+/// The Mute and Unmute button, with room for the longer label.
+const MUTE_WIDTH: f32 = 70.;
+/// The volume beside the buttons, with room for "100%".
+const VOLUME_WIDTH: f32 = 36.;
 
 const DETAILS: [(Detail, &str); 3] = [
     (Detail::File, "File"),
@@ -444,6 +449,8 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .child(
             Button::new("preview-mute")
                 .small()
+                // As wide as Unmute, so the row does not move when it changes.
+                .w(px(MUTE_WIDTH))
                 .disabled(!playable)
                 .when(playable, |button| button.cursor_pointer())
                 .label(if player.muted { "Unmute" } else { "Mute" })
@@ -457,7 +464,7 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .small()
                 .cursor_pointer()
                 .label(player.speed_label())
-                .tooltip("Speed. Hold space or the clip for 2x")
+                .tooltip("Hold space for 2x")
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.player.toggle_speed();
                     cx.notify();
@@ -465,9 +472,11 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         )
         .child(
             div()
-                .min_w(px(56.))
+                .w(px(VOLUME_WIDTH))
+                .flex_none()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
+                .when(player.muted, |volume| volume.line_through())
                 .child(player.volume_label()),
         )
         .child(div().flex_1())
@@ -475,8 +484,8 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .into_any_element()
 }
 
-/// Copy, reveal, rename and open. Each item dispatches the same action as its
-/// key, to the window, so the menu shows the key beside it.
+/// Copy, reveal, rename, open, trash and delete. Each item dispatches the same
+/// action as its key, to the window, so the menu shows the key beside it.
 fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let focus = this.focus.clone();
     let view = cx.entity().downgrade();
@@ -487,10 +496,21 @@ fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .cursor_pointer()
         .dropdown_menu(move |menu, _, _| {
             menu.action_context(focus.clone())
-                .menu_with_icon("Copy", IconName::Copy, Box::new(CopyFile))
-                .menu_with_icon("Reveal", IconName::FolderOpen, Box::new(RevealFile))
-                .menu_with_icon("Rename", IconName::Replace, Box::new(RenameFile))
-                .menu_with_icon("Open", IconName::ExternalLink, Box::new(OpenFile))
+                .menu_with_icon("Copy", menu_icon(IconName::Copy), Box::new(CopyFile))
+                .menu_with_icon(
+                    "Reveal",
+                    menu_icon(IconName::FolderOpen),
+                    Box::new(RevealFile),
+                )
+                .menu_with_icon("Rename", menu_icon(IconName::Replace), Box::new(RenameFile))
+                .menu_with_icon(
+                    "Open",
+                    menu_icon(IconName::ExternalLink),
+                    Box::new(OpenFile),
+                )
+                .separator()
+                .menu_with_icon("Trash", menu_icon(Lucide::Trash), Box::new(TrashFiles))
+                .menu_with_icon("Delete", menu_icon(Lucide::Shredder), Box::new(DeleteFiles))
         })
         // The window takes focus back on every frame, which would close the
         // menu the moment it opened.
@@ -498,6 +518,12 @@ fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             view.update(cx, |this, _| this.menu_open = *open).ok();
         })
         .into_any_element()
+}
+
+/// The menu puts 4 px between an icon and its label, and cannot be told
+/// otherwise, so the icon carries one more.
+fn menu_icon(name: impl Into<Icon>) -> Icon {
+    name.into().mr(px(1.))
 }
 
 fn facts(hit: &Hit, cx: &App) -> AnyElement {

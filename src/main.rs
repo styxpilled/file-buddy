@@ -9,9 +9,9 @@ use file_buddy::config::Config;
 use file_buddy::db::Db;
 use file_buddy::paths;
 use file_buddy::ui::{self, FileBuddy};
-use gpui::{App, WindowOptions, px, size};
+use gpui::{App, AssetSource, SharedString, WindowOptions, px, size};
 use gpui::{TitlebarOptions, prelude::*};
-use gpui_kit::assets::Assets;
+use gpui_kit::assets::{Assets, icon_assets};
 use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
@@ -24,6 +24,28 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 /// `run`, so quitting drops it too.
 #[cfg(feature = "dhat-heap")]
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
+
+// The icons beyond the ones gpui-kit embeds for its components.
+icon_assets!(ExtraIcons, [Trash, Shredder]);
+
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        let mut paths = Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
 
 fn main() -> Result<()> {
     #[cfg(feature = "dhat-heap")]
@@ -43,7 +65,7 @@ fn main() -> Result<()> {
     Db::open(&db_path)?;
 
     gpui_kit::application()
-        .with_assets(Assets)
+        .with_assets(AppAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             #[cfg(feature = "dhat-heap")]
