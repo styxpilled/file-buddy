@@ -345,10 +345,11 @@ impl FileBuddy {
             cx.background_executor().timer(PREVIEW_DELAY).await;
             let opened = this
                 .update(cx, |this, _| {
-                    open_video(&path, PREVIEW_BUFFER).inspect(|video| {
-                        this.player.apply(video);
-                        open_at(video, moment);
-                    })
+                    this.open_clip(&path, &hash, PREVIEW_BUFFER)
+                        .inspect(|video| {
+                            this.player.apply(video);
+                            open_at(video, moment);
+                        })
                 })
                 .ok()
                 .flatten();
@@ -409,6 +410,7 @@ impl FileBuddy {
             return;
         }
         let path = hit.file.path.clone();
+        let hash = hit.file.hash.clone();
         self.player.preload_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(PRELOAD_DELAY).await;
             this.update(cx, |this, _| {
@@ -416,7 +418,7 @@ impl FileBuddy {
                 if this.next_index() != Some(index) {
                     return;
                 }
-                this.player.preloaded = open_video(&path, PRELOAD_BUFFER).map(|video| {
+                this.player.preloaded = this.open_clip(&path, &hash, PRELOAD_BUFFER).map(|video| {
                     video.set_muted(true);
                     video.set_paused(true);
                     (index, video)
@@ -447,13 +449,23 @@ impl FileBuddy {
         // A still image does not react to hover. A tile is always silent.
         self.player.hovered = match hit.file.kind {
             Kind::Still => None,
-            _ => open_video(&hit.file.path, PREVIEW_BUFFER).map(|video| {
-                video.set_muted(true);
-                video.set_paused(false);
-                (index, video)
-            }),
+            _ => self
+                .open_clip(&hit.file.path, &hit.file.hash, PREVIEW_BUFFER)
+                .map(|video| {
+                    video.set_muted(true);
+                    video.set_paused(false);
+                    (index, video)
+                }),
         };
         cx.notify();
+    }
+
+    /// A clip of `path`, unless a delete has its bytes in the shell.
+    fn open_clip(&self, path: &Path, hash: &str, buffer: usize) -> Option<Video> {
+        if self.deleting.iter().any(|deleting| deleting == hash) {
+            return None;
+        }
+        open_video(path, buffer)
     }
 
     /// Close every clip that has these bytes open. FFmpeg opens a file without

@@ -29,13 +29,16 @@ impl FileBuddy {
     }
 
     pub(super) fn delete_files(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        if self.deleting {
+        if !self.deleting.is_empty() {
             return;
         }
         let targets = self.delete_targets();
         if targets.is_empty() {
             return;
         }
+        // The pointer can rest on a tile, and a hover opens the clip again the
+        // moment it closes, so the gate goes up first.
+        self.deleting = targets.iter().map(|file| file.hash.clone()).collect();
         for file in &targets {
             self.release_videos(&file.hash);
         }
@@ -44,7 +47,6 @@ impl FileBuddy {
         // it is the one in front.
         let owner = unsafe { GetForegroundWindow() }.0 as isize;
         let paths = targets.iter().map(|file| file.path.clone()).collect();
-        self.deleting = true;
         let work = cx.background_spawn(async move { delete::delete(paths, mode, owner) });
         cx.spawn(async move |this, cx| {
             let result = work.await;
@@ -65,7 +67,7 @@ impl FileBuddy {
         result: anyhow::Result<()>,
         cx: &mut Context<Self>,
     ) {
-        self.deleting = false;
+        self.deleting.clear();
         let gone: Vec<&FileRow> = targets.iter().filter(|file| !file.path.exists()).collect();
         for file in &gone {
             if let Err(e) = files::mark_gone(self.db.conn(), file.id) {

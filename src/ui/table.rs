@@ -13,13 +13,13 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 use super::{autoscroll, tile};
 use crate::db::files::{FileRow, State};
 use crate::media;
-use crate::search::folder::Entry;
+use crate::search::folder::{Entry, Stray};
 use crate::ui::FileBuddy;
 
 const ROW_HEIGHT: f32 = 26.;
 /// Kind, length, size, modified and tags, or in Review why the file is there.
 /// The name takes what is left.
-const WIDTHS: [f32; 5] = [110., 56., 72., 120., 150.];
+const WIDTHS: [f32; 5] = [56., 56., 72., 120., 150.];
 
 pub fn table(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     let sizes = Rc::new(vec![
@@ -83,7 +83,7 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
         ),
         Entry::File(hit) if hit.file.state == State::Pending => (
             text(&hit.file.filename, theme.warning).into_any_element(),
-            text("not probed yet", theme.warning),
+            text("pending", theme.warning),
         ),
         Entry::File(hit) => (
             text(&hit.file.filename, theme.foreground).into_any_element(),
@@ -93,7 +93,7 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
             let color = tile::stray_color(*why, cx);
             (
                 text(&FileRow::name_of(path), color).into_any_element(),
-                text(why.as_str(), color),
+                text(stray_label(*why), color),
             )
         }
     };
@@ -150,6 +150,16 @@ fn line(name: impl IntoElement, rest: [Div; 5]) -> Div {
                 .zip(WIDTHS)
                 .map(|(cell, width)| cell.flex_none().w(px(width))),
         )
+}
+
+/// The kind column is narrow, so it says in one word what a tile says in a
+/// phrase.
+fn stray_label(why: Stray) -> &'static str {
+    match why {
+        Stray::Unindexed => "unindexed",
+        Stray::Ignored => "ignored",
+        Stray::Unmatched => "not media",
+    }
 }
 
 fn text(text: &str, color: Hsla) -> Div {

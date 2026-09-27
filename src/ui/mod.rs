@@ -192,8 +192,9 @@ pub struct FileBuddy {
     visual: Visual,
     travel: Travel,
     thumbnails: Entity<Thumbnails>,
-    /// A delete runs in the shell, and a second one waits until it is done.
-    deleting: bool,
+    /// The bytes of the files a delete has in the shell. No clip opens them
+    /// until it is done, and a second delete waits.
+    deleting: Vec<String>,
 }
 
 /// The status line for a number of results.
@@ -222,11 +223,10 @@ enum Page {
     Settings,
 }
 
-/// What the side pane shows under the clip: the facts of the file, the speech
-/// the transcriber heard, or the text the recognizer read.
+/// What the side pane shows under the name: the speech the transcriber heard,
+/// or the text the recognizer read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Detail {
-    File,
     Speech,
     Text,
 }
@@ -235,9 +235,8 @@ impl Detail {
     /// `i`.
     fn next(self) -> Self {
         match self {
-            Detail::File => Detail::Speech,
             Detail::Speech => Detail::Text,
-            Detail::Text => Detail::File,
+            Detail::Text => Detail::Speech,
         }
     }
 }
@@ -307,11 +306,11 @@ impl FileBuddy {
             browse_sort: Sort::Recent,
             table: false,
             row_tags: HashMap::new(),
-            detail: Detail::File,
+            detail: Detail::Speech,
             visual: Visual::default(),
             travel: Travel::default(),
             thumbnails,
-            deleting: false,
+            deleting: Vec::new(),
         };
         this.run_search(cx);
         this.load_visual(cx);
@@ -336,6 +335,21 @@ impl FileBuddy {
         }
         self.record_step(cx);
         self.enter_page(page, None, window, cx);
+    }
+
+    /// A click on a tag: the files with that tag, on the Browse page. The
+    /// search splits on spaces, so each word of the tag gets its own `tag:`.
+    fn search_tag(&mut self, tag: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let query = tag
+            .split_whitespace()
+            .map(|word| format!("tag:{word}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.record_step(cx);
+        self.end_likes();
+        self.input
+            .update(cx, |input, cx| input.set_value(query, window, cx));
+        self.enter_page(Page::Browse, None, window, cx);
     }
 
     /// The results of the query, or the contents of the folder on the Folders
@@ -907,24 +921,27 @@ impl Render for FileBuddy {
             .child(header::header(self, window, cx))
             .map(|page| match self.settings() {
                 Some(_) => page.child(settings::page(self, cx)),
-                None => page.child(
-                    h_resizable("panes")
-                        .with_state(&self.panes)
-                        .child(
-                            resizable_panel().size(px(width)).child(
-                                v_flex()
-                                    .size_full()
-                                    .child(header::bar(self, cx))
-                                    .child(div().flex_1().min_h_0().child(grid::grid(self, cx))),
-                            ),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(SIDE_PANE_WIDTH))
-                                .size_range(px(260.)..px(900.))
-                                .child(preview::pane(self, window, cx)),
+                // The group is as tall as its parent, so it gets a parent of
+                // the height under the header, or it runs past the window.
+                None => {
+                    page.child(
+                        div().flex_1().min_h_0().child(
+                            h_resizable("panes")
+                                .with_state(&self.panes)
+                                .child(resizable_panel().size(px(width)).child(
+                                    v_flex().size_full().child(header::bar(self, cx)).child(
+                                        div().flex_1().min_h_0().child(grid::grid(self, cx)),
+                                    ),
+                                ))
+                                .child(
+                                    resizable_panel()
+                                        .size(px(SIDE_PANE_WIDTH))
+                                        .size_range(px(260.)..px(900.))
+                                        .child(preview::pane(self, window, cx)),
+                                ),
                         ),
-                ),
+                    )
+                }
             })
             .child(tagger::panel(self, cx))
             .child(history::mouse_buttons(cx))

@@ -41,26 +41,23 @@ pub(super) enum Target {
 }
 
 /// The table a tab edits.
-pub(super) fn table_of(detail: Detail) -> Option<Table> {
+pub(super) fn table_of(detail: Detail) -> Table {
     match detail {
-        Detail::File => None,
-        Detail::Speech => Some(Table::Segments),
-        Detail::Text => Some(Table::Ocr),
+        Detail::Speech => Table::Segments,
+        Detail::Text => Table::Ocr,
     }
 }
 
 impl FileBuddy {
-    /// `e`, or a double click on a row with its index. The cursor starts on the
-    /// row that the clip is at.
+    /// `e`, or a click on a row with its index. The cursor starts on the row
+    /// that the clip is at.
     pub(super) fn edit_rows(
         &mut self,
         at: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(table) = table_of(self.detail) else {
-            return;
-        };
+        let table = table_of(self.detail);
         let Some(hit) = self.selected_hit() else {
             return;
         };
@@ -294,7 +291,7 @@ impl FileBuddy {
             .selected_hit()
             .is_some_and(|hit| hit.file.hash == editor.hash);
         if !same_file
-            || table_of(self.detail) != Some(editor.table)
+            || table_of(self.detail) != editor.table
             || self.tagger.is_some()
             || self.renamer.is_some()
         {

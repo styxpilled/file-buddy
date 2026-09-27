@@ -14,7 +14,7 @@ use crate::actions::rename;
 use crate::db::files::FileRow;
 use crate::search::Hit;
 use crate::search::folder::Entry;
-use crate::ui::{Detail, FileBuddy};
+use crate::ui::FileBuddy;
 
 /// A decoder closes its file on its own thread, a moment after the clip is
 /// dropped, and the rename fails until it has. `RENAME_TRIES * RENAME_RETRY`
@@ -48,8 +48,6 @@ impl FileBuddy {
         }
         let file = hit.file.clone();
         self.tagger = None;
-        // The input takes the place of the name, which only the File tab shows.
-        self.detail = Detail::File;
 
         let input =
             cx.new(|cx| InputState::new(window, cx).default_value(rename::stem(&file.path)));
@@ -212,22 +210,15 @@ impl FileBuddy {
     }
 }
 
-/// The name line of the side pane: the input when this file is being renamed,
-/// the plain name otherwise.
-pub fn name_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
-    let Some(renamer) = this
+/// The input that takes the place of the name in the side pane, while this
+/// file is being renamed.
+pub fn name_input(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> Option<AnyElement> {
+    let renamer = this
         .renamer
         .as_ref()
-        .filter(|renamer| renamer.file.id == hit.file.id)
-    else {
-        return div()
-            .w_full()
-            .text_sm()
-            .child(hit.file.filename.clone())
-            .into_any_element();
-    };
+        .filter(|renamer| renamer.file.id == hit.file.id)?;
 
-    h_flex()
+    let line = h_flex()
         .w_full()
         .gap_1()
         .items_center()
@@ -237,6 +228,6 @@ pub fn name_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> An
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(renamer.extension.clone()),
-        )
-        .into_any_element()
+        );
+    Some(line.into_any_element())
 }

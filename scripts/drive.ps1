@@ -19,6 +19,7 @@
 #                            sees the moves between
 #   up                       release the left button
 #   mclick:<x>,<y>           click the middle button at a point
+#   rclick:<x>,<y>           click the right button at a point
 #   mdown:<x>,<y>            press the middle button at a point
 #   mup                      release the middle button
 #   scroll:<x>,<y>,<notches> turn the wheel over a point inside the window.
@@ -92,7 +93,8 @@ function Get-MainWindow([string]$name) {
     return $process.MainWindowHandle
 }
 
-# The flags of the left button. The middle button is 0x0020 and 0x0040.
+# The flags of the left button. The middle button is 0x0020 and 0x0040, and the
+# right button 0x0008 and 0x0010.
 function Click-InWindow([IntPtr]$hwnd, [int]$x, [int]$y, [int]$count = 1, [uint32]$down = 0x0002, [uint32]$up = 0x0004) {
     $rect = New-Object Drive.Win+RECT
     [Drive.Win]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
@@ -215,6 +217,11 @@ try {
             'mclick' {
                 $x, $y = $value -split ',', 2
                 Click-InWindow $application ([int]$x) ([int]$y) 1 0x0020 0x0040
+                Start-Sleep -Milliseconds $SettleMs
+            }
+            'rclick' {
+                $x, $y = $value -split ',', 2
+                Click-InWindow $application ([int]$x) ([int]$y) 1 0x0008 0x0010
                 Start-Sleep -Milliseconds $SettleMs
             }
             { $_ -in 'down', 'mdown' } {

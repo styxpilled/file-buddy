@@ -195,6 +195,28 @@ impl FileBuddy {
         self.after_tag_change(window, cx);
     }
 
+    /// A right click on a tag in the side pane takes it off the selection.
+    pub(super) fn untag_selection(&mut self, name: String, cx: &mut Context<Self>) {
+        let Some(hit) = self.selected_hit() else {
+            return;
+        };
+        let hashes = vec![hit.file.hash.clone()];
+        if let Err(e) = tags::detach(self.db.conn_mut(), &hashes, &name) {
+            log::error!("untagging failed: {e:#}");
+            self.flash(format!("untagging failed: {e}"), true, cx);
+            return;
+        }
+        self.flash(format!("took {name} off {}", counted(1)), false, cx);
+        if let Some(targets) = self.tagger.as_ref().map(|tagger| tagger.targets.clone()) {
+            let current = self.common_tags(&targets);
+            if let Some(tagger) = &mut self.tagger {
+                tagger.current = current;
+            }
+        }
+        self.rerun_search(cx);
+        cx.notify();
+    }
+
     /// The index changed under the results, so run the query again. The panel
     /// keeps its targets and empties its box for the next tag.
     fn after_tag_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {

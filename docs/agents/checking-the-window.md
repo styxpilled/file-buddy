@@ -12,7 +12,7 @@ as one string.
 
 It prints the path of each picture. Steps run in order: `keys:<SendKeys>`,
 `click:<x>,<y>`, `dblclick:<x>,<y>`, `down:<x>,<y>`, `move:<x>,<y>`, `up`,
-`mclick:<x>,<y>`, `mdown:<x>,<y>`, `mup`, `kdown:<vk>`, `kup:<vk>`,
+`mclick:<x>,<y>`, `rclick:<x>,<y>`, `mdown:<x>,<y>`, `mup`, `kdown:<vk>`, `kup:<vk>`,
 `scroll:<x>,<y>,<notches>`,
 `hover:<x>,<y>`, `shot:<name>`, `wait:<milliseconds>`. `hover` prints the cursor
 the window shows at that point, `hand`, `arrow`, `updown` or `other`, because a picture

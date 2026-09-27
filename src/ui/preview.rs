@@ -1,16 +1,17 @@
 //! The side pane. It plays the selection whole, with sound if the user asks for
-//! it, and shows what the index knows under three tabs: the facts of the file,
-//! the speech that was heard and the text that was read.
+//! it, and shows what the index knows: the facts and the tags of the file, and
+//! under two tabs the speech that was heard and the text that was read.
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, MouseButton, ScrollDelta, ScrollWheelEvent,
-    SharedString, Stateful, Window, div, img, px,
+    AnyElement, App, ClickEvent, Context, Div, MouseButton, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Stateful, Window, div, img, px, relative,
 };
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
@@ -30,12 +31,22 @@ use crate::ui::{
     TrashFiles, renamer, seek_bar, toggle,
 };
 
-/// What the pane holds besides the stage: the controls above it, and the seek
-/// bar, the tabs and the panel below. The stage gets the rest.
+/// What the pane keeps for the controls above the stage, and the seek bar, the
+/// tabs, the name and the panel below it. The stage gets the rest, and the
+/// panel gets what the stage leaves.
 const CHROME_HEIGHT: f32 = 380. + seek_bar::HEIGHT + 8.;
-const DETAIL_HEIGHT: f32 = 200.;
 const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
+/// Tighter than the default, so a name on two lines reads as one.
+const NAME_LINE_HEIGHT: f32 = 1.4;
+/// A tag on the name line. The button after the tags is 1 px taller at the top
+/// and at the bottom.
+const TAG_HEIGHT: f32 = 16.;
+/// How far the highlight of the row under the cursor reaches past its text.
+/// The panel reaches as far past the pane, so the highlight is not cut off.
+const ROW_INSET: f32 = 4.;
+/// The time in front of a row, with room for "10:00".
+const TIME_WIDTH: f32 = 36.;
 /// The Play and Pause button, with room for the longer label.
 const PAUSE_WIDTH: f32 = 76.;
 /// The Mute and Unmute button, with room for the longer label.
@@ -43,13 +54,9 @@ const MUTE_WIDTH: f32 = 70.;
 /// The volume beside the buttons, with room for "100%".
 const VOLUME_WIDTH: f32 = 36.;
 
-const DETAILS: [(Detail, &str); 3] = [
-    (Detail::File, "File"),
-    (Detail::Speech, "Speech"),
-    (Detail::Text, "Text"),
-];
+const DETAILS: [(Detail, &str); 2] = [(Detail::Speech, "Speech"), (Detail::Text, "Text")];
 
-pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> AnyElement {
+pub fn pane(this: &FileBuddy, window: &mut Window, cx: &mut Context<FileBuddy>) -> AnyElement {
     let Some(hit) = this.selected_hit() else {
         let text = match this.results.get(this.selected) {
             Some(Entry::Folder(_)) => "A folder. Enter opens it.".to_string(),
@@ -81,18 +88,31 @@ pub fn pane(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) -> A
         .child(controls(this, cx))
         .child(stage(this, hit, width, height, cx))
         .child(seek_bar::bar(this, width, cx))
-        .child(tabs(this, cx))
+        .child(tabs(this, hit, cx))
+        .child(name_and_tags(this, hit, cx))
+        .children(review_line(this, hit, cx))
+        .child(
+            div()
+                .w_full()
+                .h_px()
+                .flex_shrink_0()
+                .my(px(-2.))
+                // increased margin so it looks good outside of review mode
+                .when(this.review().is_none(), |bar| bar.mt(px(4.)))
+                .bg(cx.theme().border),
+        )
         .child(match this.detail {
-            Detail::File => file_details(this, hit, cx),
-            Detail::Speech => transcript(this, hit, cx),
-            Detail::Text => screen_text(this, hit, cx),
+            Detail::Speech => transcript(this, hit, window, cx),
+            Detail::Text => screen_text(this, hit, window, cx),
         })
         .into_any_element()
 }
 
-/// The three tabs under the clip. `i` cycles them.
-fn tabs(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
+/// The two tabs under the clip, and the facts of the file beside them. `i`
+/// switches the tab.
+fn tabs(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
+        .w_full()
         .gap_1()
         .children(DETAILS.map(|(detail, label)| {
             toggle(label, label, detail == this.detail)
@@ -102,55 +122,123 @@ fn tabs(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                     cx.notify();
                 }))
         }))
+        .child(
+            div()
+                .ml_2()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(facts_text(&hit.file)),
+        )
         .into_any_element()
 }
 
-/// The box a tab fills. Fixed height, so the stage above it never moves, and
-/// keyed by the tab and the file, so new contents start at the top.
-fn panel(this: &FileBuddy, hit: &Hit, cx: &App) -> Stateful<Div> {
-    div()
-        .id(SharedString::from(format!(
-            "detail-{:?}-{}",
-            this.detail, hit.file.hash
-        )))
-        .w_full()
-        .h(px(DETAIL_HEIGHT))
-        .flex_shrink_0()
-        .overflow_y_scroll()
-        .p_2()
-        .rounded(px(4.))
-        .bg(cx.theme().secondary)
-        .text_sm()
+/// The box a tab fills: as tall as its contents, up to the room the stage
+/// leaves, and scrolled past that. The stage above it never moves. Keyed by the
+/// tab and the file, so new contents start at the top.
+fn panel(
+    this: &FileBuddy,
+    hit: &Hit,
+    scroll: Option<&ScrollHandle>,
+    content: Stateful<Div>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let id = SharedString::from(format!("detail-{:?}-{}", this.detail, hit.file.hash));
+    let scroll = match scroll {
+        Some(scroll) => scroll.clone(),
+        None => window
+            .use_keyed_state(id.clone(), cx, |_, _| ScrollHandle::new())
+            .read(cx)
+            .clone(),
+    };
+    v_flex()
+        .relative()
+        .mx(px(-ROW_INSET))
+        .flex_initial()
+        .min_h_0()
+        .child(
+            content
+                .id(id)
+                .track_scroll(&scroll)
+                .w_full()
+                .flex_initial()
+                .min_h_0()
+                .overflow_y_scroll()
+                .pl(px(ROW_INSET))
+                // Room for the scrollbar, which lies over the contents.
+                .pr(px(12. + ROW_INSET))
+                .text_sm(),
+        )
+        .vertical_scrollbar(&scroll)
+        .into_any_element()
 }
 
 /// What a tab says when it has nothing to show.
-fn note(this: &FileBuddy, hit: &Hit, text: String, cx: &App) -> AnyElement {
-    panel(this, hit, cx)
+fn note(
+    this: &FileBuddy,
+    hit: &Hit,
+    text: String,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let content = div()
+        .id("note")
         .text_color(cx.theme().muted_foreground)
-        .child(text)
-        .into_any_element()
+        .child(text);
+    panel(this, hit, None, content, window, cx)
 }
 
-/// The name, the facts and the tags of the file. The name is an input while
-/// this file is being renamed.
-fn file_details(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
-    panel(this, hit, cx)
-        .child(
-            v_flex()
-                .w_full()
-                .gap_2()
-                .child(renamer::name_line(this, hit, cx))
-                .child(facts(hit, cx))
-                .child(review_line(this, hit, cx))
-                .child(tag_line(this, hit, cx)),
+/// The name of the file with its tags after it, on the same line as long as
+/// they fit. The name is an input while this file is being renamed.
+fn name_and_tags(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let line = h_flex()
+        .w_full()
+        .flex_wrap()
+        .items_center()
+        .gap_y_1()
+        .line_height(relative(NAME_LINE_HEIGHT));
+    let line = if let Some(input) = renamer::name_input(this, hit, cx) {
+        line.child(input)
+    } else {
+        // One piece per word, so the tags follow the last line of a long name
+        // instead of starting a line of their own.
+        line.children(
+            name_pieces(&hit.file.filename)
+                .into_iter()
+                .map(|piece| div().min_w_0().text_sm().child(piece)),
         )
-        .into_any_element()
+    };
+    line.children(tag_line(this, hit, cx)).into_any_element()
+}
+
+/// The name split after each space, `_`, `-` and `.`, where a line may break.
+fn name_pieces(name: &str) -> Vec<String> {
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
+    for c in name.chars() {
+        piece.push(c);
+        if matches!(c, ' ' | '_' | '-' | '.') {
+            pieces.push(std::mem::take(&mut piece));
+        }
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
 }
 
 /// What the recognizer read, line by line, with the time of the first frame
 /// that shows it. A line the index leaves out is struck through, so the pane
 /// shows what was found and what can be searched.
-fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+fn screen_text(
+    this: &FileBuddy,
+    hit: &Hit,
+    window: &mut Window,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
     let conn = this.db.conn();
     let lines = edits::rows(conn, Table::Ocr, &hit.file.hash).unwrap_or_default();
     if lines.is_empty() && !editing(this, hit, Table::Ocr) {
@@ -163,13 +251,18 @@ fn screen_text(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyE
             },
             _ => "Not read yet".to_string(),
         };
-        return note(this, hit, text, cx);
+        return note(this, hit, text, window, cx);
     }
-    row_list(this, hit, Table::Ocr, lines, cx)
+    row_list(this, hit, Table::Ocr, lines, window, cx)
 }
 
 /// The speech of the file, one segment per line. Without segments it says why.
-fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+fn transcript(
+    this: &FileBuddy,
+    hit: &Hit,
+    window: &mut Window,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
     let conn = this.db.conn();
     let lines = edits::rows(conn, Table::Segments, &hit.file.hash).unwrap_or_default();
     if lines.is_empty() && !editing(this, hit, Table::Segments) {
@@ -182,9 +275,9 @@ fn transcript(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyEl
             },
             _ => "No transcript for this kind of file".to_string(),
         };
-        return note(this, hit, text, cx);
+        return note(this, hit, text, window, cx);
     }
-    row_list(this, hit, Table::Segments, lines, cx)
+    row_list(this, hit, Table::Segments, lines, window, cx)
 }
 
 /// The row cursor is on this tab of this file.
@@ -195,12 +288,13 @@ fn editing(this: &FileBuddy, hit: &Hit, table: Table) -> bool {
 }
 
 /// The rows of a tab, with the cursor and the input while they are edited. A
-/// double click on a row edits it.
+/// click on a row puts the cursor on it, and a double click edits it.
 fn row_list(
     this: &FileBuddy,
     hit: &Hit,
     table: Table,
     rows: Vec<Row>,
+    window: &mut Window,
     cx: &mut Context<FileBuddy>,
 ) -> AnyElement {
     let editor = this.rows.as_ref().filter(|_| editing(this, hit, table));
@@ -217,7 +311,8 @@ fn row_list(
     let mut children = Vec::new();
     for (at, row) in rows.into_iter().enumerate() {
         let current = cursor == Some(at);
-        let text = match input.filter(|input| current && matches!(input.target, Target::Edit(_))) {
+        let editing = input.filter(|input| current && matches!(input.target, Target::Edit(_)));
+        let text = match editing {
             Some(input) => div().child(Input::new(&input.state).xsmall()),
             None => {
                 let dropped = table == Table::Ocr && !ocr_rows::indexed(&row.text, row.edited);
@@ -228,14 +323,17 @@ fn row_list(
                     .child(row.text)
             }
         };
-        let text = text.id(("row-text", at)).on_click(cx.listener(
-            move |this, event: &ClickEvent, window, cx| {
+        // The input of the row being edited takes its own clicks: a double
+        // click there selects a word, not the whole row again.
+        let text = text.id(("row-text", at)).when(editing.is_none(), |text| {
+            text.on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.close_row_input(window, cx);
+                this.edit_rows(Some(at), window, cx);
                 if event.click_count() == 2 {
-                    this.edit_rows(Some(at), window, cx);
                     this.edit_row(window, cx);
                 }
-            },
-        ));
+            }))
+        });
         children.push(timed_row(
             this,
             hit,
@@ -253,15 +351,14 @@ fn row_list(
         children.push(add_line(this, hit, input, time, cx));
     }
 
-    panel(this, hit, cx)
-        .when_some(editor, |panel, editor| {
-            panel
-                .track_focus(&editor.focus)
-                .key_context("Rows")
-                .track_scroll(&editor.scroll)
+    let content = div()
+        .id("rows")
+        .when_some(editor, |content, editor| {
+            content.track_focus(&editor.focus).key_context("Rows")
         })
-        .children(children)
-        .into_any_element()
+        .children(children);
+    let scroll = editor.map(|editor| editor.scroll.clone());
+    panel(this, hit, scroll.as_ref(), content, window, cx)
 }
 
 /// The input of a new row, with the time it gets.
@@ -293,8 +390,7 @@ fn timed_row(
     let time = div()
         .id(id)
         .flex_shrink_0()
-        .min_w(px(28.))
-        .text_xs()
+        .min_w(px(TIME_WIDTH))
         .text_color(cx.theme().muted_foreground);
     let time = match time_ms {
         Some(ms) => time
@@ -306,12 +402,17 @@ fn timed_row(
             .child(media::clock(ms)),
         None => time,
     };
+    // No full width: a block child fills its parent, and the negative margin
+    // then widens the row, where with a full width it would move it.
     h_flex()
-        .w_full()
         .gap_2()
         .items_start()
         .rounded(px(3.))
-        .when(current, |row| row.bg(cx.theme().primary.opacity(0.18)))
+        .when(current, |row| {
+            row.mx(px(-ROW_INSET))
+                .px(px(ROW_INSET))
+                .bg(cx.theme().primary.opacity(0.18))
+        })
         .child(time)
         // Without a zero minimum width a long line pushes past the pane
         // instead of wrapping.
@@ -351,6 +452,7 @@ fn stage(
         .id("stage")
         .w(px(width))
         .h(px(height))
+        .flex_shrink_0()
         .rounded(px(4.))
         .bg(cx.theme().secondary)
         .flex()
@@ -526,15 +628,6 @@ fn menu_icon(name: impl Into<Icon>) -> Icon {
     name.into().mr(px(1.))
 }
 
-fn facts(hit: &Hit, cx: &App) -> AnyElement {
-    h_flex()
-        .gap_2()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child(facts_text(&hit.file))
-        .into_any_element()
-}
-
 /// The kind, the length, the size, and the state when it is not ready.
 pub(super) fn facts_text(file: &FileRow) -> String {
     let mut parts = vec![file.kind.label().to_string()];
@@ -550,17 +643,15 @@ pub(super) fn facts_text(file: &FileRow) -> String {
 
 /// In Review, where the file is, and the whole error of a file that could not
 /// be indexed. The tile has room for the first words only.
-fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
-    let Some(group) = this.review().map(|review| review.group) else {
-        return div().into_any_element();
-    };
+fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> Option<AnyElement> {
+    let group = this.review()?.group;
     let folder = hit
         .file
         .path
         .parent()
         .map(|parent| parent.display().to_string())
         .unwrap_or_default();
-    v_flex()
+    let line = v_flex()
         .w_full()
         .gap_1()
         .text_xs()
@@ -571,34 +662,53 @@ fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> AnyElement {
                     .text_color(cx.theme().danger)
                     .child(hit.matched.clone()),
             )
-        })
-        .into_any_element()
+        });
+    Some(line.into_any_element())
 }
 
-/// The tags of the file, and the button that opens the tag panel beside them.
-fn tag_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
+/// The tags of the file, and the button that opens the tag panel after them.
+/// They are items of the name line, so they wrap with it. A click on a tag
+/// searches for it, and a right click takes it off the file.
+fn tag_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> Vec<AnyElement> {
     let names = tags::of_hash(this.db.conn(), &hit.file.hash).unwrap_or_default();
-    h_flex()
-        .gap_1()
-        .flex_wrap()
-        .items_center()
-        .children(names.into_iter().map(|name| {
+    names
+        .into_iter()
+        .map(|name| {
             div()
+                .id(SharedString::from(format!("file-tag-{name}")))
+                .ml_1()
+                .mb_neg_1()
+                .h(px(TAG_HEIGHT))
                 .px_1()
                 .rounded(px(3.))
                 .bg(cx.theme().primary.opacity(0.18))
+                .hover(|tag| tag.bg(cx.theme().primary.opacity(0.3)))
+                .cursor_pointer()
                 .text_color(cx.theme().primary)
                 .text_xs()
-                .child(name)
-        }))
-        .child(
-            Button::new("file-tag")
-                .xsmall()
-                .icon(IconName::Plus)
-                .label("Tag")
-                .tooltip("T")
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
-        )
-        .into_any_element()
+                // Lowercase letters sit low in the line box, so centered text
+                // looks too low. The tag is a flex item, so this margin cannot
+                // pass through it and move the tag instead.
+                .child(div().mt(px(-1.)).child(name.clone()))
+                .on_click(cx.listener({
+                    let name = name.clone();
+                    move |this, _, window, cx| this.search_tag(&name, window, cx)
+                }))
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, _, cx| this.untag_selection(name.clone(), cx)),
+                )
+                .into_any_element()
+        })
+        .chain([Button::new("file-tag")
+            .ml_1()
+            .mb_neg_1()
+            .xsmall()
+            .size(px(TAG_HEIGHT + 2.))
+            .icon(IconName::Plus)
+            .tooltip("T")
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx)))
+            .into_any_element()])
+        .collect()
 }

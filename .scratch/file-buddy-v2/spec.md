@@ -161,7 +161,7 @@ goes to the index at once.
   it out. The user typed it on purpose.
 - A tab can be edited only after its stage has run for the file. Before that,
   an edit would stop the stage from ever running.
-- `i` cycles the tabs: File, Speech, Text. `e` puts a cursor on the rows of the
+- `i` switches between the Speech and Text tabs. `e` puts a cursor on the rows of the
   Speech or Text tab, on the row the clip is at. In the rows, up and down move
   the cursor and seek the clip to the row. Enter edits the row, with its text
   selected: enter saves, and escape cancels. Enter on a tab with no rows adds
