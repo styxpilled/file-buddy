@@ -7,10 +7,8 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, Div, Hsla, div, px, transparent_black};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex, v_virtual_list};
-use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
-use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
 
-use super::{autoscroll, tile};
+use super::{autoscroll, tile, when};
 use crate::db::files::{FileRow, State};
 use crate::media;
 use crate::search::folder::{Entry, Stray};
@@ -120,8 +118,11 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
         [
             kind,
             text(&length, muted).text_right(),
-            text(&entry.size().map(bytes).unwrap_or_default(), muted).text_right(),
-            text(&entry.mtime().map(local_time).unwrap_or_default(), muted),
+            text(&entry.size().map(media::bytes).unwrap_or_default(), muted).text_right(),
+            text(
+                &entry.mtime().map(when::local_time).unwrap_or_default(),
+                muted,
+            ),
             last,
         ],
     )
@@ -164,63 +165,4 @@ fn stray_label(why: Stray) -> &'static str {
 
 fn text(text: &str, color: Hsla) -> Div {
     div().truncate().text_color(color).child(text.to_string())
-}
-
-fn bytes(size: u64) -> String {
-    const KB: f64 = 1024.;
-    const MB: f64 = KB * 1024.;
-    const GB: f64 = MB * 1024.;
-    let size = size as f64;
-    if size >= GB {
-        format!("{:.1} GB", size / GB)
-    } else if size >= MB {
-        format!("{:.1} MB", size / MB)
-    } else {
-        format!("{:.0} KB", (size / KB).ceil())
-    }
-}
-
-/// Seconds since the Unix epoch, as a date and time in the zone of this
-/// machine, with the daylight saving rule of that date.
-fn local_time(seconds: i64) -> String {
-    // A FILETIME counts 100 ns steps from 1601.
-    const EPOCH_GAP: i64 = 11_644_473_600;
-    let ticks = ((seconds + EPOCH_GAP) as u64) * 10_000_000;
-    let file_time = FILETIME {
-        dwLowDateTime: ticks as u32,
-        dwHighDateTime: (ticks >> 32) as u32,
-    };
-    let mut utc = SYSTEMTIME::default();
-    let mut local = SYSTEMTIME::default();
-    // SAFETY: both calls only read and write the structs passed to them.
-    let converted = unsafe {
-        FileTimeToSystemTime(&file_time, &mut utc)
-            .and_then(|()| SystemTimeToTzSpecificLocalTime(None, &utc, &mut local))
-    };
-    if converted.is_err() {
-        return String::new();
-    }
-    format!(
-        "{}-{:02}-{:02} {:02}:{:02}",
-        local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_numbers_are_short() {
-        assert_eq!(bytes(1), "1 KB");
-        assert_eq!(bytes(350_000), "342 KB");
-        assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");
-    }
-
-    #[test]
-    fn a_time_reads_as_a_date() {
-        let text = local_time(1_758_628_800);
-        assert_eq!(text.len(), "2025-09-23 12:00".len(), "{text}");
-        assert!(text.starts_with("2025-09-2"), "{text}");
-    }
 }

@@ -59,6 +59,22 @@ pub fn duration(seconds: f64) -> String {
     }
 }
 
+/// A file size: `342 KB`, `5.0 MB`, `1.2 GB`. A file under 1 KB shows as 1 KB,
+/// not 0.
+pub fn bytes(size: u64) -> String {
+    const KB: f64 = 1024.;
+    const MB: f64 = KB * 1024.;
+    const GB: f64 = MB * 1024.;
+    let size = size as f64;
+    if size >= GB {
+        format!("{:.1} GB", size / GB)
+    } else if size >= MB {
+        format!("{:.1} MB", size / MB)
+    } else {
+        format!("{:.0} KB", (size / KB).ceil())
+    }
+}
+
 /// A point in a clip: `0:07`, `1:42`, or `1:02:30` from an hour.
 pub fn clock(ms: i64) -> String {
     let total = ms.max(0) / 1000;
@@ -86,6 +102,13 @@ impl FromStr for Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_numbers_are_short() {
+        assert_eq!(bytes(1), "1 KB");
+        assert_eq!(bytes(350_000), "342 KB");
+        assert_eq!(bytes(5 * 1024 * 1024), "5.0 MB");
+    }
 
     #[test]
     fn a_duration_keeps_its_tenths_under_a_minute() {

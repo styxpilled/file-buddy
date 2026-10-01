@@ -57,7 +57,7 @@ impl FileBuddy {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let table = table_of(self.detail);
+        let table = table_of(self.shown_detail());
         let Some(hit) = self.selected_hit() else {
             return;
         };
@@ -291,7 +291,7 @@ impl FileBuddy {
             .selected_hit()
             .is_some_and(|hit| hit.file.hash == editor.hash);
         if !same_file
-            || table_of(self.detail) != editor.table
+            || table_of(self.shown_detail()) != editor.table
             || self.tagger.is_some()
             || self.renamer.is_some()
         {

@@ -1,5 +1,5 @@
-//! The files that need a person: duplicates, long files, failures and poor
-//! names. Each comes with a note that says why it is here.
+//! The files that need a person: duplicates, files that share a name, long
+//! files, failures and poor names. Each comes with a note that says why it is here.
 
 use std::path::Path;
 
@@ -13,14 +13,16 @@ use crate::media::{self, filename};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Group {
     Duplicates,
+    SameNames,
     Long,
     Failed,
     PoorNames,
 }
 
 impl Group {
-    pub const ALL: [Group; 4] = [
+    pub const ALL: [Group; 5] = [
         Group::Duplicates,
+        Group::SameNames,
         Group::Long,
         Group::Failed,
         Group::PoorNames,
@@ -29,6 +31,7 @@ impl Group {
     pub fn label(self) -> &'static str {
         match self {
             Group::Duplicates => "Duplicates",
+            Group::SameNames => "Same names",
             Group::Long => "Long",
             Group::Failed => "Failed",
             Group::PoorNames => "Poor names",
@@ -45,6 +48,7 @@ pub struct Item {
 pub fn items(conn: &Connection, group: Group) -> Result<Vec<Item>> {
     match group {
         Group::Duplicates => duplicates(conn),
+        Group::SameNames => same_names(conn),
         Group::Long => long(conn),
         Group::Failed => failed(conn),
         Group::PoorNames => poor_names(conn),
@@ -73,6 +77,32 @@ fn duplicates(conn: &Connection) -> Result<Vec<Item>> {
                     group.len(),
                     folder(&file.path)
                 ),
+                file: file.clone(),
+            });
+        }
+    }
+    Ok(items)
+}
+
+/// Every path whose name another file has too, ignoring case, one name after
+/// the other. A name whose files all hold the same bytes is left out: those
+/// are duplicates.
+fn same_names(conn: &Connection) -> Result<Vec<Item>> {
+    let mut statement = conn.prepare(&format!(
+        "{PRESENT} AND lower(filename) IN (
+             SELECT lower(filename) FROM files WHERE missing_at IS NULL
+             GROUP BY lower(filename) HAVING count(DISTINCT hash) > 1)
+         ORDER BY lower(filename), path"
+    ))?;
+    let rows: Vec<FileRow> = statement
+        .query_map([], read_row)?
+        .collect::<Result<_, _>>()?;
+
+    let mut items = Vec::with_capacity(rows.len());
+    for group in rows.chunk_by(|a, b| a.filename.to_lowercase() == b.filename.to_lowercase()) {
+        for (at, file) in group.iter().enumerate() {
+            items.push(Item {
+                note: format!("{} of {}  ·  {}", at + 1, group.len(), folder(&file.path)),
                 file: file.clone(),
             });
         }
@@ -177,6 +207,21 @@ mod tests {
 
         assert_eq!(paths(&found), ["d/a.mp4", "d/b.mp4"]);
         assert_eq!(found[1].note, "copy 2 of 2  ·  d");
+    }
+
+    #[test]
+    fn same_names_differ_in_bytes() {
+        let db = Db::open_in_memory().unwrap();
+        add(&db, "x/clip.mp4", "one");
+        add(&db, "y/Clip.mp4", "two");
+        add(&db, "x/copy.mp4", "three");
+        add(&db, "y/copy.mp4", "three");
+        add(&db, "x/alone.mp4", "four");
+
+        let found = items(db.conn(), Group::SameNames).unwrap();
+
+        assert_eq!(paths(&found), ["x/clip.mp4", "y/Clip.mp4"]);
+        assert_eq!(found[1].note, "2 of 2  ·  y");
     }
 
     #[test]

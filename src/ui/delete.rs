@@ -1,8 +1,9 @@
 //! `delete` and `shift-delete`: the marked files, or the selection, to the
-//! recycle bin, or gone for good after the shell asks.
+//! recycle bin, or gone for good after the shell asks. An empty name in the
+//! rename input sends that file to the recycle bin too.
 
-use gpui::Context;
 use gpui::prelude::*;
+use gpui::{Context, Window};
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use crate::actions::delete::{self, Mode};
@@ -28,12 +29,22 @@ impl FileBuddy {
             .collect()
     }
 
-    pub(super) fn delete_files(&mut self, mode: Mode, cx: &mut Context<Self>) {
-        if !self.deleting.is_empty() {
-            return;
-        }
+    pub(super) fn delete_files(&mut self, mode: Mode, window: &mut Window, cx: &mut Context<Self>) {
         let targets = self.delete_targets();
-        if targets.is_empty() {
+        self.delete(targets, mode, false, window, cx);
+    }
+
+    /// `walk`: the delete came from the rename walk, which goes on to the next
+    /// file when it is done.
+    pub(super) fn delete(
+        &mut self,
+        targets: Vec<FileRow>,
+        mode: Mode,
+        walk: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.deleting.is_empty() || targets.is_empty() {
             return;
         }
         // The pointer can rest on a tile, and a hover opens the clip again the
@@ -48,10 +59,10 @@ impl FileBuddy {
         let owner = unsafe { GetForegroundWindow() }.0 as isize;
         let paths = targets.iter().map(|file| file.path.clone()).collect();
         let work = cx.background_spawn(async move { delete::delete(paths, mode, owner) });
-        cx.spawn(async move |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
-            this.update(cx, |this, cx| {
-                this.finish_delete(&targets, mode, result, cx)
+            this.update_in(cx, |this, window, cx| {
+                this.finish_delete(&targets, mode, result, walk, window, cx)
             })
             .ok();
         })
@@ -65,6 +76,8 @@ impl FileBuddy {
         targets: &[FileRow],
         mode: Mode,
         result: anyhow::Result<()>,
+        walk: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.deleting.clear();
@@ -92,10 +105,42 @@ impl FileBuddy {
                 self.flash(text, false, cx);
             }
         }
-        if !gone.is_empty() {
+        if walk {
+            self.walk_past(&gone, window, cx);
+        } else if !gone.is_empty() {
             self.rerun_search(cx);
             self.reload_review(cx);
         }
         self.schedule_preview(cx);
+    }
+
+    /// The walk keeps its results, because a named file must not leave the list
+    /// under the user, so only the file that went leaves it. The next file then
+    /// takes its place under the input.
+    fn walk_past(&mut self, gone: &[&FileRow], window: &mut Window, cx: &mut Context<Self>) {
+        if gone.is_empty() {
+            // Cancelled or failed: the name is still to be given.
+            self.open_renamer(window, cx);
+            return;
+        }
+        let at = self.selected;
+        let kept = self
+            .results
+            .iter()
+            .filter(|entry| {
+                entry
+                    .hit()
+                    .is_none_or(|hit| gone.iter().all(|file| file.id != hit.file.id))
+            })
+            .cloned()
+            .collect();
+        self.update_results(kept, cx);
+        self.count_groups(cx);
+        if at < self.results.len() {
+            self.select(at, cx);
+            self.open_renamer(window, cx);
+        } else {
+            self.flash("the walk is done", false, cx);
+        }
     }
 }

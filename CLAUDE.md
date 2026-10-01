@@ -18,7 +18,7 @@ The v1 spec is `.scratch/file-buddy-v1/spec.md`. Read it before any design work.
 
 Stack: Rust, `gpui-kit`, `rusqlite` with bundled SQLite and FTS5, FFmpeg for probing, thumbnails and Whisper transcription, and `Windows.Media.Ocr` for on-screen text. `gpui-video` is vendored as project code. All versions are pinned exactly: gpui-pre is an unreviewed weekly snapshot of Zed's main branch.
 
-Any changes you haven't made are probably deliberate.
+Any changes you haven't made are probably deliberate. If your build fails because I'm running the app, don't try to work around that. Simply report the work done and ask if I want you to test any behavior you've just implemented.
 
 ## Issue tracker
 

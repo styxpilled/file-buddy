@@ -102,6 +102,7 @@ Two things follow from that:
                       brings back
         tile.rs       one result: thumbnail, hover video, badge, matched text
         table.rs      the table view of Browse, Folders and Review
+        when.rs       local dates, and how long ago a file changed
         preview.rs    the side pane and its two tabs
         rows.rs       the cursor and the input that edit the Speech and Text
                       tabs

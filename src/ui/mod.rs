@@ -22,6 +22,7 @@ mod tagger;
 mod thumbnails;
 mod tile;
 mod visual;
+mod when;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -96,6 +97,7 @@ gpui_kit::actions!(
         ShowSettings,
         SaveSettings,
         ReviewDuplicates,
+        ReviewSameNames,
         ReviewLong,
         ReviewFailed,
         ReviewPoorNames,
@@ -259,13 +261,20 @@ impl FileBuddy {
     ) -> Self {
         let input =
             cx.new(|cx| InputState::new(window, cx).placeholder(folders::BROWSE_PLACEHOLDER));
-        // `set_value` sends no `Change`, so this is the user typing.
-        cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.end_likes();
-                this.run_search(cx);
-            }
-        })
+        // `set_value` sends no `Change`, so this is the user typing. Enter hands
+        // the keys back to the results.
+        cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.end_likes();
+                    this.run_search(cx);
+                }
+                InputEvent::PressEnter { .. } => this.blur_query(window, cx),
+                _ => {}
+            },
+        )
         .detach();
 
         let thumbnails = Thumbnails::new(cx);
@@ -325,6 +334,15 @@ impl FileBuddy {
             Mode::Folders => Page::Folders,
             Mode::Review(_) => Page::Review,
             Mode::Settings(_) => Page::Settings,
+        }
+    }
+
+    /// The tab the pane shows. Only a video has speech, so any other file shows
+    /// its text, and a choice of Speech waits for the next video.
+    fn shown_detail(&self) -> Detail {
+        match self.selected_hit() {
+            Some(hit) if hit.file.kind != Kind::Video => Detail::Text,
+            _ => self.detail,
         }
     }
 
@@ -826,14 +844,12 @@ impl Render for FileBuddy {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
-            .on_action(
-                cx.listener(|this, _: &TrashFiles, _, cx| this.delete_files(DeleteMode::Trash, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &DeleteFiles, _, cx| {
-                    this.delete_files(DeleteMode::Delete, cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &TrashFiles, window, cx| {
+                this.delete_files(DeleteMode::Trash, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DeleteFiles, window, cx| {
+                this.delete_files(DeleteMode::Delete, window, cx)
+            }))
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
             .on_action(cx.listener(|this, _: &GoUp, window, cx| this.go_up(window, cx)))
             .on_action(cx.listener(|this, _: &CycleSort, window, cx| {
@@ -902,6 +918,9 @@ impl Render for FileBuddy {
             }))
             .on_action(cx.listener(|this, _: &ReviewDuplicates, window, cx| {
                 this.show_group(Group::Duplicates, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ReviewSameNames, window, cx| {
+                this.show_group(Group::SameNames, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ReviewLong, window, cx| {
                 this.show_group(Group::Long, window, cx)

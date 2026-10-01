@@ -10,6 +10,7 @@ use gpui::{AnyElement, Context, Entity, Focusable, SharedString, Subscription, T
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex};
 
+use crate::actions::delete::Mode;
 use crate::actions::rename;
 use crate::db::files::FileRow;
 use crate::search::Hit;
@@ -112,6 +113,14 @@ impl FileBuddy {
         }
         let typed = renamer.input.read(cx).value().to_string();
         let file = renamer.file.clone();
+        if typed.trim().is_empty() {
+            // No name at all: the file goes to the recycle bin.
+            let walk = self.walking();
+            self.renamer = None;
+            window.focus(&self.focus, cx);
+            self.delete(vec![file], Mode::Trash, walk, window, cx);
+            return;
+        }
         self.release_videos(&file.hash);
         cx.notify();
 

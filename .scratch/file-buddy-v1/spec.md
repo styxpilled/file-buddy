@@ -167,9 +167,9 @@ both. One view holds for all three pages. The sort and the view last until the
 application closes.
 
 The Review page collects every file that needs a person: duplicate groups,
-files over 5 minutes, files that cannot be indexed, and files with no proper
-name. It opens on the first group that holds a file, and `alt-1` to `alt-4`
-pick a group. The group tabs take the place of the search box;
+files that share a name but not their bytes, files over 5 minutes, files that
+cannot be indexed, and files with no proper name. It opens on the first group
+that holds a file, and `alt-1` to `alt-5` pick a group. The group tabs take the place of the search box;
 the bar, the grid and the side pane stay. Each tile says why the file
 is there, and the side pane shows its folder and, for a failure, the error.
 

@@ -28,7 +28,7 @@ use crate::ui::player::PressFrom;
 use crate::ui::rows::{RowInput, Target};
 use crate::ui::{
     CopyFile, DeleteFiles, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH,
-    TrashFiles, renamer, seek_bar, toggle,
+    TrashFiles, renamer, seek_bar, toggle, when,
 };
 
 /// What the pane keeps for the controls above the stage, and the seek bar, the
@@ -39,8 +39,7 @@ const MIN_STAGE_HEIGHT: f32 = 180.;
 const PADDING: f32 = 12.;
 /// Tighter than the default, so a name on two lines reads as one.
 const NAME_LINE_HEIGHT: f32 = 1.4;
-/// A tag on the name line. The button after the tags is 1 px taller at the top
-/// and at the bottom.
+/// A tag on the name line.
 const TAG_HEIGHT: f32 = 16.;
 /// How far the highlight of the row under the cursor reaches past its text.
 /// The panel reaches as far past the pane, so the highlight is not cut off.
@@ -88,9 +87,9 @@ pub fn pane(this: &FileBuddy, window: &mut Window, cx: &mut Context<FileBuddy>) 
         .child(controls(this, cx))
         .child(stage(this, hit, width, height, cx))
         .child(seek_bar::bar(this, width, cx))
-        .child(tabs(this, hit, cx))
         .child(name_and_tags(this, hit, cx))
         .children(review_line(this, hit, cx))
+        .child(tabs(this, hit, cx))
         .child(
             div()
                 .w_full()
@@ -101,36 +100,47 @@ pub fn pane(this: &FileBuddy, window: &mut Window, cx: &mut Context<FileBuddy>) 
                 .when(this.review().is_none(), |bar| bar.mt(px(4.)))
                 .bg(cx.theme().border),
         )
-        .child(match this.detail {
+        .child(match this.shown_detail() {
             Detail::Speech => transcript(this, hit, window, cx),
             Detail::Text => screen_text(this, hit, window, cx),
         })
         .into_any_element()
 }
 
-/// The two tabs under the clip, and the facts of the file beside them. `i`
-/// switches the tab.
+/// The facts of the file, then the two tabs and the button that opens the tag
+/// panel. `i` switches the tab.
 fn tabs(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
         .w_full()
         .gap_1()
-        .children(DETAILS.map(|(detail, label)| {
-            toggle(label, label, detail == this.detail)
-                .xsmall()
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.detail = detail;
-                    cx.notify();
-                }))
-        }))
         .child(
             div()
-                .ml_2()
+                .mr_2()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(facts_text(&hit.file)),
+        )
+        .children(DETAILS.map(|(detail, label)| {
+            let disabled = detail == Detail::Speech && hit.file.kind != Kind::Video;
+            toggle(label, label, detail == this.shown_detail())
+                .xsmall()
+                .disabled(disabled)
+                .when(disabled, |tab| tab.cursor_default())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.detail = detail;
+                    cx.notify();
+                }))
+        }))
+        .child(
+            Button::new("file-tag")
+                .xsmall()
+                .icon(IconName::Plus)
+                .tooltip("T")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx))),
         )
         .into_any_element()
 }
@@ -146,7 +156,11 @@ fn panel(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let id = SharedString::from(format!("detail-{:?}-{}", this.detail, hit.file.hash));
+    let id = SharedString::from(format!(
+        "detail-{:?}-{}",
+        this.shown_detail(),
+        hit.file.hash
+    ));
     let scroll = match scroll {
         Some(scroll) => scroll.clone(),
         None => window
@@ -376,7 +390,8 @@ fn add_line(
 }
 
 /// A line of a tab with its time in front. A click on the time seeks the clip
-/// there. A line with no time keeps the column, so the text lines up.
+/// there. A line with no time keeps the column, so the text lines up. A still
+/// has no times at all, so its lines have no column.
 fn timed_row(
     this: &FileBuddy,
     hit: &Hit,
@@ -387,6 +402,7 @@ fn timed_row(
     cx: &mut Context<FileBuddy>,
 ) -> AnyElement {
     let playing = this.player.video_of(&hit.file.hash).is_some();
+    let timed = hit.file.kind != Kind::Still;
     let time = div()
         .id(id)
         .flex_shrink_0()
@@ -413,7 +429,7 @@ fn timed_row(
                 .px(px(ROW_INSET))
                 .bg(cx.theme().primary.opacity(0.18))
         })
-        .child(time)
+        .when(timed, |row| row.child(time))
         // Without a zero minimum width a long line pushes past the pane
         // instead of wrapping.
         .child(text.flex_1().min_w_0())
@@ -628,13 +644,15 @@ fn menu_icon(name: impl Into<Icon>) -> Icon {
     name.into().mr(px(1.))
 }
 
-/// The kind, the length, the size, and the state when it is not ready.
+/// The kind, the length, the size, how long ago the file changed, and the
+/// state when it is not ready.
 pub(super) fn facts_text(file: &FileRow) -> String {
     let mut parts = vec![file.kind.label().to_string()];
     if let Some(duration) = file.duration {
         parts.push(media::duration(duration));
     }
-    parts.push(format!("{:.1} MB", file.size as f64 / 1_048_576.));
+    parts.push(media::bytes(file.size));
+    parts.push(when::ago_now(file.mtime));
     if file.state != State::Ready {
         parts.push(file.state.as_str().to_string());
     }
@@ -666,9 +684,9 @@ fn review_line(this: &FileBuddy, hit: &Hit, cx: &App) -> Option<AnyElement> {
     Some(line.into_any_element())
 }
 
-/// The tags of the file, and the button that opens the tag panel after them.
-/// They are items of the name line, so they wrap with it. A click on a tag
-/// searches for it, and a right click takes it off the file.
+/// The tags of the file. They are items of the name line, so they wrap with
+/// it. A click on a tag searches for it, and a right click takes it off the
+/// file.
 fn tag_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> Vec<AnyElement> {
     let names = tags::of_hash(this.db.conn(), &hit.file.hash).unwrap_or_default();
     names
@@ -700,15 +718,5 @@ fn tag_line(this: &FileBuddy, hit: &Hit, cx: &mut Context<FileBuddy>) -> Vec<Any
                 )
                 .into_any_element()
         })
-        .chain([Button::new("file-tag")
-            .ml_1()
-            .mb_neg_1()
-            .xsmall()
-            .size(px(TAG_HEIGHT + 2.))
-            .icon(IconName::Plus)
-            .tooltip("T")
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, window, cx| this.open_tagger(window, cx)))
-            .into_any_element()])
         .collect()
 }

@@ -14,7 +14,7 @@ use crate::ui::{FileBuddy, Mode, toggle};
 pub(super) struct Review {
     pub group: Group,
     /// Files in each group, in the order of `Group::ALL`.
-    counts: [usize; 4],
+    counts: [usize; 5],
 }
 
 impl FileBuddy {
@@ -30,7 +30,7 @@ impl FileBuddy {
             .is_some_and(|review| review.group == Group::PoorNames)
     }
 
-    /// A tab of Review, from a click or `alt-1` to `alt-4`. It opens Review
+    /// A tab of Review, from a click or `alt-1` to `alt-5`. It opens Review
     /// when it is closed.
     pub(super) fn show_group(&mut self, group: Group, window: &mut Window, cx: &mut Context<Self>) {
         if self.review().is_none_or(|review| review.group != group) {
@@ -104,7 +104,7 @@ impl FileBuddy {
 
     /// The files of every group of the kinds the chips let through, in the
     /// order of `Group::ALL`.
-    fn review_items(&mut self, cx: &mut Context<Self>) -> [Vec<Item>; 4] {
+    fn review_items(&mut self, cx: &mut Context<Self>) -> [Vec<Item>; 5] {
         let mut failure = None;
         let items = Group::ALL.map(|group| {
             let mut items = groups::items(self.db.conn(), group).unwrap_or_else(|e| {
@@ -124,7 +124,7 @@ impl FileBuddy {
 
 /// The files of one group, as results. The second line of a tile says why the
 /// file is here, so it holds the note and not a match.
-fn entries(items: [Vec<Item>; 4], group: Group) -> Vec<Entry> {
+fn entries(items: [Vec<Item>; 5], group: Group) -> Vec<Entry> {
     let items = items.into_iter().nth(group as usize).unwrap_or_default();
     items
         .into_iter()

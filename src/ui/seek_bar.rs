@@ -124,12 +124,26 @@ impl FileBuddy {
     }
 }
 
-/// The bar and the time, or an empty row of the same height when the pane has
-/// no clip, so the stage above it does not move.
+/// The bar and the time, or the empty track alone when the pane has no clip, so
+/// the stage above it does not move and a still reads as a clip with no time. It never shrinks: the empty
+/// row has no content to hold it, and a long panel below would squeeze it.
 pub(super) fn bar(this: &FileBuddy, width: f32, cx: &mut Context<FileBuddy>) -> AnyElement {
-    let row = h_flex().w(px(width)).h(px(HEIGHT)).gap_2().items_center();
+    let row = h_flex()
+        .w(px(width))
+        .h(px(HEIGHT))
+        .flex_shrink_0()
+        .gap_2()
+        .items_center();
     let Some(video) = this.player.video() else {
-        return row.into_any_element();
+        return row
+            .child(
+                div()
+                    .flex_1()
+                    .h(px(3.))
+                    .rounded(px(2.))
+                    .bg(cx.theme().muted),
+            )
+            .into_any_element();
     };
     let seek_bar = &this.seek_bar;
     let state = &seek_bar.state;
