@@ -89,7 +89,13 @@ fn main() -> Result<()> {
                 ))),
                 // The header is the title bar, with its own window buttons.
                 titlebar: Some(TitlebarOptions {
-                    title: Some("file-buddy".into()),
+                    // A debug build says so, so scripts never pick the
+                    // user's release window by mistake.
+                    title: Some(if cfg!(debug_assertions) {
+                        "file-buddy dev".into()
+                    } else {
+                        "file-buddy".into()
+                    }),
                     appears_transparent: true,
                     ..Default::default()
                 }),

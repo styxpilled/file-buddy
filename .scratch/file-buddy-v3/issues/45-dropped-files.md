@@ -1,0 +1,40 @@
+# 45 - Dropped files, and delete from database
+
+Status: ready-for-agent
+
+Depends on nothing. Read the Dropped files section of the v3 spec and the File
+drop part of `research.md` first.
+
+## Work
+
+- Take `ExternalPaths` drops on the window. GPUI already registers the drop
+  target on Windows.
+- A dropped file joins the index and goes through every stage. A dropped
+  folder adds the media files in it and under it, once. It is not watched.
+- A migration adds a column to `files` that records a dropped file. A file
+  under a root is a root file, dropped or not. A dropped file under a root
+  added later becomes a root file.
+- The scan does not mark a dropped file missing for being outside the roots
+  (the `NOT IN seen` query in `src/db/files.rs`). It checks that the file is
+  on disk.
+- The Folders page roots list gets a Dropped entry after the roots, while any
+  dropped file exists.
+- After a drop, open the Dropped entry and select the first dropped file. The
+  header says how many joined. A file already in the index does not join
+  again.
+- Delete from database is the `forget_file` action, with no default key. It
+  works on dropped files only. With marks, it skips root files and says how
+  many. The file leaves the index as through `files::mark_gone`, then its row
+  goes. Tags stay with the hash.
+
+## Tests
+
+Root or dropped for a path. The skip rule of delete from database.
+
+## Check
+
+Use a scratch copy with fake files, never the real roots. Drop files and a
+folder from outside the roots, rescan, and confirm they stay. Delete one from
+the database and confirm it stays on disk.
+
+## Comments

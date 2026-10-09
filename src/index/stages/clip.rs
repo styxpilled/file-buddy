@@ -1,6 +1,7 @@
 //! What the frames show. The `clip` worker samples the frames through FFmpeg
 //! and embeds them.
 
+use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
@@ -12,9 +13,15 @@ use crate::db::files::FileRow;
 use crate::db::vectors;
 use crate::worker::Worker;
 
-pub fn run(conn: &Connection, source: &FileRow, worker: &Mutex<Worker>) -> Result<()> {
+/// `readable` is the file or its proxy. See `ffmpeg::webp`.
+pub fn run(
+    conn: &Connection,
+    source: &FileRow,
+    readable: &Path,
+    worker: &Mutex<Worker>,
+) -> Result<()> {
     let request = Request {
-        path: source.path.clone(),
+        path: readable.to_path_buf(),
         duration: source.duration,
     };
     let frames: Vec<Frame> = worker

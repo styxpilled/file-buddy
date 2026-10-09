@@ -20,6 +20,10 @@ Stack: Rust, `gpui-kit`, `rusqlite` with bundled SQLite and FTS5, FFmpeg for pro
 
 Any changes you haven't made are probably deliberate. If your build fails because I'm running the app, don't try to work around that. Simply report the work done and ask if I want you to test any behavior you've just implemented.
 
+## Running the app
+
+My release build is often open while you work. Ask me before you drive the window, unless I said yes a short time ago in this session. Drive and stop only the debug build. See `docs/agents/checking-the-window.md`.
+
 ## Issue tracker
 
 Issues and specs for this repo live as markdown files in `.scratch/`. See `/docs/agents/issue-tracker.md`.

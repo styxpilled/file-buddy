@@ -1,17 +1,26 @@
 //! The first stage. It reads what the file is, and so decides which stages come
 //! after it.
 
+use std::path::Path;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::db::files::{self, FileRow};
 use crate::db::fts;
 use crate::ffmpeg::probe::{self, Probe};
+use crate::ffmpeg::webp;
 use crate::index::jobs::{self, LONG_FILE_SECONDS, Stage};
 
-pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
+/// FFmpeg cannot read an animated WebP, so its decoder reads it, and writes the
+/// proxy every later stage reads.
+pub fn run(conn: &Connection, cache: &Path, source: &FileRow) -> Result<()> {
     let hash = &source.hash;
-    let probe = probe::probe(&source.path, source.kind)?;
+    let probe = if webp::is_animated(&source.path)? {
+        webp::write_proxy(&source.path, hash, cache)?
+    } else {
+        probe::probe(&source.path, source.kind)?
+    };
     files::save_probe(conn, hash, &probe)?;
     queue_later_stages(conn, hash, &probe)?;
     fts::refresh_hash(conn, hash)

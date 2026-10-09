@@ -2163,6 +2163,7 @@ dependencies = [
  "gpui-pre",
  "gpui-video",
  "image",
+ "image-webp",
  "log",
  "notify 8.2.0",
  "ort",

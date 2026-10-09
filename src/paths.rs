@@ -80,3 +80,18 @@ pub fn thumbnail_path(cache: &Path, hash: &str) -> PathBuf {
 pub fn tile_path(cache: &Path, hash: &str) -> PathBuf {
     cache.join(&hash[..2]).join(format!("{hash}.tile.jpg"))
 }
+
+/// A copy FFmpeg can decode, of a file it cannot. See `ffmpeg::webp`.
+pub fn proxy_path(cache: &Path, hash: &str) -> PathBuf {
+    cache.join(&hash[..2]).join(format!("{hash}.proxy.mp4"))
+}
+
+/// What to play: the proxy if the file has one, else the file.
+pub fn playable(cache: &Path, hash: &str, path: &Path) -> PathBuf {
+    let proxy = proxy_path(cache, hash);
+    if proxy.is_file() {
+        proxy
+    } else {
+        path.to_path_buf()
+    }
+}

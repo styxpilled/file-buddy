@@ -1,10 +1,29 @@
 # Checking the window
 
+## Rules
+
+- **Ask before you take the screen.** `drive.ps1` moves the mouse, types and
+  covers the desktop. Ask the user first. One answer covers the checks that
+  follow it closely in the same session. After a break, ask again.
+- **The user's own build runs at the same time.** It is a release build in
+  `C:\Users\styx\bin\file-buddy`, with the window title `file-buddy`. Both
+  builds have the process names `file-buddy` and `fb`, so never stop or pick a
+  process by name.
+- **Drive only the dev window.** A debug build has the title `file-buddy dev`.
+  `drive.ps1` picks the window by that exact title, and it refuses to run if
+  that window is not open.
+- **Stop only the dev build.** `scripts/stop-dev.ps1` stops the processes whose
+  executable is in `target\debug`, and nothing else.
+
+## The script
+
 `scripts/drive.ps1` types into the running application and saves a picture of
 its window. Use it when a change only shows itself in the real window. Tests
 cannot see focus, key bindings or layout.
 
     cargo run --bin file-buddy &
+    # ...
+    & ./scripts/stop-dev.ps1
     & ./scripts/drive.ps1 -OutDir <scratch> -Steps @('keys:sopr','shot:narrowed','keys:{ESC}','shot:cleared')
 
 Call it from PowerShell as above. `pwsh -File` gives the whole list to `-Steps`

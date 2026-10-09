@@ -5,6 +5,7 @@ pub mod audio;
 pub mod frames;
 pub mod probe;
 pub mod thumbnail;
+pub mod webp;
 
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;

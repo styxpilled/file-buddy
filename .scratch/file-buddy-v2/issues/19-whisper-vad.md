@@ -1,6 +1,6 @@
 # 19 - Whisper VAD and the full re-transcription
 
-Status: ready-for-agent
+Status: done
 
 Depends on 18. Needs a Silero VAD model in ggml form (`ggml-silero-*.bin`) in
 `models/`. The user supplies it. `models/` holds only the whisper model today.
@@ -70,3 +70,5 @@ Left to do: transcribe every file again once. The user starts it later. At the
 time of the decision, 2,951 files need it: 820 done with the FFmpeg filter and
 2,131 pending.
 
+
+2026-10-09: Closed. The full re-transcription is done.

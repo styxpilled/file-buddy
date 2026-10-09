@@ -30,6 +30,10 @@
 #   shot:<name>              save <OutDir>/<name>.png of the application window
 #   wait:<milliseconds>      wait longer than the settle time
 #
+# The window is picked by its exact title. A debug build is "file-buddy dev",
+# and the user's own release build is "file-buddy", so the script never drives
+# the user's window. It refuses to start if the dev window is not open.
+#
 # Windows refuses SetForegroundWindow to a process that is not already in front,
 # and it returns False without an error. AttachThreadInput to the thread that
 # owns the foreground window lifts that, which is the whole trick here.
@@ -37,7 +41,7 @@
 param(
     [Parameter(Mandatory = $true)][string[]]$Steps,
     [string]$OutDir = $env:TEMP,
-    [string]$Process = 'file-buddy',
+    [string]$Title = 'file-buddy dev',
     [int]$SettleMs = 700
 )
 
@@ -170,7 +174,9 @@ function Save-WindowPicture([IntPtr]$hwnd, [string]$path) {
 
 $terminal = Get-MainWindow 'WindowsTerminal'
 $terminalWasMaximized = [Drive.Win]::IsZoomed($terminal)
-$application = Get-MainWindow $Process
+$application = Get-Process file-buddy -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowTitle -ceq $Title } | Select-Object -First 1 -ExpandProperty MainWindowHandle
+if (-not $application) { throw "no window titled '$Title'" }
 if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 
 try {
@@ -180,7 +186,7 @@ try {
     if (-not $terminalWasMaximized) { [Drive.Win]::ShowWindow($terminal, $SW_MAXIMIZE) | Out-Null }
     Start-Sleep -Milliseconds 300
 
-    if (-not (Set-Foreground $application)) { throw "$Process did not come to the front" }
+    if (-not (Set-Foreground $application)) { throw "$Title did not come to the front" }
     Start-Sleep -Milliseconds $SettleMs
 
     foreach ($step in $Steps) {

@@ -1,6 +1,6 @@
 # 33 - A smaller CLIP text encoder
 
-Status: needs-triage
+Status: done
 
 Depends on 32, which found this. Read the CLIP section of the v2 spec first.
 
@@ -61,3 +61,5 @@ The numbers for each copy are written here, and the window either loads the
 chosen copy or the reason to keep fp32 is written here.
 
 ## Comments
+
+2026-10-09: Closed. Abandoned: the window keeps the fp32 text encoder.

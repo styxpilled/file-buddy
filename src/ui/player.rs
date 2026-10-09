@@ -9,6 +9,7 @@ use gpui_video::{Video, VideoOptions};
 use url::Url;
 
 use crate::media::Kind;
+use crate::paths;
 use crate::ui::FileBuddy;
 
 /// How long the selection must rest before the side pane opens a decoder. Held
@@ -465,7 +466,7 @@ impl FileBuddy {
         if self.deleting.iter().any(|deleting| deleting == hash) {
             return None;
         }
-        open_video(path, buffer)
+        open_video(&paths::playable(&self.cache, hash, path), buffer)
     }
 
     /// Close every clip that has these bytes open. FFmpeg opens a file without

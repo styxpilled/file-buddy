@@ -17,7 +17,7 @@ use rusqlite::Connection;
 
 use crate::db::edits::{self, Table};
 use crate::db::files::{self, FileRow};
-use crate::ffmpeg::thumbnail;
+use crate::ffmpeg::{thumbnail, webp};
 use crate::index::jobs::{Job, Stage};
 use crate::worker::Worker;
 
@@ -56,12 +56,13 @@ pub fn run(conn: &Connection, cache: &Path, workers: &Workers, job: &Job) -> Res
         return Ok(());
     }
     let source = source(conn, &job.hash)?;
+    let readable = || webp::readable(&source.path, &source.hash, cache);
     match job.stage {
-        Stage::Probe => probe::run(conn, &source),
-        Stage::Thumbnail => thumbnail::generate(&source.path, &source.hash, cache),
+        Stage::Probe => probe::run(conn, cache, &source),
+        Stage::Thumbnail => thumbnail::generate(&readable()?, &source.hash, cache),
         Stage::Whisper => whisper::run(conn, &source, &workers.whisper),
-        Stage::Ocr => ocr::run(conn, &source),
-        Stage::Clip => clip::run(conn, &source, &workers.clip),
+        Stage::Ocr => ocr::run(conn, &source, &readable()?),
+        Stage::Clip => clip::run(conn, &source, &readable()?, &workers.clip),
     }
 }
 

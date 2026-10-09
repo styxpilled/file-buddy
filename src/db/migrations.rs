@@ -18,8 +18,18 @@ pub fn migrations() -> Migrations<'static> {
         M::up(ADD_THE_CLIP_STAGE),
         M::up(OCR_LINES_WITH_TIMES),
         M::up(EDITED_ROWS),
+        M::up(READ_ANIMATED_WEBP),
     ])
 }
+
+/// Issue 35. FFmpeg cannot decode an animated WebP, so each one failed every
+/// stage after a probe that took it for an empty still. Every WebP is probed
+/// again, which finds the animated ones, and the stages it failed run again.
+const READ_ANIMATED_WEBP: &str = r#"
+UPDATE jobs SET state = 'pending', attempts = 0, error = NULL
+WHERE hash IN (SELECT hash FROM files WHERE lower(path) LIKE '%.webp' AND missing_at IS NULL)
+  AND (stage = 'probe' OR state = 'failed');
+"#;
 
 /// The probe queued whisper for every video before issue 07. A file with no
 /// audio track has nothing to transcribe.

@@ -4,6 +4,8 @@
 
 use std::collections::HashSet;
 
+use std::path::Path;
+
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -13,8 +15,9 @@ use crate::db::{fts, ocr as ocr_rows};
 use crate::ffmpeg::frames;
 use crate::ocr;
 
-pub fn run(conn: &Connection, source: &FileRow) -> Result<()> {
-    let frames = frames::sample(&source.path, &source.hash, source.duration)?;
+/// `readable` is the file or its proxy. See `ffmpeg::webp`.
+pub fn run(conn: &Connection, source: &FileRow, readable: &Path) -> Result<()> {
+    let frames = frames::sample(readable, &source.hash, source.duration)?;
     let engine = ocr::engine()?;
 
     let mut lines = Vec::new();

@@ -1,6 +1,6 @@
 # 32 - Memory growth in the window
 
-Status: needs-triage
+Status: done
 
 Depends on nothing. Found by the user on 2026-09-24, in short testing after
 issue 21. The memory of the application seems to grow. It is not known yet
@@ -168,3 +168,5 @@ grow.
 The scan never made a missing thumbnail again: `jobs::enqueue` is
 `INSERT OR IGNORE`, and the done job stopped it. `jobs::redo` now queues a done
 job again, and leaves a failed one alone.
+
+2026-10-09: Closed. The memory growth that is left is acceptable.
