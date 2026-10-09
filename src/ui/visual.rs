@@ -346,7 +346,7 @@ impl FileBuddy {
     ) {
         let merged = scored
             .and_then(|scored| visual::hits(self.db.conn(), &request, &scored))
-            .map(|found| visual::fuse(text, found, self.config.weights.visual, request.limit));
+            .map(|found| visual::fuse(text, found, request.limit));
         match merged {
             Ok(hits) => {
                 self.status = count(hits.len());

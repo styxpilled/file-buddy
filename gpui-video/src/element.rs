@@ -1,4 +1,4 @@
-use crate::video::Video;
+use crate::video::{nv12_chroma, Video};
 use gpui::{
     Element, ElementId, EntityId, Global, GlobalElementId, InspectorElementId, IntoElement,
     LayoutId, Window,
@@ -170,7 +170,7 @@ impl VideoElement {
         }
 
         let (yuv_data, frame_width, frame_height) = self.video.current_frame_data()?;
-        let rgb_data = self.yuv_to_rgb(&yuv_data, frame_width, frame_height);
+        let rgb_data = Self::yuv_to_rgb(&yuv_data, frame_width, frame_height);
         let image_buffer =
             ImageBuffer::<Rgba<u8>, _>::from_raw(frame_width, frame_height, rgb_data)?;
 
@@ -195,11 +195,12 @@ impl VideoElement {
         Some(fresh)
     }
 
-    fn yuv_to_rgb(&self, yuv_data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    fn yuv_to_rgb(yuv_data: &[u8], width: u32, height: u32) -> Vec<u8> {
         let width_usize = width as usize;
         let height_usize = height as usize;
         let y_size = width_usize * height_usize;
-        let uv_size = (width_usize * height_usize) / 2;
+        let (uv_stride, uv_rows) = nv12_chroma(width, height);
+        let uv_size = uv_stride * uv_rows;
 
         if yuv_data.len() < y_size + uv_size {
             return vec![0; width_usize * height_usize * 4];
@@ -212,7 +213,7 @@ impl VideoElement {
             y_plane,
             y_stride: width,
             uv_plane,
-            uv_stride: width,
+            uv_stride: uv_stride as u32,
             width,
             height,
         };
@@ -367,4 +368,18 @@ impl IntoElement for VideoElement {
 
 pub fn video(video: Video) -> VideoElement {
     VideoElement::new(video)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_of_odd_size_converts() {
+        let (width, height) = (5, 3);
+        let (uv_stride, uv_rows) = nv12_chroma(width, height);
+        let nv12 = vec![128; (width * height) as usize + uv_stride * uv_rows];
+        let bgra = VideoElement::yuv_to_rgb(&nv12, width, height);
+        assert!(bgra.chunks(4).all(|pixel| pixel[3] == 255));
+    }
 }

@@ -1,7 +1,7 @@
 //! Search by what the frames show. Every CLIP vector is held in memory and
 //! compared with the query, and the result merges with the FTS list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use rusqlite::types::Value;
@@ -22,8 +22,6 @@ pub const DELTA: f32 = 0.03;
 /// about 0.6 to 0.97 and spread differently for each file, so no cutoff by
 /// score fits them all.
 pub const LIKE_COUNT: usize = 50;
-/// The rank constant of reciprocal rank fusion (Cormack 2009).
-const RRF_K: f64 = 60.0;
 
 /// The vectors of every file, by hash.
 #[derive(Debug, Default, Clone)]
@@ -178,7 +176,6 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
                 signal: Signal::Visual,
                 matched: String::new(),
                 at_ms,
-                named: false,
             },
         ));
     }
@@ -190,41 +187,15 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
         .collect())
 }
 
-/// Merge the FTS list and the visual list by weighted reciprocal rank fusion.
-/// The FTS list has weight 1. A file in both lists keeps its text match, which
-/// says more than a look does.
-///
-/// A file whose name or tags match stays above every file that matched only by
-/// speech, screen text or look. Fusion keeps only ranks, and with `RRF_K` at 60
-/// they are close together: the best visual rank added to text rank 17 beat
-/// text rank 1, so a screen text match went over the files named for the
-/// query.
-pub fn fuse(text: Vec<Hit>, visual: Vec<Hit>, visual_weight: f64, limit: usize) -> Vec<Hit> {
-    let mut merged: Vec<(f64, Hit)> = Vec::new();
-    let mut at: HashMap<i64, usize> = HashMap::new();
-    for (rank, hit) in text.into_iter().enumerate() {
-        at.insert(hit.file.id, merged.len());
-        merged.push((1.0 / (RRF_K + rank as f64 + 1.0), hit));
-    }
-    for (rank, hit) in visual.into_iter().enumerate() {
-        let score = visual_weight / (RRF_K + rank as f64 + 1.0);
-        match at.get(&hit.file.id) {
-            Some(&i) => merged[i].0 += score,
-            None => {
-                at.insert(hit.file.id, merged.len());
-                merged.push((score, hit));
-            }
-        }
-    }
-    // Stable, so a tie keeps text before visual.
-    merged.sort_by(|a, b| b.1.named.cmp(&a.1.named).then(b.0.total_cmp(&a.0)));
-    merged
-        .into_iter()
+/// The visual hits after the text hits, as the last chunk. A file in both
+/// lists keeps its text match, which says more than a look does. The text hits
+/// show first and the visual ones land a moment later, so nothing above them
+/// moves.
+pub fn fuse(text: Vec<Hit>, visual: Vec<Hit>, limit: usize) -> Vec<Hit> {
+    let in_text: HashSet<i64> = text.iter().map(|hit| hit.file.id).collect();
+    text.into_iter()
+        .chain(visual.into_iter().filter(|hit| !in_text.contains(&hit.file.id)))
         .take(limit)
-        .map(|(score, mut hit)| {
-            hit.score = -score;
-            hit
-        })
         .collect()
 }
 
@@ -256,7 +227,6 @@ mod tests {
                 mtime: 0,
             },
             score: 0.0,
-            named: matches!(signal, Signal::Tags | Signal::Filename),
             signal,
             matched: String::new(),
             at_ms: None,
@@ -361,55 +331,25 @@ mod tests {
     }
 
     #[test]
-    fn a_text_match_stays_above_the_visual_hits() {
-        let text = vec![hit(1, Signal::Filename), hit(2, Signal::Tags)];
+    fn the_visual_hits_follow_the_text_hits() {
+        let text = vec![hit(1, Signal::Ocr), hit(2, Signal::Filename)];
         let visual = vec![hit(3, Signal::Visual), hit(4, Signal::Visual)];
-        assert_eq!(ids(&fuse(text, visual, 0.5, 10)), vec![1, 2, 3, 4]);
+        assert_eq!(ids(&fuse(text, visual, 10)), vec![1, 2, 3, 4]);
     }
 
     #[test]
-    fn a_file_in_both_lists_rises_and_keeps_its_text_badge() {
+    fn a_file_in_both_lists_keeps_its_text_place_and_badge() {
         let text = vec![hit(1, Signal::Ocr), hit(2, Signal::Speech)];
-        let visual = vec![hit(2, Signal::Visual)];
-        let merged = fuse(text, visual, 0.5, 10);
-        assert_eq!(ids(&merged), vec![2, 1]);
-        assert_eq!(merged[0].signal, Signal::Speech);
-    }
-
-    #[test]
-    fn a_look_does_not_lift_screen_text_over_a_name() {
-        // "funny": four files named for it, then a picture whose text says it
-        // and which also looks it.
-        let mut text: Vec<Hit> = (1..=4).map(|id| hit(id, Signal::Filename)).collect();
-        text.extend((5..=20).map(|id| hit(id, Signal::Speech)));
-        text.push(hit(21, Signal::Ocr));
-        let visual = vec![hit(21, Signal::Visual)];
-        let merged = fuse(text, visual, 0.5, 100);
-        assert_eq!(ids(&merged)[..5], [1, 2, 3, 4, 21]);
-    }
-
-    #[test]
-    fn a_look_still_orders_the_named_files() {
-        let text = vec![hit(1, Signal::Filename), hit(2, Signal::Tags)];
-        let visual = vec![hit(2, Signal::Visual)];
-        assert_eq!(ids(&fuse(text, visual, 0.5, 10)), vec![2, 1]);
-    }
-
-    #[test]
-    fn the_visual_weight_decides_where_a_visual_hit_lands() {
-        let text: Vec<Hit> = (1..=40).map(|id| hit(id, Signal::Ocr)).collect();
-        let visual = vec![hit(100, Signal::Visual)];
-        // At weight 0.5 the best visual hit counts as much as text rank 62, so
-        // after 40 text matches it comes last. At weight 1 it ties text rank 1
-        // and comes right after it.
-        assert_eq!(ids(&fuse(text.clone(), visual.clone(), 0.5, 100))[40], 100);
-        assert_eq!(ids(&fuse(text, visual, 1.0, 100))[1], 100);
+        let visual = vec![hit(2, Signal::Visual), hit(3, Signal::Visual)];
+        let merged = fuse(text, visual, 10);
+        assert_eq!(ids(&merged), vec![1, 2, 3]);
+        assert_eq!(merged[1].signal, Signal::Speech);
     }
 
     #[test]
     fn the_merge_stops_at_the_limit() {
         let text = vec![hit(1, Signal::Filename), hit(2, Signal::Filename)];
         let visual = vec![hit(3, Signal::Visual)];
-        assert_eq!(ids(&fuse(text, visual, 0.5, 2)), vec![1, 2]);
+        assert_eq!(ids(&fuse(text, visual, 2)), vec![1, 2]);
     }
 }

@@ -51,8 +51,8 @@ pub struct Weights {
     pub visual: f64,
 }
 
-/// Below 1, so a text match counts for more than a look. A filename or tag
-/// match stays first whatever this is (`search::visual::fuse`).
+/// Above 0 turns on the visual hits of a text query. They come after every
+/// text hit whatever this is (`search::visual::fuse`).
 fn default_visual_weight() -> f64 {
     0.5
 }

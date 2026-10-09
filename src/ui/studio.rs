@@ -42,6 +42,9 @@ pub(super) struct Studio {
     /// Where the clip was when the page closed. It opens there again.
     resume: Duration,
     paused: bool,
+    /// A drag on the bar or on a handle holds the clip paused. Pause and play
+    /// wait for the release, which applies them.
+    pub(super) held: bool,
     /// The share done of the export that runs. One runs at a time.
     export: Option<f32>,
 }
@@ -56,6 +59,7 @@ impl Studio {
             focus: cx.focus_handle(),
             resume: Duration::ZERO,
             paused: false,
+            held: false,
             export: None,
         }
     }
@@ -119,6 +123,7 @@ impl FileBuddy {
             self.studio.resume = video.position();
         }
         self.studio.handle = None;
+        self.studio.held = false;
     }
 
     fn apply_studio(&self, video: &Video) {
@@ -137,10 +142,23 @@ impl FileBuddy {
     }
 
     pub(super) fn toggle_studio_paused(&mut self, cx: &mut Context<Self>) {
+        if self.studio.video.is_none() {
+            return;
+        }
+        self.studio.paused = !self.studio.paused;
+        self.sync_studio_paused();
+        cx.notify();
+    }
+
+    /// Pause or play the clip as the user chose. Nothing changes while a drag
+    /// holds it.
+    pub(super) fn sync_studio_paused(&self) {
         let Some(video) = &self.studio.video else {
             return;
         };
-        self.studio.paused = !self.studio.paused;
+        if self.studio.held {
+            return;
+        }
         video.set_paused(self.studio.paused);
         // A clip at its end starts again at the in point, not at zero.
         if !self.studio.paused
@@ -151,7 +169,6 @@ impl FileBuddy {
                 .seek(Duration::from_millis(edit.range.start_ms), true)
                 .ok();
         }
-        cx.notify();
     }
 
     /// `[` and `]`: a point of the range at the playhead.

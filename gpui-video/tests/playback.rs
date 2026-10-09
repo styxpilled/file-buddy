@@ -676,6 +676,35 @@ fn an_accurate_seek_shows_the_frame_at_the_target() {
     }
 }
 
+/// A seek while the clip plays. The sound must wait for the picture while the
+/// decoder buffers, or the clock runs ahead of the first frame and the picture
+/// races to catch up.
+#[test]
+fn a_seek_while_playing_starts_sound_and_picture_together() {
+    for path in fixtures(6) {
+        let video = open(&path);
+        video.set_paused(false);
+        std::thread::sleep(Duration::from_millis(600));
+        // The frame before the target shows at the target, and the audio
+        // device counts a block at a time.
+        let allowed = Duration::from_secs_f64(1.0 / video.framerate()) + Duration::from_millis(30);
+
+        for share in [0.3, 0.7] {
+            let target = video.duration().mul_f64(share);
+            video.seek(target, true).expect("seek failed");
+            wait_for_seek(&video, Duration::from_secs(3))
+                .unwrap_or_else(|| panic!("seek never showed a frame ({})", path.display()));
+            let ahead = video.position().saturating_sub(video.frame_time());
+            assert!(
+                ahead < allowed,
+                "the clock was {ahead:?} ahead of the first frame after a seek to {target:?} ({})",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(300));
+        }
+    }
+}
+
 /// How long a seek takes to show its frame, over every clip in `test_videos`:
 /// to a keyframe while paused, then accurate while paused and while playing.
 /// `cargo test --test playback seek_times -- --ignored --nocapture`
@@ -713,5 +742,49 @@ fn seek_times() {
             video.duration().as_secs_f64(),
             path.file_name().unwrap().to_string_lossy()
         );
+    }
+}
+
+/// The last frames of a clip play at the frame rate, and the clip ends after
+/// the last one has had its time. The presenter used to show the last few at
+/// once and end the clip when the last one started.
+#[test]
+fn the_last_frames_play_for_their_time() {
+    for path in fixtures(4) {
+        let video = open(&path);
+        video.set_paused(false);
+        let interval = Duration::from_secs_f64(1.0 / video.framerate());
+        video.seek(video.duration().saturating_sub(Duration::from_secs(1)), true).expect("seek failed");
+        wait_for_seek(&video, Duration::from_secs(3))
+            .unwrap_or_else(|| panic!("seek never showed a frame ({})", path.display()));
+
+        let mut shown: Vec<Instant> = Vec::new();
+        let mut last_seq = video.frame_seq();
+        let started = Instant::now();
+        while !video.ended() && started.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(1));
+            if video.frame_seq() != last_seq {
+                last_seq = video.frame_seq();
+                shown.push(Instant::now());
+            }
+        }
+        assert!(video.ended(), "never ended ({})", path.display());
+        assert!(
+            video.position() + interval / 2 >= video.frame_time() + interval,
+            "ended at {:?}, while the frame at {:?} was due on screen until {:?} ({})",
+            video.position(),
+            video.frame_time(),
+            video.frame_time() + interval,
+            path.display()
+        );
+        for pair in shown[shown.len().saturating_sub(4)..].windows(2) {
+            assert!(
+                pair[1] - pair[0] >= interval / 2,
+                "the last frames came {:?} apart at {:.1} fps ({})",
+                pair[1] - pair[0],
+                video.framerate(),
+                path.display()
+            );
+        }
     }
 }

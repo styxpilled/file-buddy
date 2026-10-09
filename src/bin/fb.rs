@@ -90,7 +90,7 @@ fn main() -> Result<()> {
             {
                 let scored = look(&db, &words)?;
                 let found = visual::hits(db.conn(), &request, &scored)?;
-                hits = visual::fuse(hits, found, config.weights.visual, request.limit);
+                hits = visual::fuse(hits, found, request.limit);
             }
             for hit in hits {
                 let at = hit.at_ms.map(file_buddy::media::clock).unwrap_or_default();

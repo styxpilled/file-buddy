@@ -59,3 +59,55 @@ Check: broken-gif.gif plays in the side pane, on a hovered tile and in the
 Studio.
 
 ## Comments
+
+### 2026-10-09
+
+**Some GIFs never show a frame: fixed.** broken-gif.gif is 267 px high. An
+odd height has one more NV12 chroma row than half the height, and
+`pack_nv12` dropped it. The frame came out 199 bytes short, and the element
+then painted a zeroed, transparent frame. `nv12_chroma` now gives the chroma
+size to the packer and to the element. Checked in the side pane, on a hovered
+tile and in the Studio.
+
+**Sound and picture drift apart: one cause fixed.** The audio callback played
+and counted the sound while the decoder buffered after a seek, a loop or a
+rebuffer. So the clock was ahead of the first frame, and the picture raced to
+it. The sound now waits while `buffering` holds. The callback also counts the
+samples under the ring lock, and a seek zeroes the count under the same lock,
+so no sound from before a seek is counted. In a release build, the clock led
+the first frame after a seek by 26 to 113 ms before. Now it is within one
+frame and one audio block. Test:
+`a_seek_while_playing_starts_sound_and_picture_together`. A drag in the sim
+build did not show the fault before or after, so this needs a check by ear.
+
+**A seek shows the first frame first: not reproduced.** The decoder shows the
+target first when the seek comes at once after the open, and also on a
+preloaded clip (22 clips). In the sim build, with autoplay off and on and with
+a query typed key by key, the pane painted the frame at the match first every
+time. Need the clip and query that show it.
+
+### 2026-10-09, later
+
+The user confirms the GIF and drift fixes.
+
+**A drag's hold wins over pause and play.** While a drag on the bar or on a
+Studio handle holds the clip, space, a click on the clip, autoplay and a 2x
+hold change only what the user chose (`Player::held`, `Studio::held`). The
+release seeks, then applies that choice.
+
+**Scrubbing is frame-accurate.** Keyframe seeks showed only the keyframes.
+Most clips here have 2 to 7, so a short clip showed only frame 0. A drag now
+sends accurate seeks, one at a time, and keeps only the latest place while one
+decodes (`SeekBar::pending`). An accurate seek costs 16 to 220 ms over
+`test_videos` (worst 329 ms, 1080x1920 with 3 s between keyframes). So a slow
+clip updates less often but never falls behind the pointer, and no length limit
+is needed.
+
+**The end of a clip came early.** `monkey opening portal.gif` (10 fps, 4.9 s)
+showed its last 4 frames at once and ended at 4.48 s. The presenter showed
+early frames at once when 3 or fewer were buffered, which happens only at the
+end of the stream. And the end did not wait for the last frame's own time.
+Frames now carry their duration from the packet (1 / frame rate when it has
+none), and `drained` and `ended` wait until the clock passes the end of the
+frame on screen. The GIF now ends at 4.9 s. Test:
+`the_last_frames_play_for_their_time`.

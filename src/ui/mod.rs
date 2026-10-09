@@ -178,6 +178,10 @@ pub struct FileBuddy {
     /// and a rename; a grid index survives neither. A hash would mark every
     /// copy of a duplicate at once.
     marked: HashSet<i64>,
+    /// The query as last typed, with its spaces evened out. Every term is a
+    /// prefix term, so spaces only split words, and a change to them alone
+    /// does not search again.
+    typed: String,
     tagger: Option<Tagger>,
     renamer: Option<Renamer>,
     /// The cursor on the rows of the Speech or Text tab.
@@ -281,6 +285,12 @@ impl FileBuddy {
             window,
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::Change => {
+                    let value = this.input.read(cx).value().to_string();
+                    let typed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+                    if typed == this.typed {
+                        return;
+                    }
+                    this.typed = typed;
                     this.end_likes();
                     this.run_search(cx);
                 }
@@ -327,6 +337,7 @@ impl FileBuddy {
             notice: None,
             notice_task: None,
             marked: HashSet::new(),
+            typed: String::new(),
             tagger: None,
             renamer: None,
             rows: None,
@@ -447,7 +458,7 @@ impl FileBuddy {
         let request = search::Request::new(text)
             .kinds(self.kinds.clone())
             .within(within)
-            .sort(self.browse_sort);
+            .sort(self.sort());
         match search::search(self.db.conn(), &request, &self.config.weights) {
             Ok(hits) => {
                 self.status = count(hits.len());

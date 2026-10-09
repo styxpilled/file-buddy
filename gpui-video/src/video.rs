@@ -43,6 +43,9 @@ struct Frame {
     width: u32,
     height: u32,
     timestamp: Duration,
+    /// How long the frame stays on screen. The last frame of a clip needs it,
+    /// or the clip ends when that frame starts.
+    duration: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +281,9 @@ struct Shared {
     /// From a seek until its first frame is presented. A paused element keeps
     /// asking for frames while this holds.
     seeking: AtomicBool,
+    /// The decoder fills its buffers before it plays. The sound waits too, or
+    /// the clock runs ahead of the first frame and the picture races after it.
+    buffering: AtomicBool,
 
     volume: Mutex<f64>,
     muted: AtomicBool,
@@ -304,6 +310,7 @@ impl Shared {
             is_eos: AtomicBool::new(false),
             alive: AtomicBool::new(true),
             seeking: AtomicBool::new(false),
+            buffering: AtomicBool::new(true),
 
             volume: Mutex::new(0.5),
             muted: AtomicBool::new(false),
@@ -326,16 +333,38 @@ impl Shared {
         self.is_eos.store(eos, Ordering::Release);
     }
 
+    fn buffering(&self) -> bool {
+        self.buffering.load(Ordering::Acquire)
+    }
+
+    fn set_buffering(&self, buffering: bool) {
+        self.buffering.store(buffering, Ordering::Release);
+    }
+
+    /// When the frame on screen has had its time.
+    fn shown_until(&self) -> Duration {
+        let frame = self.frame.lock();
+        frame.timestamp + frame.duration
+    }
+
     fn present(&self, frame: Frame) {
         *self.frame.lock() = frame;
         self.frame_seq.fetch_add(1, Ordering::Release);
     }
 
+    /// Drops the queued sound and what the clock counted of it. The audio
+    /// callback counts under the same lock, so no sound from before is counted.
+    fn clear_audio(&self) {
+        let mut ring = self.audio_ring.lock();
+        ring.clear();
+        self.samples_played.store(0, Ordering::SeqCst);
+    }
+
     /// Drops everything buffered and restarts both clocks at `position`.
     fn reset_to(&self, position: Duration) {
+        self.set_buffering(true);
         self.frame_buffer.lock().clear();
-        self.audio_ring.lock().clear();
-        self.samples_played.store(0, Ordering::SeqCst);
+        self.clear_audio();
         *self.clock_base.lock() = position;
         *self.video_clock.lock() = position;
         *self.audio_pts.lock() = position;
@@ -529,7 +558,7 @@ impl Video {
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    if shared.paused() {
+                    if shared.paused() || shared.buffering() {
                         data.fill(0.0);
                         return;
                     }
@@ -558,6 +587,9 @@ impl Video {
                     } else {
                         stretcher.process(data, speed, pull) as usize
                     };
+                    shared
+                        .samples_played
+                        .fetch_add(read_count as u64, Ordering::SeqCst);
                     drop(ring);
 
                     if shared.muted.load(Ordering::Acquire) {
@@ -570,10 +602,6 @@ impl Video {
                             }
                         }
                     }
-
-                    shared
-                        .samples_played
-                        .fetch_add(read_count as u64, Ordering::SeqCst);
                 },
                 |err| log::error!("Audio stream error: {:?}", err),
                 None,
@@ -668,14 +696,15 @@ impl Video {
         self.0.shared.eos()
     }
 
-    /// The stream is at its end and every buffered frame has played. `eos` is
-    /// true once the last packet is read, which in a short clip is long before
-    /// its last frame shows.
+    /// The stream is at its end and every buffered frame has played for its
+    /// whole time. `eos` is true once the last packet is read, which in a short
+    /// clip is long before its last frame shows.
     pub fn ended(&self) -> bool {
         let shared = &self.0.shared;
         shared.eos()
             && shared.frame_buffer.lock().is_empty()
             && (!self.has_audio() || shared.audio_ring.lock().len == 0)
+            && self.position() >= shared.shown_until()
     }
 
     pub fn looping(&self) -> bool {
@@ -1042,19 +1071,20 @@ impl Worker {
             let paused = shared.paused();
             let vbuf_len = shared.frame_buffer.lock().len();
 
-            if !state.buffering && !paused && vbuf_len < BUFFER_FLOOR && !shared.eos() {
+            if !shared.buffering() && !paused && vbuf_len < BUFFER_FLOOR && !shared.eos() {
                 log::warn!(
                     "Buffer critically low ({} frames)! Rebuffering...",
                     vbuf_len
                 );
-                state.buffering = true;
+                shared.set_buffering(true);
                 continue;
             }
 
-            if state.buffering {
-                if vbuf_len >= self.prebuffer_frames {
+            if shared.buffering() {
+                // A clip shorter than the prebuffer ends first.
+                if vbuf_len >= self.prebuffer_frames || shared.eos() {
                     log::info!("Buffering done ({} frames)", vbuf_len);
-                    state.buffering = false;
+                    shared.set_buffering(false);
                     *shared.last_clock_update.lock() = Instant::now();
                     // Buffering after a seek can outlast the stall grace, and
                     // the clock must not carry that time.
@@ -1128,12 +1158,14 @@ impl Worker {
         Ok(())
     }
 
-    /// Both buffers empty. EOS means the demuxer reached the end, not that
-    /// playback did: the buffers hold up to a couple of seconds, so they play
-    /// out first. Looping on EOS alone cut every clip short by the buffer depth.
+    /// Both buffers empty, and the last frame has had its time. EOS means the
+    /// demuxer reached the end, not that playback did: the buffers hold up to
+    /// a couple of seconds, so they play out first. Looping on EOS alone cut
+    /// every clip short by the buffer depth.
     fn drained(&self, has_audio: bool) -> bool {
         self.shared.frame_buffer.lock().is_empty()
             && (!has_audio || self.shared.audio_ring.lock().len == 0)
+            && *self.shared.video_clock.lock() >= self.shared.shown_until()
     }
 
     /// Returns true when the decoder was told to stop.
@@ -1160,9 +1192,9 @@ impl Worker {
                     // decoding carried on until the command was read, so the
                     // front of each buffer can hold pre-seek data.
                     self.shared.frame_buffer.lock().clear();
-                    self.shared.audio_ring.lock().clear();
+                    self.shared.clear_audio();
                     let target = *self.shared.clock_base.lock();
-                    state.restart_at(target);
+                    state.restart_at(&self.shared, target);
                     state.seek_unshown = true;
                     if accurate {
                         state.video_seek = Some(VideoSeek { target, held: None });
@@ -1199,7 +1231,7 @@ impl Worker {
         flush(decoder, audio);
         self.shared.set_eos(false);
         self.shared.reset_to(Duration::ZERO);
-        state.restart_at(Duration::ZERO);
+        state.restart_at(&self.shared, Duration::ZERO);
         true
     }
 
@@ -1267,7 +1299,7 @@ impl Worker {
             return;
         };
         let diff = master_clock.as_secs_f64() - next.timestamp.as_secs_f64();
-        if diff < -PRESENT_TOLERANCE && buf.len() > BUFFER_FLOOR {
+        if diff < -PRESENT_TOLERANCE {
             return;
         }
 
@@ -1456,11 +1488,16 @@ impl Worker {
             return DecodeResult::Video;
         }
 
+        let duration = match decoded.packet().duration {
+            ticks if ticks > 0 => to_duration(ticks, self.video_time_base),
+            _ => Duration::from_secs_f64(1.0 / self.framerate),
+        };
         let frame = Frame {
             data: pack_nv12(&nv12),
             width: nv12.width(),
             height: nv12.height(),
             timestamp,
+            duration,
         };
 
         let capacity = self.shared.frame_buffer_capacity.load(Ordering::SeqCst);
@@ -1488,19 +1525,26 @@ fn flush(decoder: &mut ffmpeg::decoder::Video, audio: &mut Option<AudioTrack>) {
     }
 }
 
+/// The bytes in one row of the NV12 chroma plane, and its rows. Odd sizes round
+/// up: a frame of odd height has one more chroma row than half its height.
+pub(crate) fn nv12_chroma(width: u32, height: u32) -> (usize, usize) {
+    (width.div_ceil(2) as usize * 2, height.div_ceil(2) as usize)
+}
+
 /// Copies an NV12 frame into one tight buffer, row by row, because FFmpeg pads
 /// each plane's stride.
 fn pack_nv12(frame: &FFmpegFrame) -> Vec<u8> {
     let width = frame.width() as usize;
     let height = frame.height() as usize;
-    let mut data = Vec::with_capacity(width * height * 3 / 2);
+    let (chroma_width, chroma_rows) = nv12_chroma(frame.width(), frame.height());
+    let mut data = Vec::with_capacity(width * height + chroma_width * chroma_rows);
 
-    for (plane, rows) in [(0, height), (1, height / 2)] {
+    for (plane, row_bytes, rows) in [(0, width, height), (1, chroma_width, chroma_rows)] {
         let source = frame.data(plane);
         let stride = frame.stride(plane);
         for row in 0..rows {
             let start = row * stride;
-            data.extend_from_slice(&source[start..start + width]);
+            data.extend_from_slice(&source[start..start + row_bytes]);
         }
     }
 
@@ -1516,7 +1560,6 @@ struct VideoSeek {
 
 /// The decoder loop's own running state, separate from what the handle sees.
 struct LoopState {
-    buffering: bool,
     was_paused: bool,
     /// Tracks whether the audio clock is still moving. See `master_clock`.
     last_audio_clock: Duration,
@@ -1534,7 +1577,6 @@ struct LoopState {
 impl Default for LoopState {
     fn default() -> Self {
         Self {
-            buffering: true,
             was_paused: false,
             last_audio_clock: Duration::ZERO,
             audio_clock_at: Instant::now(),
@@ -1548,8 +1590,8 @@ impl Default for LoopState {
 }
 
 impl LoopState {
-    fn restart_at(&mut self, position: Duration) {
-        self.buffering = true;
+    fn restart_at(&mut self, shared: &Shared, position: Duration) {
+        shared.set_buffering(true);
         self.last_audio_clock = position;
         self.audio_clock_at = Instant::now();
         self.last_master = position;

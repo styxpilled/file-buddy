@@ -57,6 +57,9 @@ pub(super) struct Player {
     /// 1x or 2x, from the speed button. Kept across selections, as the sound
     /// is. A hold plays at 2x whatever it is, and goes back to it.
     pub speed: f64,
+    /// A drag on the bar holds the clip paused. Pause and play wait for the
+    /// release, which applies them.
+    pub held: bool,
     /// Space or the mouse button, down on the clip.
     press: Option<Press>,
     hold_task: Option<Task<()>>,
@@ -98,6 +101,7 @@ impl Default for Player {
             autoplay: false,
             paused: true,
             speed: 1.0,
+            held: false,
             press: None,
             hold_task: None,
         }
@@ -146,20 +150,27 @@ impl Player {
         }
     }
 
+    /// Pause or play the clip as the user chose. A hold of the speed plays it
+    /// whatever that is. Nothing changes while a drag holds it.
+    pub fn sync_paused(&self) {
+        if self.held {
+            return;
+        }
+        if let Some(video) = self.video() {
+            video.set_paused(self.paused && !self.holding());
+        }
+    }
+
     /// One clip only. The next selection follows the autoplay flag again.
     pub fn toggle_paused(&mut self) {
         self.paused = !self.paused;
-        if let Some(video) = self.video() {
-            video.set_paused(self.paused);
-        }
+        self.sync_paused();
     }
 
     pub fn toggle_autoplay(&mut self) {
         self.autoplay = !self.autoplay;
         self.paused = !self.autoplay;
-        if let Some(video) = self.video() {
-            video.set_paused(self.paused);
-        }
+        self.sync_paused();
     }
 
     /// The level as the pane shows it. The pane strikes it through while the
@@ -205,9 +216,9 @@ impl Player {
         };
         press.fast = true;
         if let Some(video) = self.video() {
-            video.set_paused(false);
             video.set_speed(FAST).ok();
         }
+        self.sync_paused();
     }
 
     /// A tap toggles pause. A hold goes back to 1x and to the pause from
@@ -237,14 +248,15 @@ impl Player {
         }
         if let Some(video) = self.video() {
             video.set_speed(self.speed).ok();
-            video.set_paused(self.paused);
         }
+        self.sync_paused();
     }
 
     /// A new clip in the pane. The press was for the old one.
     fn drop_press(&mut self) {
         self.press = None;
         self.hold_task = None;
+        self.held = false;
     }
 
     pub fn pressed(&self) -> bool {

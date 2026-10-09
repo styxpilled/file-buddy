@@ -187,21 +187,17 @@ pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .into_any_element()
 }
 
-/// The sort only orders a folder or Browse with nothing typed. A query keeps
-/// its ranking, so the sort buttons go while one is typed.
+/// The sort orders a folder, Browse with nothing typed, and each chunk of the
+/// results of a query.
 pub fn sort_buttons(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     h_flex()
         .gap_1()
-        .when(this.listing, |buttons| {
-            buttons.children(Sort::ALL.map(|sort| {
-                toggle(sort.label(), sort.label(), this.sort() == sort)
-                    .xsmall()
-                    .tooltip("S")
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| this.set_sort(sort, window, cx)),
-                    )
-            }))
-        })
+        .children(Sort::ALL.map(|sort| {
+            toggle(sort.label(), sort.label(), this.sort() == sort)
+                .xsmall()
+                .tooltip("S")
+                .on_click(cx.listener(move |this, _, window, cx| this.set_sort(sort, window, cx)))
+        }))
         .into_any_element()
 }
 

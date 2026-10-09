@@ -1,5 +1,6 @@
 //! One FTS5 query over four columns, weighted by the config. `query` turns what
-//! the user typed into the expression this runs.
+//! the user typed into the expression this runs. The results come in chunks by
+//! the first column a file matched, and the sort orders each chunk.
 
 pub mod folder;
 pub mod moment;
@@ -19,8 +20,10 @@ use crate::db::{ocr, segments};
 use crate::media::{self, Kind};
 use crate::search::folder::Sort;
 
-/// Which column gave a result its best score. The grid shows it as a badge.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The first column a result matched, in this order. The grid shows it as a
+/// badge, and a chunk of results never goes above the one before it: a recent
+/// speech match stays below an old filename match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Signal {
     Tags,
     Filename,
@@ -48,8 +51,7 @@ impl Signal {
 #[derive(Debug, Clone)]
 pub struct Hit {
     pub file: FileRow,
-    /// Lower is better, and it is always negative: the bm25 score, or minus the
-    /// fused score once the visual hits are merged in.
+    /// Lower is better: the bm25 score, or minus the likeness for a visual hit.
     pub score: f64,
     pub signal: Signal,
     /// The text that matched, from the column the badge names.
@@ -57,9 +59,6 @@ pub struct Hit {
     /// Where in the clip it matched: the speech segment, or the frame that
     /// looks most like the query.
     pub at_ms: Option<i64>,
-    /// The query matched a tag or the filename, whatever the badge says. Such a
-    /// file stays above the others when the visual hits merge in.
-    pub named: bool,
 }
 
 impl Hit {
@@ -161,8 +160,9 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
 
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
-        let scores = [row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?];
-        let column = best_column(scores);
+        let scores: [f64; 4] = [row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?];
+        // A column that did not match scores zero.
+        let column = scores.iter().position(|score| *score != 0.0).unwrap_or(0);
         let snippet: String = row.get(14 + column)?;
         let file = read_row(row)?;
         let matched = if snippet.trim().is_empty() {
@@ -176,15 +176,29 @@ pub fn search(conn: &Connection, request: &Request, weights: &Weights) -> Result
             signal: Signal::COLUMNS[column],
             matched,
             at_ms: None,
-            // A column that did not match scores zero.
-            named: scores[0] != 0.0 || scores[1] != 0.0,
         })
     })?;
     let mut hits: Vec<Hit> = rows.collect::<Result<_, _>>()?;
     for hit in &mut hits {
         find_moment(conn, hit, text)?;
     }
+    arrange(&mut hits, request.sort);
     Ok(hits)
+}
+
+/// Each chunk in the order of its signal, and the files in a chunk in the order
+/// of the sort. The visual chunk keeps the order of the likeness, which is all
+/// that says how well a file matched there.
+pub fn arrange(hits: &mut [Hit], sort: Sort) {
+    hits.sort_by(|a, b| {
+        a.signal.cmp(&b.signal).then_with(|| {
+            if a.signal == Signal::Visual {
+                return std::cmp::Ordering::Equal;
+            }
+            let key = |hit: &Hit| sort.key(&hit.file.path, hit.file.mtime, hit.file.size);
+            key(a).cmp(&key(b))
+        })
+    });
 }
 
 /// The speech segment or the screen line that matched, as the time and the
@@ -237,7 +251,6 @@ pub fn browse(conn: &Connection, request: &Request) -> Result<Vec<Hit>> {
             score: 0.0,
             signal: Signal::Filename,
             at_ms: None,
-            named: false,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -264,14 +277,6 @@ fn filters(request: &Request, values: &mut Vec<Value>, table: &str) -> String {
     clauses
 }
 
-/// The column that gave the best score. A column that did not match scores
-/// zero, so the lowest score wins.
-fn best_column(scores: [f64; 4]) -> usize {
-    (0..scores.len())
-        .min_by(|a, b| scores[*a].total_cmp(&scores[*b]))
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,7 +298,6 @@ mod tests {
             signal: Signal::Speech,
             matched: matched.into(),
             at_ms,
-            named: false,
         }
     }
 
@@ -307,10 +311,46 @@ mod tests {
         assert_eq!(hit("a.mp4", None).snippet(), "a.mp4");
     }
 
+    fn file(id: i64, name: &str, signal: Signal, mtime: i64) -> Hit {
+        let mut hit = hit(name, None);
+        hit.file.id = id;
+        hit.file.path = format!("C:/clips/{name}").into();
+        hit.file.filename = name.into();
+        hit.file.mtime = mtime;
+        hit.signal = signal;
+        hit
+    }
+
     #[test]
-    fn the_strongest_column_gives_the_badge() {
-        let column = best_column([0.0, -1.5, -0.2, 0.0]);
-        assert_eq!(Signal::COLUMNS[column], Signal::Filename);
+    fn the_sort_orders_each_chunk_and_no_chunk_passes_another() {
+        let mut hits = vec![
+            file(1, "old name.mp4", Signal::Filename, 10),
+            file(2, "new speech.mp4", Signal::Speech, 90),
+            file(3, "new name.mp4", Signal::Filename, 50),
+            file(4, "tagged.mp4", Signal::Tags, 1),
+            file(5, "best look.mp4", Signal::Visual, 1),
+            file(6, "new look.mp4", Signal::Visual, 99),
+        ];
+        arrange(&mut hits, Sort::Recent);
+        let ids: Vec<i64> = hits.iter().map(|hit| hit.file.id).collect();
+        assert_eq!(ids, [4, 3, 1, 2, 5, 6]);
+    }
+
+    #[test]
+    fn the_first_matched_column_gives_the_chunk() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let path = PathBuf::from("C:/clips/monkey.mp4");
+        let scanned = files::Scanned {
+            path: &path,
+            hash: "h",
+            kind: Kind::Video,
+            size: 1,
+            mtime: 1,
+        };
+        files::upsert(db.conn(), &scanned).unwrap();
+        crate::db::fts::rebuild(db.conn()).unwrap();
+        let hits = search(db.conn(), &Request::new("monk"), &Weights::default()).unwrap();
+        assert_eq!(hits[0].signal, Signal::Filename);
     }
 
     #[test]

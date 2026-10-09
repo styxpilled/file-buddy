@@ -4,7 +4,7 @@
 //! the Speech tab seeks. In the Studio the bar also holds the range, with a
 //! handle at each end.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
@@ -20,8 +20,6 @@ use crate::media;
 use crate::studio::Edge;
 use crate::ui::{FileBuddy, Page};
 
-/// How often a drag seeks. Each seek restarts the decoder at a keyframe.
-const SCRUB_INTERVAL: Duration = Duration::from_millis(60);
 /// How far `shift-left` and `shift-right` move.
 const SKIP: Duration = Duration::from_secs(5);
 pub(super) const HEIGHT: f32 = 16.;
@@ -42,10 +40,9 @@ pub(super) struct SeekBar {
     /// The pointer over the bar: its share of the clip, and its distance from
     /// the start of the bar.
     hover: Option<(f32, Pixels)>,
-    last_scrub: Instant,
-    /// Whether the clip was paused before a drag paused it. A clip that plays
-    /// on while the bar moves fights every seek.
-    paused_before: Option<bool>,
+    /// Where a drag wants the clip, while the seek before it still decodes.
+    /// Only the latest place counts.
+    pending: Option<Duration>,
     _events: Subscription,
 }
 
@@ -59,8 +56,7 @@ impl SeekBar {
             state,
             dragging: None,
             hover: None,
-            last_scrub: Instant::now(),
-            paused_before: None,
+            pending: None,
             _events: events,
         }
     }
@@ -80,23 +76,66 @@ fn time_at(video: &Video, share: f32) -> Duration {
     video.duration().mul_f32(share.clamp(0., 1.))
 }
 
-impl SeekBar {
-    fn hold(&mut self, video: &Video) {
-        if self.paused_before.is_none() {
-            self.paused_before = Some(video.paused());
+impl FileBuddy {
+    /// A drag pauses the clip until the release. A clip that plays on while
+    /// the bar moves fights every seek.
+    fn hold(&mut self, clip: Clip) {
+        let Some(video) = self.clip_video(clip).cloned() else {
+            return;
+        };
+        let held = match clip {
+            Clip::Pane => &mut self.player.held,
+            Clip::Studio => &mut self.studio.held,
+        };
+        if !*held {
+            *held = true;
             video.set_paused(true);
         }
     }
 
-    /// After the exact seek, so a clip at its end does not restart at zero.
-    fn let_go(&mut self, video: &Video) {
-        if let Some(paused) = self.paused_before.take() {
-            video.set_paused(paused);
+    /// The release seeks to the exact place first, so a clip at its end does
+    /// not restart at zero. Then the clip plays or stays paused as the user
+    /// chose, also with a choice made during the drag.
+    fn let_go(&mut self, clip: Clip, to: Duration) {
+        self.bar_of(clip).pending = None;
+        if let Some(video) = self.clip_video(clip) {
+            video.seek(to, true).ok();
+        }
+        match clip {
+            Clip::Pane => {
+                if std::mem::take(&mut self.player.held) {
+                    self.player.sync_paused();
+                }
+            }
+            Clip::Studio => {
+                if std::mem::take(&mut self.studio.held) {
+                    self.sync_studio_paused();
+                }
+            }
         }
     }
-}
 
-impl FileBuddy {
+    /// A drag seeks to the exact frame, one seek at a time, so a clip that
+    /// decodes fast follows the pointer closely and a slow one does not fall
+    /// behind it.
+    fn scrub_to(&mut self, clip: Clip, to: Duration) {
+        self.hold(clip);
+        self.bar_of(clip).pending = Some(to);
+        self.send_pending(clip);
+    }
+
+    fn send_pending(&mut self, clip: Clip) {
+        let Some(video) = self.clip_video(clip).cloned() else {
+            return;
+        };
+        if video.seeking() {
+            return;
+        }
+        if let Some(to) = self.bar_of(clip).pending.take() {
+            video.seek(to, true).ok();
+        }
+    }
+
     fn clip_video(&self, clip: Clip) -> Option<&Video> {
         match clip {
             Clip::Pane => self.player.video(),
@@ -120,33 +159,24 @@ impl FileBuddy {
         }
     }
 
-    /// A drag seeks to keyframes, which is fast. The click, or the end of the
-    /// drag, seeks to the exact time.
     fn scrub(&mut self, clip: Clip, event: &SliderEvent, cx: &mut Context<Self>) {
         let Some(video) = self.clip_video(clip).cloned() else {
             return;
         };
-        let bar = self.bar_of(clip);
         match event {
             SliderEvent::Change(value) => {
-                bar.dragging = Some(value.end());
-                bar.hold(&video);
-                if bar.last_scrub.elapsed() >= SCRUB_INTERVAL {
-                    bar.last_scrub = Instant::now();
-                    video.seek(time_at(&video, value.end()), false).ok();
-                }
+                self.bar_of(clip).dragging = Some(value.end());
+                self.scrub_to(clip, time_at(&video, value.end()));
             }
             SliderEvent::Release(value) => {
-                bar.dragging = None;
-                video.seek(time_at(&video, value.end()), true).ok();
-                bar.let_go(&video);
+                self.bar_of(clip).dragging = None;
+                self.let_go(clip, time_at(&video, value.end()));
             }
         }
         cx.notify();
     }
 
-    /// A drag on a handle moves it, and the clip follows it to keyframes. The
-    /// release seeks to the exact time.
+    /// A drag on a handle moves it, and the clip follows it.
     fn drag_handle(&mut self, edge: Edge, share: f32, cx: &mut Context<Self>) {
         let Some(edit) = &mut self.studio.edit else {
             return;
@@ -155,14 +185,7 @@ impl FileBuddy {
         edit.drag(edge, at);
         let at = edit.range.at(edge);
         self.studio.handle = Some(edge);
-        let bar = &mut self.studio.seek_bar;
-        if let Some(video) = &self.studio.video {
-            bar.hold(video);
-            if bar.last_scrub.elapsed() >= SCRUB_INTERVAL {
-                bar.last_scrub = Instant::now();
-                video.seek(Duration::from_millis(at), false).ok();
-            }
-        }
+        self.scrub_to(Clip::Studio, Duration::from_millis(at));
         cx.notify();
     }
 
@@ -170,11 +193,9 @@ impl FileBuddy {
         let Some(edge) = self.studio.handle.take() else {
             return;
         };
-        if let (Some(edit), Some(video)) = (&self.studio.edit, &self.studio.video) {
-            video
-                .seek(Duration::from_millis(edit.range.at(edge)), true)
-                .ok();
-            self.studio.seek_bar.let_go(video);
+        if let Some(edit) = &self.studio.edit {
+            let at = Duration::from_millis(edit.range.at(edge));
+            self.let_go(Clip::Studio, at);
         }
         cx.notify();
     }
@@ -206,12 +227,14 @@ impl FileBuddy {
 
     /// Move the bar to where the clip is. Only a change is written, because a
     /// write redraws the window, and a paused clip must not redraw forever.
+    /// A drag sends its next seek from here, once the last one has its frame.
     pub(super) fn sync_seek_bar(
         &mut self,
         clip: Clip,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.send_pending(clip);
         if self.bar_of(clip).dragging.is_some() {
             return;
         }

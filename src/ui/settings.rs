@@ -441,7 +441,7 @@ fn export_folder(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement
 fn weights(settings: &Settings, cx: &App) -> AnyElement {
     section(
         "Search weights",
-        "How much a match in each kind of text counts. A higher number ranks it above the others. Visual is how much what a frame shows counts against all text, which counts 1.",
+        "The sort orders the results. These only pick the 500 best text matches when more match. Visual above 0 adds the files whose frames look like the query, after the text matches.",
         cx,
     )
     .children(
