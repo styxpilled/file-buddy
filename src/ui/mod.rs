@@ -129,7 +129,9 @@ gpui_kit::actions!(
         OpenInStudio,
         SetIn,
         SetOut,
-        ExportEdit
+        ExportEdit,
+        AddText,
+        DeleteText
     ]
 );
 
@@ -662,13 +664,18 @@ impl FileBuddy {
     }
 
     fn studio_input_focused(&self, window: &Window, cx: &App) -> bool {
+        let studio = &self.studio;
         self.page() == Page::Studio
-            && self
-                .studio
+            && (studio
                 .width_input
                 .read(cx)
                 .focus_handle(cx)
                 .is_focused(window)
+                || studio
+                    .words_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window))
     }
 
     fn focus_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {

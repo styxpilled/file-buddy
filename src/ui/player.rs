@@ -266,11 +266,19 @@ impl FileBuddy {
         }
     }
 
-    fn sync_speed(&self, clip: Clip) {
+    pub(super) fn sync_speed(&self, clip: Clip) {
         if let Some(video) = self.clip_video(clip) {
-            video
-                .set_speed(self.player.speed_of(self.transport_of(clip)))
-                .ok();
+            video.set_speed(self.clip_speed(clip)).ok();
+        }
+    }
+
+    /// The speed button or a hold, and in the Studio the speed of the edit on
+    /// top of it.
+    fn clip_speed(&self, clip: Clip) -> f64 {
+        let speed = self.player.speed_of(self.transport_of(clip));
+        match (clip, &self.studio.edit) {
+            (Clip::Studio, Some(edit)) => speed * edit.speed,
+            _ => speed,
         }
     }
 
@@ -305,9 +313,8 @@ impl FileBuddy {
 
     /// The pause and the speed the user chose, on a clip the Studio opens.
     pub(super) fn apply_transport(&self, clip: Clip, video: &Video) {
-        let transport = self.transport_of(clip);
-        video.set_speed(self.player.speed_of(transport)).ok();
-        video.set_paused(!transport.playing());
+        video.set_speed(self.clip_speed(clip)).ok();
+        video.set_paused(!self.transport_of(clip).playing());
     }
 
     pub(super) fn toggle_paused(&mut self, clip: Clip, cx: &mut Context<Self>) {

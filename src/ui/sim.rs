@@ -112,7 +112,10 @@ fn listen(sender: mpsc::UnboundedSender<Request>) -> Result<()> {
             let (reply, answer) = std::sync::mpsc::channel();
             sender.unbounded_send((line, reply))?;
             let answer = answer.recv()?;
-            if writeln!(writer, "{answer}").and_then(|_| writer.flush()).is_err() {
+            if writeln!(writer, "{answer}")
+                .and_then(|_| writer.flush())
+                .is_err()
+            {
                 break;
             }
         }
@@ -130,7 +133,12 @@ struct Sim {
 }
 
 impl Sim {
-    async fn step(&mut self, step: &str, handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<String> {
+    async fn step(
+        &mut self,
+        step: &str,
+        handle: AnyWindowHandle,
+        cx: &mut AsyncApp,
+    ) -> Result<String> {
         let (kind, value) = step.split_once(':').unwrap_or((step, ""));
         let answer = match kind {
             "keys" => {
@@ -169,7 +177,9 @@ impl Sim {
                 // As in drive.ps1. A full settle after a key down is as long
                 // as a hold, so a tap would become one.
                 if kind == "kdown" {
-                    cx.background_executor().timer(Duration::from_millis(30)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(30))
+                        .await;
                     return Ok("ok".to_string());
                 }
                 "ok".to_string()
@@ -191,13 +201,21 @@ impl Sim {
             }
             "down" | "mdown" => {
                 let at = coordinates::<2>(value)?;
-                let button = if kind == "mdown" { MouseButton::Middle } else { MouseButton::Left };
+                let button = if kind == "mdown" {
+                    MouseButton::Middle
+                } else {
+                    MouseButton::Left
+                };
                 self.move_to((at[0], at[1]), handle, cx)?;
                 self.button(button, true, 1, handle, cx)?;
                 "ok".to_string()
             }
             "up" | "mup" => {
-                let button = if kind == "mup" { MouseButton::Middle } else { MouseButton::Left };
+                let button = if kind == "mup" {
+                    MouseButton::Middle
+                } else {
+                    MouseButton::Left
+                };
                 self.button(button, false, 1, handle, cx)?;
                 "ok".to_string()
             }
@@ -209,7 +227,9 @@ impl Sim {
                     let x = from.0 + (at[0] - from.0) * i / 20;
                     let y = from.1 + (at[1] - from.1) * i / 20;
                     self.move_to((x, y), handle, cx)?;
-                    cx.background_executor().timer(Duration::from_millis(10)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_millis(10))
+                        .await;
                 }
                 "ok".to_string()
             }
@@ -237,7 +257,10 @@ impl Sim {
                 self.move_to((at[0], at[1]), handle, cx)?;
                 // GPUI keeps the cursor it picks to itself, and sets it only
                 // while the real pointer is over the window.
-                format!("hover {},{}: unknown, sim cannot read the cursor", at[0], at[1])
+                format!(
+                    "hover {},{}: unknown, sim cannot read the cursor",
+                    at[0], at[1]
+                )
             }
             "shot" => {
                 cx.background_executor().timer(SETTLE).await;
@@ -247,7 +270,9 @@ impl Sim {
             }
             "wait" => {
                 let ms: u64 = value.parse().context("wait takes milliseconds")?;
-                cx.background_executor().timer(Duration::from_millis(ms)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(ms))
+                    .await;
                 return Ok("ok".to_string());
             }
             _ => bail!("unknown step {step}"),
@@ -256,7 +281,12 @@ impl Sim {
         Ok(answer)
     }
 
-    fn move_to(&mut self, at: (i32, i32), handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<()> {
+    fn move_to(
+        &mut self,
+        at: (i32, i32),
+        handle: AnyWindowHandle,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
         self.pointer = at;
         let (pressed_button, modifiers) = (self.pressed, self.modifiers);
         handle.update(cx, |_, window, cx| -> Result<()> {
@@ -293,14 +323,25 @@ impl Sim {
                     first_mouse: false,
                 })
             } else {
-                PlatformInput::MouseUp(MouseUpEvent { button, position, modifiers, click_count })
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button,
+                    position,
+                    modifiers,
+                    click_count,
+                })
             };
             window.dispatch_event(event, cx);
             Ok(())
         })?
     }
 
-    fn key(&mut self, vk: u8, down: bool, handle: AnyWindowHandle, cx: &mut AsyncApp) -> Result<()> {
+    fn key(
+        &mut self,
+        vk: u8,
+        down: bool,
+        handle: AnyWindowHandle,
+        cx: &mut AsyncApp,
+    ) -> Result<()> {
         let modifier = match vk {
             16 | 160 | 161 => Some(&mut self.modifiers.shift),
             17 | 162 | 163 => Some(&mut self.modifiers.control),
@@ -349,7 +390,9 @@ fn coordinates<const N: usize>(value: &str) -> Result<[i32; N]> {
         .map(|part| part.trim().parse::<i32>())
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| format!("not numbers: {value}"))?;
-    numbers.try_into().map_err(|_| anyhow!("expected {N} numbers: {value}"))
+    numbers
+        .try_into()
+        .map_err(|_| anyhow!("expected {N} numbers: {value}"))
 }
 
 fn hwnd(window: &Window) -> Result<HWND> {
@@ -372,14 +415,20 @@ fn window_frame(window: &Window) -> Result<((u32, u32), (i32, i32))> {
         GetWindowRect(hwnd, &mut rect)?;
         ClientToScreen(hwnd, &mut origin).ok()?;
     }
-    let size = ((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32);
+    let size = (
+        (rect.right - rect.left) as u32,
+        (rect.bottom - rect.top) as u32,
+    );
     Ok((size, (origin.x - rect.left, origin.y - rect.top)))
 }
 
 fn to_logical(window: &Window, (x, y): (i32, i32)) -> Result<Point<gpui::Pixels>> {
     let (_, (dx, dy)) = window_frame(window)?;
     let scale = window.scale_factor();
-    Ok(point(px((x - dx) as f32 / scale), px((y - dy) as f32 / scale)))
+    Ok(point(
+        px((x - dx) as f32 / scale),
+        px((y - dy) as f32 / scale),
+    ))
 }
 
 /// The last frame, drawn again off screen, in a picture the size of the window
@@ -389,7 +438,9 @@ fn shot(window: &Window, path: &str) -> Result<()> {
     let ((width, height), (dx, dy)) = window_frame(window)?;
     let mut picture = image::RgbaImage::new(width, height);
     image::imageops::overlay(&mut picture, &frame, dx.into(), dy.into());
-    picture.save(path).with_context(|| format!("writing {path}"))
+    picture
+        .save(path)
+        .with_context(|| format!("writing {path}"))
 }
 
 fn wheel_scroll_lines() -> f32 {
@@ -488,8 +539,14 @@ fn send_keys(text: &str) -> Result<Vec<Keystroke>> {
         for key in keys {
             let mut modifiers = modifiers;
             modifiers.shift |= key.shift;
-            let key_char = key.key_char.filter(|_| !modifiers.control && !modifiers.alt);
-            keystrokes.push(Keystroke { modifiers, key: key.key, key_char });
+            let key_char = key
+                .key_char
+                .filter(|_| !modifiers.control && !modifiers.alt);
+            keystrokes.push(Keystroke {
+                modifiers,
+                key: key.key,
+                key_char,
+            });
         }
         modifiers = group.unwrap_or_default();
     }
@@ -505,7 +562,11 @@ struct Key {
 
 impl Key {
     fn named(key: &str) -> Self {
-        Key { key: key.into(), key_char: None, shift: false }
+        Key {
+            key: key.into(),
+            key_char: None,
+            shift: false,
+        }
     }
 
     /// An upper case letter is shift and the lower case key.
@@ -514,7 +575,11 @@ impl Key {
             ' ' => "space".into(),
             c => c.to_ascii_lowercase().to_string(),
         };
-        Key { key, key_char: Some(c.to_string()), shift: c.is_ascii_uppercase() }
+        Key {
+            key,
+            key_char: Some(c.to_string()),
+            shift: c.is_ascii_uppercase(),
+        }
     }
 }
 
@@ -559,9 +624,15 @@ mod tests {
     #[test]
     fn send_keys_spelling() {
         assert_eq!(spelled("aB"), ["aSome(\"a\")", "shift-bSome(\"B\")"]);
-        assert_eq!(spelled("{ESC}{DOWN 2}~"), ["escapeNone", "downNone", "downNone", "enterNone"]);
+        assert_eq!(
+            spelled("{ESC}{DOWN 2}~"),
+            ["escapeNone", "downNone", "downNone", "enterNone"]
+        );
         assert_eq!(spelled("^a+{TAB}"), ["ctrl-aNone", "shift-tabNone"]);
-        assert_eq!(spelled("^(ab)c"), ["ctrl-aNone", "ctrl-bNone", "cSome(\"c\")"]);
+        assert_eq!(
+            spelled("^(ab)c"),
+            ["ctrl-aNone", "ctrl-bNone", "cSome(\"c\")"]
+        );
         assert_eq!(spelled("{+}{}}"), ["+Some(\"+\")", "}Some(\"}\")"]);
     }
 }

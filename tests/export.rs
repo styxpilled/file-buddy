@@ -84,6 +84,44 @@ fn each_format_exports_a_range_that_probes() {
 }
 
 #[test]
+fn a_speed_change_keeps_the_sound_at_the_new_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mp4");
+    fixture(&source);
+    for (speed, length) in [(0.5, 6.), (4., 0.75)] {
+        let mut edit = Edit::new(source.clone(), source.clone(), 3_000, (320, 240));
+        edit.speed = speed;
+        let destination = dir.path().join(format!("out {speed}.mp4"));
+        export::run(&edit, &Controls::default(), &destination, |_| {}).expect("export");
+        let probe = probe(&destination, Kind::Video).unwrap();
+        assert_eq!(probe.audio_codec.as_deref(), Some("aac"));
+        let duration = probe.duration.expect("a duration");
+        assert!((duration - length).abs() < 0.15, "{speed}x: {duration} s");
+    }
+}
+
+#[test]
+fn a_text_with_filter_characters_in_its_words_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mp4");
+    fixture(&source);
+    let mut edit = Edit::new(source.clone(), source, 3_000, (320, 240));
+    let at = edit.add_text();
+    edit.texts[at].words = "it's 5:00, [ok]; a\\b %{n}\nline two".into();
+    edit.texts[at].boxed = true;
+    edit.texts[at].start_ms = 1_000;
+    for format in [Format::Mp4, Format::Gif] {
+        let destination = dir.path().join(format!("out.{}", format.extension()));
+        let controls = Controls {
+            format,
+            ..Controls::default()
+        };
+        export::run(&edit, &controls, &destination, |_| {}).expect("export");
+        assert!(probe(&destination, Kind::Video).is_ok());
+    }
+}
+
+#[test]
 fn a_crop_and_a_scale_set_the_frame_size() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.mp4");

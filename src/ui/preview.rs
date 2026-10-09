@@ -44,9 +44,9 @@ const NAME_LINE_HEIGHT: f32 = 1.4;
 const TAG_HEIGHT: f32 = 16.;
 /// How far the highlight of the row under the cursor reaches past its text.
 /// The panel reaches as far past the pane, so the highlight is not cut off.
-const ROW_INSET: f32 = 4.;
+pub(super) const ROW_INSET: f32 = 4.;
 /// The time in front of a row, with room for "10:00".
-const TIME_WIDTH: f32 = 36.;
+pub(super) const TIME_WIDTH: f32 = 36.;
 /// The Play and Pause button, with room for the longer label.
 const PAUSE_WIDTH: f32 = 76.;
 /// The row of controls above the clip, in the pane and in the Studio.

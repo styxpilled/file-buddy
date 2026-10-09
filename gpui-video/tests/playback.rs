@@ -754,7 +754,12 @@ fn the_last_frames_play_for_their_time() {
         let video = open(&path);
         video.set_paused(false);
         let interval = Duration::from_secs_f64(1.0 / video.framerate());
-        video.seek(video.duration().saturating_sub(Duration::from_secs(1)), true).expect("seek failed");
+        video
+            .seek(
+                video.duration().saturating_sub(Duration::from_secs(1)),
+                true,
+            )
+            .expect("seek failed");
         wait_for_seek(&video, Duration::from_secs(3))
             .unwrap_or_else(|| panic!("seek never showed a frame ({})", path.display()));
 

@@ -215,7 +215,11 @@ fn to_rgb(frame: &[u8], alpha: bool, rgb: &mut Vec<u8>) {
     }
     for pixel in frame.chunks_exact(4) {
         let a = u16::from(pixel[3]);
-        rgb.extend(pixel[..3].iter().map(|c| ((u16::from(*c) * a + 127) / 255) as u8));
+        rgb.extend(
+            pixel[..3]
+                .iter()
+                .map(|c| ((u16::from(*c) * a + 127) / 255) as u8),
+        );
     }
 }
 
@@ -281,7 +285,11 @@ mod tests {
     #[test]
     fn transparent_pixels_go_on_black() {
         let mut rgb = Vec::new();
-        to_rgb(&[200, 100, 50, 255, 200, 100, 50, 0, 200, 100, 50, 128], true, &mut rgb);
+        to_rgb(
+            &[200, 100, 50, 255, 200, 100, 50, 0, 200, 100, 50, 128],
+            true,
+            &mut rgb,
+        );
         assert_eq!(rgb, vec![200, 100, 50, 0, 0, 0, 100, 50, 25]);
     }
 }

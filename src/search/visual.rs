@@ -194,7 +194,11 @@ pub fn hits(conn: &Connection, request: &Request, scored: &[Scored]) -> Result<V
 pub fn fuse(text: Vec<Hit>, visual: Vec<Hit>, limit: usize) -> Vec<Hit> {
     let in_text: HashSet<i64> = text.iter().map(|hit| hit.file.id).collect();
     text.into_iter()
-        .chain(visual.into_iter().filter(|hit| !in_text.contains(&hit.file.id)))
+        .chain(
+            visual
+                .into_iter()
+                .filter(|hit| !in_text.contains(&hit.file.id)),
+        )
         .take(limit)
         .collect()
 }

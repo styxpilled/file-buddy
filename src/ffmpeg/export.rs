@@ -9,7 +9,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail};
 
 use crate::ffmpeg::{self, Tool};
-use crate::studio::{Controls, Crop, Edit, Format, Quality};
+use crate::studio::{self, Controls, Crop, Edit, Format, Quality, Text};
 
 /// H.264 needs even dimensions. This takes at most one pixel off an edge.
 const EVEN: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2";
@@ -72,6 +72,10 @@ pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
         Format::Gif | Format::Webp => args.push(&["-an"]),
     }
     args.push(&["-sn", "-dn", "-vf", &video_filter(edit, controls)]);
+    let sound = matches!(controls.format, Format::Mp4 | Format::Webm);
+    if sound && edit.speed != 1. {
+        args.push(&["-af", &atempo(edit.speed)]);
+    }
     match controls.format {
         Format::Mp4 => {
             let cq = h264_cq(controls.mp4_quality).to_string();
@@ -105,9 +109,19 @@ pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
     args.0
 }
 
-/// A GIF makes its palette from its own frames, in the same FFmpeg call.
+/// A GIF makes its palette from its own frames, in the same FFmpeg call. The
+/// frame rate applies after the speed change.
 fn video_filter(edit: &Edit, controls: &Controls) -> String {
     let mut filter = frame_filter(edit);
+    for text in &edit.texts {
+        if let Some(drawtext) = text_filter(edit, text) {
+            filter.push(',');
+            filter.push_str(&drawtext);
+        }
+    }
+    if edit.speed != 1. {
+        filter.push_str(&format!(",setpts=PTS/{}", edit.speed));
+    }
     if let Some(fps) = controls.fps() {
         filter.push_str(&format!(",fps={fps}"));
     }
@@ -134,6 +148,67 @@ fn frame_filter(edit: &Edit) -> String {
         filter.push_str(&format!(",scale={width}:{height}:flags=lanczos"));
     }
     filter
+}
+
+/// One text, centered on its place and shown in its time. The times are
+/// before the speed change, because the filter comes before it. `y_align=font`
+/// puts the ascent at `y` on every line, as GPUI does a little lower.
+fn text_filter(edit: &Edit, text: &Text) -> Option<String> {
+    if edit.size.0 == 0 || edit.size.1 == 0 || text.trimmed().is_empty() {
+        return None;
+    }
+    let (start, end) = edit.text_window(text)?;
+    let output = edit.output_size();
+    let font_px = text.font_px(output.1);
+    let (x, y) = text.center_px(output);
+    let y = y + Text::ascent_offset_px(font_px);
+    let mut filter = format!(
+        "drawtext=fontfile={}:expansion=none:text={}:fontsize={font_px}:fontcolor=white\
+         :text_align=C:y_align=font:x={x:.2}-text_w/2:y={y:.2}-text_h/2:enable={}",
+        escape(studio::FONT_FILE),
+        escape(text.trimmed()),
+        escape(&format!("between(t,{start:.3},{end:.3})")),
+    );
+    if text.boxed {
+        filter.push_str(&format!(
+            ":box=1:boxcolor=black:boxborderw={}",
+            Text::padding_px(font_px)
+        ));
+    }
+    Some(filter)
+}
+
+/// A value inside a filter option, which FFmpeg unescapes twice: once for the
+/// filter graph and once for the options of the filter.
+fn escape(value: &str) -> String {
+    let mut option = String::new();
+    for c in value.chars() {
+        if matches!(c, '\\' | '\'' | ':') {
+            option.push('\\');
+        }
+        option.push(c);
+    }
+    let mut graph = String::new();
+    for c in option.chars() {
+        if matches!(c, '\\' | '\'' | '[' | ']' | ',' | ';') {
+            graph.push('\\');
+        }
+        graph.push(c);
+    }
+    graph
+}
+
+/// `atempo` keeps the pitch. Above 2x one filter skips samples, so the chain
+/// takes steps of 2x.
+fn atempo(speed: f64) -> String {
+    let mut steps = Vec::new();
+    let mut rest = speed;
+    while rest > 2. {
+        steps.push("atempo=2".to_string());
+        rest /= 2.;
+    }
+    steps.push(format!("atempo={rest}"));
+    steps.join(",")
 }
 
 #[derive(Default)]
@@ -175,7 +250,7 @@ pub fn run(
         text
     });
 
-    let length_us = (edit.range.len_ms() * 1000).max(1) as f32;
+    let length_us = (edit.output_ms() * 1000).max(1) as f32;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(us) = line
@@ -452,6 +527,102 @@ mod tests {
             format!("{EVEN},scale=720:404:flags=lanczos")
         );
         edit.size = (0, 0);
+        assert_eq!(after(&strings_of(&edit, Controls::default()), "-vf"), EVEN);
+    }
+
+    #[test]
+    fn the_speed_goes_last_in_the_video_and_the_sound() {
+        let at = |speed, format| {
+            let mut edit = edit();
+            edit.speed = speed;
+            strings_of(
+                &edit,
+                Controls {
+                    format,
+                    ..Controls::default()
+                },
+            )
+        };
+        let sound = |args: &[String]| {
+            args.iter()
+                .position(|arg| arg == "-af")
+                .map(|at| args[at + 1].clone())
+        };
+
+        let mp4 = at(1., Format::Mp4);
+        assert_eq!(after(&mp4, "-vf"), EVEN);
+        assert_eq!(sound(&mp4), None);
+
+        let mp4 = at(0.5, Format::Mp4);
+        assert_eq!(after(&mp4, "-vf"), format!("{EVEN},setpts=PTS/0.5"));
+        assert_eq!(sound(&mp4).as_deref(), Some("atempo=0.5"));
+        let webm = at(4., Format::Webm);
+        assert_eq!(after(&webm, "-vf"), format!("{EVEN},setpts=PTS/4"));
+        assert_eq!(sound(&webm).as_deref(), Some("atempo=2,atempo=2"));
+        assert_eq!(
+            sound(&at(3., Format::Mp4)).as_deref(),
+            Some("atempo=2,atempo=1.5")
+        );
+
+        // No sound to change, and the frame rate follows the speed.
+        let gif = at(4., Format::Gif);
+        assert_eq!(sound(&gif), None);
+        assert_eq!(
+            after(&gif, "-vf"),
+            format!("{EVEN},setpts=PTS/4,fps=15,split[a][b];[a]palettegen[p];[b][p]paletteuse")
+        );
+        let webp = at(0.5, Format::Webp);
+        assert_eq!(sound(&webp), None);
+        assert_eq!(after(&webp, "-vf"), format!("{EVEN},setpts=PTS/0.5,fps=20"));
+        assert!(webp.contains(&"-an".to_string()));
+    }
+
+    #[test]
+    fn a_value_is_escaped_for_the_graph_and_for_the_filter() {
+        assert_eq!(
+            escape("C:/Windows/Fonts/arialbd.ttf"),
+            r"C\\:/Windows/Fonts/arialbd.ttf"
+        );
+        assert_eq!(escape(r"a:b'c\d"), r"a\\:b\\\'c\\\\d");
+        assert_eq!(escape("e,f[g];h\ni"), "e\\,f\\[g\\]\\;h\ni");
+        assert_eq!(escape("between(t,0,1)"), r"between(t\,0\,1)");
+    }
+
+    #[test]
+    fn a_text_is_drawn_after_the_scale_and_before_the_speed() {
+        let mut edit = edit();
+        edit.crop = Crop {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+        };
+        edit.max_width = crate::studio::MaxWidth::Pixels(640);
+        edit.speed = 2.;
+        let at = edit.add_text();
+        edit.texts[at].words = " it's 5:00 \n".into();
+        edit.texts[at].boxed = true;
+        edit.texts[at].start_ms = 4_000;
+        // 8% of 360 is 28.8, so 29 px with a 7 px box.
+        assert_eq!(
+            after(&strings_of(&edit, Controls::default()), "-vf"),
+            concat!(
+                r"crop=1280:720:0:0,scale=640:360:flags=lanczos,",
+                r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
+                r":text=it\\\'s 5\\:00:fontsize=29:fontcolor=white:text_align=C:y_align=font",
+                r":x=320.00-text_w/2:y=180.48-text_h/2:enable=between(t\,0.750\,3.750)",
+                r":box=1:boxcolor=black:boxborderw=7,setpts=PTS/2",
+            )
+        );
+    }
+
+    #[test]
+    fn a_text_outside_the_range_or_with_no_words_is_not_drawn() {
+        let mut edit = edit();
+        let at = edit.add_text();
+        edit.texts[at].end_ms = 3_000;
+        let none = edit.add_text();
+        edit.texts[none].words = "  \n ".into();
         assert_eq!(after(&strings_of(&edit, Controls::default()), "-vf"), EVEN);
     }
 

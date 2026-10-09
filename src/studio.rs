@@ -1,5 +1,5 @@
-//! The edit the Studio holds: a source, the range cut from it, the crop and the
-//! scale. Nothing of it goes to the database. `ffmpeg::export` makes a file from
+//! The edit the Studio holds: a source, the range cut from it, the crop, the
+//! scale, the speed and the texts. Nothing of it goes to the database. `ffmpeg::export` makes a file from
 //! it.
 
 use std::path::{Path, PathBuf};
@@ -18,6 +18,9 @@ pub struct Edit {
     pub crop: Crop,
     pub aspect: Aspect,
     pub max_width: MaxWidth,
+    /// One of `SPEEDS`.
+    pub speed: f64,
+    pub texts: Vec<Text>,
 }
 
 impl Edit {
@@ -35,7 +38,72 @@ impl Edit {
             crop: Crop::full(size),
             aspect: Aspect::Free,
             max_width: MaxWidth::Source,
+            speed: 1.,
+            texts: Vec::new(),
         }
+    }
+
+    /// `n`. A text at the center, for the whole range. Returns its index.
+    pub fn add_text(&mut self) -> usize {
+        self.texts.push(Text {
+            words: "Text".into(),
+            x: 0.5,
+            y: 0.5,
+            size: DEFAULT_TEXT_SIZE,
+            boxed: false,
+            start_ms: self.range.start_ms,
+            end_ms: self.range.end_ms,
+        });
+        self.texts.len() - 1
+    }
+
+    /// A drag on the end of a text's bar. It stops at the other end.
+    pub fn drag_text_edge(&mut self, index: usize, edge: Edge, at_ms: u64) {
+        let duration_ms = self.duration_ms;
+        if let Some(text) = self.texts.get_mut(index) {
+            match edge {
+                Edge::Start => text.start_ms = at_ms.min(text.end_ms),
+                Edge::End => text.end_ms = at_ms.clamp(text.start_ms, duration_ms),
+            }
+        }
+    }
+
+    /// A drag on the middle of a text's bar, `delta_ms` from where it was when
+    /// the drag started. The length stays, and the text stays in the source.
+    pub fn move_text(&mut self, index: usize, (start_ms, end_ms): (u64, u64), delta_ms: i64) {
+        let length = end_ms - start_ms;
+        let latest = self.duration_ms.saturating_sub(length);
+        if let Some(text) = self.texts.get_mut(index) {
+            text.start_ms = (start_ms as i64 + delta_ms).clamp(0, latest as i64) as u64;
+            text.end_ms = text.start_ms + length;
+        }
+    }
+
+    /// Removes a text. Returns the text to select after it: the next one, or
+    /// the one before when none is next.
+    pub fn remove_text(&mut self, index: usize) -> Option<usize> {
+        if index >= self.texts.len() {
+            return None;
+        }
+        self.texts.remove(index);
+        match self.texts.len() {
+            0 => None,
+            len => Some(index.min(len - 1)),
+        }
+    }
+
+    /// When a text shows, in seconds from the in point, before the speed
+    /// change. `None` when it does not show inside the range.
+    pub fn text_window(&self, text: &Text) -> Option<(f64, f64)> {
+        let start = text.start_ms.max(self.range.start_ms);
+        let end = text.end_ms.min(self.range.end_ms);
+        let seconds = |ms: u64| (ms - self.range.start_ms) as f64 / 1000.;
+        (end > start).then(|| (seconds(start), seconds(end)))
+    }
+
+    /// The length of the export: the range after the speed change.
+    pub fn output_ms(&self) -> u64 {
+        (self.range.len_ms() as f64 / self.speed).round() as u64
     }
 
     /// The crop shrinks to the largest box of the aspect inside it, at its
@@ -98,6 +166,87 @@ impl Edit {
                 self.range.end_ms = at_ms.clamp(self.range.start_ms, self.duration_ms);
             }
         }
+    }
+}
+
+/// The font of every text. GPUI finds the same file by its family name.
+pub const FONT_FILE: &str = "C:/Windows/Fonts/arialbd.ttf";
+pub const FONT_FAMILY: &str = "Arial";
+/// The line advance of `drawtext`, in ems: the ascent, descent and line gap of
+/// Arial Bold.
+pub const LINE_HEIGHT: f64 = 1.15;
+/// Ascent and descent of Arial Bold, in ems. GPUI puts the rest of the line
+/// height half above and half below them.
+const ASCENT_DESCENT: f64 = 2288. / 2048.;
+/// The padding of the box, in ems.
+const BOX_PADDING: f64 = 0.25;
+/// The text sizes the panel offers, as fractions of the frame height.
+pub const TEXT_SIZES: [(&str, f64); 4] = [
+    ("Small", 0.05),
+    ("Medium", 0.08),
+    ("Large", 0.12),
+    ("Huge", 0.18),
+];
+const DEFAULT_TEXT_SIZE: f64 = 0.08;
+
+/// Words burnt into the frame. The position and the size are fractions of the
+/// output frame, so a change of crop or scale keeps the text in place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Text {
+    /// Lines split by `\n`.
+    pub words: String,
+    /// The center, from 0 to 1 across and down.
+    pub x: f64,
+    pub y: f64,
+    /// The font size over the frame height.
+    pub size: f64,
+    /// A black box behind the words.
+    pub boxed: bool,
+    /// Source time, as the range is, so the text stays on its moment when the
+    /// range or the speed changes.
+    pub start_ms: u64,
+    pub end_ms: u64,
+}
+
+impl Text {
+    /// The words with no space at either end. FFmpeg drops it, so the preview
+    /// does too.
+    pub fn trimmed(&self) -> &str {
+        self.words.trim()
+    }
+
+    /// The font size in pixels of a frame `height` high. `drawtext` takes whole
+    /// pixels.
+    pub fn font_px(&self, height: u32) -> u32 {
+        ((self.size * f64::from(height)).round() as u32).max(1)
+    }
+
+    pub fn padding_px(font_px: u32) -> u32 {
+        (f64::from(font_px) * BOX_PADDING).round() as u32
+    }
+
+    /// The center in pixels of a frame `size`.
+    pub fn center_px(&self, (width, height): (u32, u32)) -> (f64, f64) {
+        (self.x * f64::from(width), self.y * f64::from(height))
+    }
+
+    pub fn at(&self, edge: Edge) -> u64 {
+        match edge {
+            Edge::Start => self.start_ms,
+            Edge::End => self.end_ms,
+        }
+    }
+
+    /// How far below the top of its line GPUI draws the ascent, in pixels.
+    /// `drawtext` draws it at the top.
+    pub fn ascent_offset_px(font_px: u32) -> f64 {
+        f64::from(font_px) * (LINE_HEIGHT - ASCENT_DESCENT) / 2.
+    }
+
+    /// A drag of `dx`, `dy` in fractions of the frame from `start`. The
+    /// center stays inside the frame.
+    pub fn moved(&self, start: (f64, f64), dx: f64, dy: f64) -> (f64, f64) {
+        ((start.0 + dx).clamp(0., 1.), (start.1 + dy).clamp(0., 1.))
     }
 }
 
@@ -334,6 +483,13 @@ pub enum MaxWidth {
 
 /// The maximum widths the panel offers, after Source.
 pub const MAX_WIDTHS: [u32; 4] = [1080, 720, 480, 360];
+
+/// The speeds the panel offers.
+pub const SPEEDS: [f64; 7] = [0.5, 0.75, 1., 1.5, 2., 3., 4.];
+
+pub fn speed_label(speed: f64) -> String {
+    format!("{speed}x")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Range {
@@ -622,6 +778,91 @@ mod tests {
         assert_eq!(edit.output_size(), (640, 358));
         edit.max_width = MaxWidth::Pixels(361);
         assert_eq!(edit.output_size(), (360, 200));
+    }
+
+    #[test]
+    fn the_output_length_is_the_range_after_the_speed() {
+        let mut edit = edit();
+        edit.set_start(1_000);
+        edit.set_end(4_000);
+        assert_eq!(edit.output_ms(), 3_000);
+        edit.speed = 0.5;
+        assert_eq!(edit.output_ms(), 6_000);
+        edit.speed = 0.75;
+        assert_eq!(edit.output_ms(), 4_000);
+        edit.speed = 4.;
+        assert_eq!(edit.output_ms(), 750);
+        assert_eq!(speed_label(0.75), "0.75x");
+        assert_eq!(speed_label(4.), "4x");
+    }
+
+    #[test]
+    fn a_text_keeps_its_place_and_size_after_a_crop_and_a_scale() {
+        let mut edit = edit();
+        let at = edit.add_text();
+        let text = &mut edit.texts[at];
+        (text.x, text.y, text.size) = (0.25, 0.75, 0.1);
+        let text = text.clone();
+        assert_eq!(text.center_px(edit.output_size()), (480., 810.));
+        assert_eq!(text.font_px(edit.output_size().1), 108);
+
+        edit.crop = crop(100, 100, 640, 480);
+        assert_eq!(text.center_px(edit.output_size()), (160., 360.));
+        assert_eq!(text.font_px(edit.output_size().1), 48);
+        edit.max_width = MaxWidth::Pixels(320);
+        assert_eq!(edit.output_size(), (320, 240));
+        assert_eq!(text.center_px(edit.output_size()), (80., 180.));
+        assert_eq!(text.font_px(edit.output_size().1), 24);
+        assert_eq!(Text::padding_px(24), 6);
+        assert_eq!(text.moved((0.25, 0.75), 0.9, -0.1), (1., 0.65));
+    }
+
+    #[test]
+    fn a_removed_text_hands_the_selection_to_the_next_or_the_one_before() {
+        let mut edit = edit();
+        for _ in 0..3 {
+            edit.add_text();
+        }
+        assert_eq!(edit.remove_text(1), Some(1));
+        assert_eq!(edit.remove_text(1), Some(0));
+        assert_eq!(edit.remove_text(0), None);
+        assert_eq!(edit.remove_text(0), None);
+    }
+
+    #[test]
+    fn a_moved_text_keeps_its_length_inside_the_source() {
+        let mut edit = edit();
+        let at = edit.add_text();
+        edit.texts[at].start_ms = 2_000;
+        edit.texts[at].end_ms = 5_000;
+        edit.move_text(at, (2_000, 5_000), 1_500);
+        assert_eq!(
+            (edit.texts[at].start_ms, edit.texts[at].end_ms),
+            (3_500, 6_500)
+        );
+        edit.move_text(at, (2_000, 5_000), -9_000);
+        assert_eq!((edit.texts[at].start_ms, edit.texts[at].end_ms), (0, 3_000));
+        edit.move_text(at, (2_000, 5_000), 9_000);
+        assert_eq!(
+            (edit.texts[at].start_ms, edit.texts[at].end_ms),
+            (7_000, 10_000)
+        );
+    }
+
+    #[test]
+    fn a_text_shows_only_inside_the_range() {
+        let mut edit = edit();
+        edit.set_start(2_000);
+        edit.set_end(6_000);
+        let at = edit.add_text();
+        assert_eq!(edit.text_window(&edit.texts[at]), Some((0., 4.)));
+        edit.drag_text_edge(at, Edge::Start, 5_000);
+        edit.drag_text_edge(at, Edge::End, 9_000);
+        assert_eq!(edit.text_window(&edit.texts[at]), Some((3., 4.)));
+        edit.drag_text_edge(at, Edge::End, 1_000);
+        assert_eq!(edit.texts[at].end_ms, 5_000);
+        edit.set_start(7_000);
+        assert_eq!(edit.text_window(&edit.texts[at]), None);
     }
 
     #[test]

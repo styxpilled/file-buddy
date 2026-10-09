@@ -71,6 +71,8 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("set_in", Studio, SetIn, ["["]),
     action!("set_out", Studio, SetOut, ["]"]),
     action!("export", Studio, ExportEdit, ["ctrl-enter"]),
+    action!("add_text", Studio, AddText, ["n"]),
+    action!("delete_text", Studio, DeleteText, ["delete"]),
 ];
 
 /// The keys that cannot change, with the action that holds each.

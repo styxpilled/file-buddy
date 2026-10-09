@@ -1,9 +1,11 @@
 //! The Studio page. It holds one edit: a source, the range cut from it, the
-//! crop and the scale. The preview plays the range in a loop under the crop
-//! box, the timeline under it holds the range, and the panel beside it holds
-//! the export. The edit stays until another
-//! source replaces it. The clip closes while the page is not shown, so it holds
+//! crop, the scale, the speed and the texts. The preview plays the range in a
+//! loop at the speed, under the crop box and the texts. The timeline under it
+//! holds the range and a row for each text, and the panel beside it holds the
+//! export. The edit stays until another source replaces it. The clip closes while the page is not shown, so it holds
 //! no file open.
+
+mod text;
 
 use std::path::Path;
 use std::time::Duration;
@@ -12,12 +14,12 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Hsla,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, black, div, px,
-    relative, white,
+    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable, Hsla,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, Subscription, Window, black,
+    div, px, relative, white,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_video::{Video, video as video_element};
 
@@ -28,7 +30,9 @@ use crate::paths;
 use crate::studio::{self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxWidth, Quality};
 use crate::ui::player::{Transport, open_video};
 use crate::ui::seek_bar::{self, Clip, SeekBar};
-use crate::ui::{ExportEdit, FileBuddy, Page, SetIn, SetOut, header, preview, toggle};
+use crate::ui::{
+    AddText, DeleteText, ExportEdit, FileBuddy, Page, SetIn, SetOut, header, preview, toggle,
+};
 
 const PANEL_WIDTH: f32 = 320.;
 /// The In and Out buttons, one width for both.
@@ -61,6 +65,29 @@ pub(super) struct Studio {
     /// A maximum width that is not a preset.
     pub(super) width_input: Entity<InputState>,
     _width_events: Subscription,
+    pub(super) tab: Tab,
+    /// The words of the selected text are an input in its row.
+    pub(super) editing_text: bool,
+    pub(super) text_scroll: ScrollHandle,
+    /// The text the panel edits and `delete` removes.
+    pub(super) selected_text: Option<usize>,
+    text_grab: Option<text::TextGrab>,
+    /// A drag on the middle of a text's bar: the text, where the press was,
+    /// and the text's time then.
+    pub(super) text_move: Option<(usize, Pixels, (u64, u64))>,
+    pub(super) words_input: Entity<TextareaState>,
+    _words_events: Subscription,
+}
+
+/// The tabs of the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Tab {
+    Edit,
+    Text,
+}
+
+impl Tab {
+    const ALL: [(Tab, &str); 2] = [(Tab::Edit, "Edit"), (Tab::Text, "Text")];
 }
 
 struct CropGrab {
@@ -99,7 +126,16 @@ impl Studio {
                 _ => {}
             },
         );
+        let (words_input, words_events) = text::words_input(window, cx);
         Self {
+            tab: Tab::Edit,
+            editing_text: false,
+            text_scroll: ScrollHandle::new(),
+            selected_text: None,
+            text_grab: None,
+            text_move: None,
+            words_input,
+            _words_events: words_events,
             crop_grab: None,
             width_input,
             _width_events: width_events,
@@ -150,6 +186,9 @@ impl FileBuddy {
         self.record_step(cx);
         self.studio.edit = Some(Edit::new(path, input, duration_ms, size));
         self.studio.crop_grab = None;
+        self.studio.text_grab = None;
+        self.studio.text_move = None;
+        self.select_text(None, window, cx);
         self.studio
             .width_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -181,7 +220,14 @@ impl FileBuddy {
         }
         self.studio.handle = None;
         self.studio.crop_grab = None;
+        self.studio.text_grab = None;
+        self.studio.text_move = None;
         self.studio.transport.drop_press();
+    }
+
+    fn release_grabs(&mut self) {
+        self.studio.crop_grab = None;
+        self.studio.text_grab = None;
     }
 
     /// A press on the crop box or on one of its grips.
@@ -233,6 +279,14 @@ impl FileBuddy {
         }
     }
 
+    fn set_speed(&mut self, speed: f64, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.studio.edit {
+            edit.speed = speed;
+            self.sync_speed(Clip::Studio);
+            cx.notify();
+        }
+    }
+
     fn apply_studio(&self, video: &Video) {
         video.set_muted(self.player.muted);
         video.set_volume(self.player.volume);
@@ -270,6 +324,18 @@ impl FileBuddy {
             return;
         }
         self.sync_seek_bar(Clip::Studio, window, cx);
+        // Enter, escape or a click elsewhere took the keys from the words.
+        if self.studio.editing_text
+            && !self
+                .studio
+                .words_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            self.studio.editing_text = false;
+            cx.notify();
+        }
         let Some(video) = &self.studio.video else {
             return;
         };
@@ -403,7 +469,8 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
     };
     let viewport = window.viewport_size();
     let width = (f32::from(viewport.width) - PANEL_WIDTH - PADDING * 2.).max(160.);
-    let chrome = header::HEIGHT + seek_bar::HEIGHT + 8. + PADDING * 2.;
+    let rows = seek_bar::TEXT_ROWS_HEIGHT;
+    let chrome = header::HEIGHT + seek_bar::HEIGHT + rows + 8. + PADDING * 2.;
     let height = (f32::from(viewport.height) - chrome).max(120.);
 
     h_flex()
@@ -414,6 +481,8 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
         .on_action(cx.listener(|this, _: &SetIn, _, cx| this.set_point(Edge::Start, cx)))
         .on_action(cx.listener(|this, _: &SetOut, _, cx| this.set_point(Edge::End, cx)))
         .on_action(cx.listener(|this, _: &ExportEdit, _, cx| this.export_edit(cx)))
+        .on_action(cx.listener(|this, _: &AddText, window, cx| this.add_text(window, cx)))
+        .on_action(cx.listener(|this, _: &DeleteText, window, cx| this.delete_text(window, cx)))
         .child(
             v_flex()
                 .flex_1()
@@ -421,7 +490,8 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
                 .gap_2()
                 .p(px(PADDING))
                 .child(stage(this, width, height, cx))
-                .child(seek_bar::bar(this, Clip::Studio, width, cx)),
+                .child(seek_bar::bar(this, Clip::Studio, width, cx))
+                .child(div().h(px(rows)).flex_shrink_0()),
         )
         .child(panel(this, edit, cx))
         .into_any_element()
@@ -443,13 +513,18 @@ fn stage(this: &FileBuddy, width: f32, height: f32, cx: &mut Context<FileBuddy>)
         .on_drag_move(cx.listener(|this, event: &DragMoveEvent<CropDrag>, _, cx| {
             this.drag_crop(event.event.position, event.bounds, cx)
         }))
+        .on_drag_move(
+            cx.listener(|this, event: &DragMoveEvent<text::TextDrag>, _, cx| {
+                this.drag_text(event.event.position, event.bounds, cx)
+            }),
+        )
         .on_mouse_up(
             MouseButton::Left,
-            cx.listener(|this, _, _, _| this.studio.crop_grab = None),
+            cx.listener(|this, _, _, _| this.release_grabs()),
         )
         .on_mouse_up_out(
             MouseButton::Left,
-            cx.listener(|this, _, _, _| this.studio.crop_grab = None),
+            cx.listener(|this, _, _, _| this.release_grabs()),
         )
         .children(this.studio.video.as_ref().map(|video| {
             video_element(video.clone())
@@ -511,6 +586,14 @@ fn crop_box(
             .h(px(h.max(0.)))
             .bg(black().opacity(0.6))
     };
+    // A box on the whole frame crops nothing, so it stays in the background.
+    let uncropped = crop == Crop::full(edit.size);
+    let grip_fill = if uncropped {
+        gpui::hsla(0., 0., 0.45, 1.)
+    } else {
+        white()
+    };
+    let texts = text::layer(this, edit, (left, top, box_width, box_height), cx);
     let grips = Grip::EDGES.into_iter().enumerate().map(|(at, grip)| {
         let (along, down) = grip.anchor();
         div()
@@ -519,7 +602,7 @@ fn crop_box(
             .left(px(left + along * box_width - GRIP_SIZE / 2.))
             .top(px(top + down * box_height - GRIP_SIZE / 2.))
             .size(px(GRIP_SIZE))
-            .bg(white())
+            .bg(grip_fill)
             .border_1()
             .border_color(black())
             .cursor(grip_cursor(grip))
@@ -533,7 +616,7 @@ fn crop_box(
             )
             .on_drag(CropDrag, |drag, _, _, cx| cx.new(|_| *drag))
     });
-    let border: Hsla = white().opacity(0.8);
+    let border: Hsla = white().opacity(if uncropped { 0.3 } else { 0.8 });
 
     Some(
         div()
@@ -568,6 +651,7 @@ fn crop_box(
                     )
                     .on_drag(CropDrag, |drag, _, _, cx| cx.new(|_| *drag)),
             )
+            .child(texts)
             .children(grips)
             .into_any_element(),
     )
@@ -585,6 +669,7 @@ fn grip_cursor(grip: Grip) -> CursorStyle {
 
 fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let playback = preview::controls(this, Clip::Studio, cx);
+    let texts = text::panel(this, edit, cx);
     let theme = cx.theme();
     let name = edit
         .source
@@ -607,16 +692,8 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
     let running = this.studio.export;
     let controls = this.studio.controls;
 
-    v_flex()
-        .w(px(PANEL_WIDTH))
-        .h_full()
-        .flex_shrink_0()
+    let main = v_flex()
         .gap_4()
-        .p(px(PADDING))
-        .border_l_1()
-        .border_color(theme.border)
-        .text_sm()
-        .child(playback)
         .child(div().child(name))
         .child(
             h_flex()
@@ -629,7 +706,7 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                 .child(point(range.end_ms))
                 .child(point_button(Edge::End, "Out", "]"))
                 .child(div().flex_1())
-                .child(length(range.len_ms()))
+                .child(length(edit.output_ms()))
                 .child(muted(format!("/ {}", length(edit.duration_ms)))),
         )
         .child(
@@ -712,6 +789,24 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                                 .w(px(WIDTH_INPUT))
                                 .child(Input::new(&this.studio.width_input).xsmall()),
                         ),
+                ),
+        )
+        .child(
+            v_flex()
+                .gap_1()
+                .child(div().text_color(theme.muted_foreground).child("Speed"))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .children(studio::SPEEDS.into_iter().enumerate().map(|(at, speed)| {
+                            toggle(
+                                ("speed", at),
+                                studio::speed_label(speed),
+                                edit.speed == speed,
+                            )
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| this.set_speed(speed, cx)))
+                        })),
                 ),
         )
         .child(
@@ -805,6 +900,33 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                     .text_color(theme.warning)
                     .child("No export folder. Set one in Settings."),
             )
+        });
+    let tab = this.studio.tab;
+    let tabs = h_flex().gap_1().children(Tab::ALL.map(|(shown, label)| {
+        toggle(("studio-tab", shown as usize), label, tab == shown)
+            .xsmall()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // An input of the other tab must not keep the keys.
+                window.focus(&this.studio.focus, cx);
+                this.studio.tab = shown;
+                cx.notify();
+            }))
+    }));
+
+    v_flex()
+        .w(px(PANEL_WIDTH))
+        .h_full()
+        .flex_shrink_0()
+        .gap_4()
+        .p(px(PADDING))
+        .border_l_1()
+        .border_color(theme.border)
+        .text_sm()
+        .child(playback)
+        .child(tabs)
+        .child(match tab {
+            Tab::Edit => main.into_any_element(),
+            Tab::Text => texts,
         })
         .into_any_element()
 }

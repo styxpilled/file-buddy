@@ -57,7 +57,12 @@ impl Sort {
     }
 
     /// Ties go by name, so equal files never change places.
-    pub(crate) fn key(self, path: &Path, mtime: i64, size: u64) -> (Reverse<i64>, Reverse<u64>, String) {
+    pub(crate) fn key(
+        self,
+        path: &Path,
+        mtime: i64,
+        size: u64,
+    ) -> (Reverse<i64>, Reverse<u64>, String) {
         let name = sort_name(path);
         match self {
             Sort::Name => (Reverse(0), Reverse(0), name),

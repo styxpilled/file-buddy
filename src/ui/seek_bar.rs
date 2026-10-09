@@ -2,14 +2,15 @@
 //! time beside it. A click seeks, a drag scrubs, and the pointer over the bar
 //! shows the time under it. `shift-left` and `shift-right` skip, and a time in
 //! the Speech tab seeks. In the Studio the bar also holds the range, with a
-//! handle at each end.
+//! handle at each end, and a row under it for each text, from its start to its
+//! end.
 
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Div, DragMoveEvent, Entity, MouseButton, MouseMoveEvent, Pixels, Render,
-    Stateful, Subscription, Window, div, px, relative, rgb,
+    AnyElement, Context, Div, DragMoveEvent, Entity, MouseButton, MouseDownEvent, MouseMoveEvent,
+    Pixels, Render, Stateful, Subscription, Window, div, px, relative, rgb,
 };
 use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::base::{Slider, SliderIndicator, SliderTrack};
@@ -24,7 +25,13 @@ use crate::ui::{FileBuddy, Page};
 const SKIP: Duration = Duration::from_secs(5);
 pub(super) const HEIGHT: f32 = 16.;
 const HANDLE_WIDTH: f32 = 10.;
-const RANGE_COLOR: u32 = 0x30a7fe;
+const TEXT_ROW_HEIGHT: f32 = 18.;
+const TEXT_ROW_GAP: f32 = 3.;
+/// The ends of a text's bar, inside it.
+const TEXT_END_WIDTH: f32 = 5.;
+/// How near the playhead, in pixels, an end of a text's bar snaps to it.
+const SNAP: f32 = 6.;
+pub(super) const RANGE_COLOR: u32 = 0x30a7fe;
 
 /// The clip a bar plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +79,33 @@ impl Render for HandleDrag {
         gpui::Empty
     }
 }
+
+/// An end of a text's bar, while a drag holds it.
+#[derive(Clone, Copy)]
+pub(super) struct TextEdgeDrag(usize, Edge);
+
+impl Render for TextEdgeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// The middle of a text's bar, while a drag holds it.
+#[derive(Clone, Copy)]
+pub(super) struct TextBarDrag;
+
+impl Render for TextBarDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
+
+/// The rows of the texts the timeline shows. More scroll.
+const TEXT_ROWS_SHOWN: f32 = 5.;
+/// The room under the bar for the rows of the texts, whether or not there are
+/// texts, so the stage keeps its size.
+pub(super) const TEXT_ROWS_HEIGHT: f32 =
+    TEXT_ROW_GAP + TEXT_ROWS_SHOWN * (TEXT_ROW_HEIGHT + TEXT_ROW_GAP);
 
 fn time_at(video: &Video, share: f32) -> Duration {
     video.duration().mul_f32(share.clamp(0., 1.))
@@ -179,13 +213,53 @@ impl FileBuddy {
     }
 
     fn release_handle(&mut self, cx: &mut Context<Self>) {
+        self.studio.text_move = None;
+        let Some(edit) = &self.studio.edit else {
+            return;
+        };
         let Some(edge) = self.studio.handle.take() else {
             return;
         };
-        if let Some(edit) = &self.studio.edit {
-            let at = Duration::from_millis(edit.range.at(edge));
-            self.let_go(Clip::Studio, at);
+        self.let_go(Clip::Studio, Duration::from_millis(edit.range.at(edge)));
+        cx.notify();
+    }
+
+    /// A drag on an end of a text's bar. The clip stays where it is, and the
+    /// end snaps to the playhead near it. `snap` is a share of the bar.
+    fn drag_text_edge(
+        &mut self,
+        index: usize,
+        edge: Edge,
+        share: f32,
+        snap: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let playhead = self.studio.video.as_ref().map(|video| video.position());
+        let Some(edit) = &mut self.studio.edit else {
+            return;
+        };
+        let length = edit.duration_ms as f32;
+        let mut at = (length * share.clamp(0., 1.)) as u64;
+        if let Some(playhead) = playhead {
+            let playhead = playhead.as_millis() as u64;
+            if (at as f32 - playhead as f32).abs() <= snap * length {
+                at = playhead;
+            }
         }
+        edit.drag_text_edge(index, edge, at);
+        cx.notify();
+    }
+
+    /// A drag on the middle of a text's bar moves it through time, with no
+    /// seek.
+    fn drag_text_bar(&mut self, x: Pixels, width: Pixels, cx: &mut Context<Self>) {
+        let (Some(edit), Some((index, from, span))) =
+            (&mut self.studio.edit, self.studio.text_move)
+        else {
+            return;
+        };
+        let delta = ((x - from) / width * edit.duration_ms as f32) as i64;
+        edit.move_text(index, span, delta);
         cx.notify();
     }
 
@@ -412,6 +486,25 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
             }
         }),
     )
+    .on_drag_move(
+        cx.listener(|this, event: &DragMoveEvent<TextEdgeDrag>, _, cx| {
+            let TextEdgeDrag(index, edge) = *event.drag(cx);
+            let bounds = this.studio.seek_bar.state.read(cx).bounds();
+            if bounds.size.width > px(0.) {
+                let share = (event.event.position.x - bounds.left()) / bounds.size.width;
+                let snap = SNAP / f32::from(bounds.size.width);
+                this.drag_text_edge(index, edge, share, snap, cx);
+            }
+        }),
+    )
+    .on_drag_move(
+        cx.listener(|this, event: &DragMoveEvent<TextBarDrag>, _, cx| {
+            let width = this.studio.seek_bar.state.read(cx).bounds().size.width;
+            if width > px(0.) {
+                this.drag_text_bar(event.event.position.x, width, cx);
+            }
+        }),
+    )
     .on_mouse_up(
         MouseButton::Left,
         cx.listener(|this, _, _, cx| this.release_handle(cx)),
@@ -423,6 +516,113 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
     .child(band)
     .child(start_handle)
     .child(end_handle)
+    .child(text_rows(this, edit, cx))
+}
+
+/// One row for each text under the bar, in the room the page leaves for them,
+/// which scrolls past five rows. Each bar holds its words. A press on a bar selects its
+/// text, a drag on its middle moves it, and a drag on an end changes it.
+fn text_rows(
+    this: &FileBuddy,
+    edit: &crate::studio::Edit,
+    cx: &mut Context<FileBuddy>,
+) -> gpui::AnyElement {
+    let length = edit.duration_ms.max(1) as f32;
+    let accent = gpui::Hsla::from(rgb(RANGE_COLOR));
+    let theme = cx.theme();
+    let (foreground, muted) = (theme.foreground, theme.muted_foreground);
+    let rows = edit.texts.iter().enumerate().map(|(index, text)| {
+        let start = text.start_ms as f32 / length;
+        let end = text.end_ms as f32 / length;
+        let selected = this.studio.selected_text == Some(index);
+        let top = index as f32 * (TEXT_ROW_HEIGHT + TEXT_ROW_GAP);
+        let (fill, ends) = if selected {
+            (accent.opacity(0.3), accent)
+        } else {
+            (foreground.opacity(0.08), muted.opacity(0.7))
+        };
+        let span = (text.start_ms, text.end_ms);
+        let end_grip = |edge: Edge| {
+            div()
+                .id((
+                    match edge {
+                        Edge::Start => "text-start",
+                        Edge::End => "text-end",
+                    },
+                    index,
+                ))
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(px(TEXT_END_WIDTH))
+                .map(|grip| match edge {
+                    Edge::Start => grip.left_0().rounded_l(px(3.)),
+                    Edge::End => grip.right_0().rounded_r(px(3.)),
+                })
+                .bg(ends)
+                .cursor_ew_resize()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.select_text(Some(index), window, cx);
+                    }),
+                )
+                .on_drag(TextEdgeDrag(index, edge), |drag, _, _, cx| {
+                    cx.new(|_| *drag)
+                })
+        };
+        let words = text.trimmed().replace('\n', " / ");
+        div()
+            .id(("text-bar", index))
+            .absolute()
+            .top(px(top))
+            .h(px(TEXT_ROW_HEIGHT))
+            .left(relative(start))
+            .w(relative((end - start).max(0.)))
+            .min_w(px(TEXT_END_WIDTH * 2.))
+            .rounded(px(3.))
+            .bg(fill)
+            .overflow_hidden()
+            .px(px(TEXT_END_WIDTH + 3.))
+            .flex()
+            .items_center()
+            .text_xs()
+            .text_color(if selected { foreground } else { muted })
+            .whitespace_nowrap()
+            .cursor_grab()
+            .child(div().truncate().child(words))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.studio.text_move = Some((index, event.position.x, span));
+                    this.select_text(Some(index), window, cx);
+                }),
+            )
+            .on_drag(TextBarDrag, |drag, _, _, cx| cx.new(|_| *drag))
+            .child(end_grip(Edge::Start))
+            .child(end_grip(Edge::End))
+            .into_any_element()
+    });
+    div()
+        .id("text-rows")
+        .absolute()
+        .top(px(HEIGHT + TEXT_ROW_GAP))
+        .left_0()
+        .right_0()
+        .h(px(TEXT_ROWS_HEIGHT - TEXT_ROW_GAP))
+        .overflow_y_scroll()
+        .child(
+            div()
+                .relative()
+                .w_full()
+                .h(px(
+                    edit.texts.len() as f32 * (TEXT_ROW_HEIGHT + TEXT_ROW_GAP)
+                ))
+                .children(rows),
+        )
+        .into_any_element()
 }
 
 fn clock(time: Duration) -> String {
