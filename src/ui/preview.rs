@@ -26,6 +26,7 @@ use crate::search::Hit;
 use crate::search::folder::Entry;
 use crate::ui::player::PressFrom;
 use crate::ui::rows::{RowInput, Target};
+use crate::ui::seek_bar::Clip;
 use crate::ui::{
     CopyFile, DeleteFiles, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH,
     TrashFiles, renamer, seek_bar, toggle, when,
@@ -48,6 +49,8 @@ const ROW_INSET: f32 = 4.;
 const TIME_WIDTH: f32 = 36.;
 /// The Play and Pause button, with room for the longer label.
 const PAUSE_WIDTH: f32 = 76.;
+/// The row of controls above the clip, in the pane and in the Studio.
+pub(super) const CONTROLS_HEIGHT: f32 = 24.;
 /// The Mute and Unmute button, with room for the longer label.
 const MUTE_WIDTH: f32 = 70.;
 /// The volume beside the buttons, with room for "100%".
@@ -84,7 +87,7 @@ pub fn pane(this: &FileBuddy, window: &mut Window, cx: &mut Context<FileBuddy>) 
         .p(px(PADDING))
         .border_l_1()
         .border_color(cx.theme().border)
-        .child(controls(this, cx))
+        .child(controls(this, seek_bar::Clip::Pane, cx))
         .child(stage(this, hit, width, height, cx))
         .child(seek_bar::bar(this, seek_bar::Clip::Pane, width, cx))
         .child(name_and_tags(this, hit, cx))
@@ -455,8 +458,6 @@ fn stage_size(this: &FileBuddy, window: &Window, cx: &App) -> (f32, f32) {
 }
 
 /// The clip itself once the selection stops moving, the thumbnail until then.
-/// The wheel over it sets the sound level. A click pauses or plays it, and a
-/// press held longer plays it fast until the release.
 fn stage(
     this: &FileBuddy,
     hit: &Hit,
@@ -473,33 +474,8 @@ fn stage(
         .bg(cx.theme().secondary)
         .flex()
         .items_center()
-        .justify_center()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| {
-                if this.player.video().is_some() {
-                    this.press_play(PressFrom::Mouse, cx);
-                }
-            }),
-        )
-        .on_mouse_up(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
-        )
-        .on_mouse_up_out(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
-        )
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-            let up = match event.delta {
-                ScrollDelta::Lines(delta) => delta.y,
-                ScrollDelta::Pixels(delta) => f32::from(delta.y),
-            };
-            if up != 0. {
-                this.player.nudge_volume(up > 0.);
-                cx.notify();
-            }
-        }));
+        .justify_center();
+    let frame = clip_input(frame, Clip::Pane, cx);
 
     match this.player.video() {
         Some(playing) => frame
@@ -528,24 +504,63 @@ fn stage(
     }
 }
 
-/// Sound and pause, for the pane only, and the menu of file actions. A tile
-/// stays silent whatever these say. The row stays in place with no clip, so the
-/// stage below it does not move while a decoder opens.
-fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
+/// The stage of a clip, in the pane or in the Studio. The wheel over it sets
+/// the sound level. A click pauses or plays it, and a press held longer plays
+/// it fast until the release.
+pub(super) fn clip_input(
+    frame: Stateful<Div>,
+    clip: Clip,
+    cx: &mut Context<FileBuddy>,
+) -> Stateful<Div> {
+    frame
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, _, cx| {
+                if this.clip_video(clip).is_some() {
+                    this.press_play(clip, PressFrom::Mouse, cx);
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
+        )
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+            let up = match event.delta {
+                ScrollDelta::Lines(delta) => delta.y,
+                ScrollDelta::Pixels(delta) => f32::from(delta.y),
+            };
+            if up != 0. {
+                this.nudge_volume(up > 0., cx);
+            }
+        }))
+}
+
+/// Sound, speed and pause, and the menu of file actions. A tile stays silent
+/// whatever these say. The row stays in place with no clip, so the stage below
+/// it does not move while a decoder opens. Autoplay is for the selection, so
+/// the Studio does not show it.
+pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyElement {
     let player = &this.player;
-    let playable = player.video().is_some();
+    let transport = this.transport_of(clip);
+    let playable = this.clip_video(clip).is_some();
     h_flex()
         .w_full()
+        .h(px(CONTROLS_HEIGHT))
+        .flex_shrink_0()
         .gap_2()
-        .child(
-            toggle("preview-autoplay", "Autoplay", player.autoplay)
-                .small()
-                .tooltip("Ctrl+Space")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.player.toggle_autoplay();
-                    cx.notify();
-                })),
-        )
+        .when(clip == Clip::Pane, |row| {
+            row.child(
+                toggle("preview-autoplay", "Autoplay", player.autoplay)
+                    .small()
+                    .tooltip("Ctrl+Space")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
+            )
+        })
         .child(
             Button::new("preview-pause")
                 .small()
@@ -553,16 +568,13 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .w(px(PAUSE_WIDTH))
                 .disabled(!playable)
                 .when(playable, |button| button.cursor_pointer())
-                .icon(if player.paused {
+                .icon(if transport.paused {
                     IconName::Play
                 } else {
                     IconName::Pause
                 })
-                .label(if player.paused { "Play" } else { "Pause" })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.player.toggle_paused();
-                    cx.notify();
-                })),
+                .label(if transport.paused { "Play" } else { "Pause" })
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_paused(clip, cx))),
         )
         .child(
             Button::new("preview-mute")
@@ -572,21 +584,15 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .disabled(!playable)
                 .when(playable, |button| button.cursor_pointer())
                 .label(if player.muted { "Unmute" } else { "Mute" })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.player.toggle_muted();
-                    cx.notify();
-                })),
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_muted(cx))),
         )
         .child(
             Button::new("preview-speed")
                 .small()
                 .cursor_pointer()
-                .label(player.speed_label())
+                .label(player.speed_label(transport))
                 .tooltip("Hold space for 2x")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.player.toggle_speed();
-                    cx.notify();
-                })),
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_speed(cx))),
         )
         .child(
             div()
@@ -598,14 +604,19 @@ fn controls(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .child(player.volume_label()),
         )
         .child(div().flex_1())
-        .child(file_menu(this, cx))
+        .child(file_menu(this, clip, cx))
         .into_any_element()
 }
 
 /// Copy, reveal, rename, open, trash and delete. Each item dispatches the same
-/// action as its key, to the window, so the menu shows the key beside it.
-fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
-    let focus = this.focus.clone();
+/// action as its key, to the window, so the menu shows the key beside it. In
+/// the Studio the menu acts on the source, and the Studio has no name to
+/// rename and does not trash the file it edits.
+fn file_menu(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let focus = match clip {
+        Clip::Pane => this.focus.clone(),
+        Clip::Studio => this.studio.focus.clone(),
+    };
     let view = cx.entity().downgrade();
     Button::new("file-menu")
         .small()
@@ -613,22 +624,32 @@ fn file_menu(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .tooltip("File actions")
         .cursor_pointer()
         .dropdown_menu(move |menu, _, _| {
-            menu.action_context(focus.clone())
+            let pane = clip == Clip::Pane;
+            let menu = menu
+                .action_context(focus.clone())
                 .menu_with_icon("Copy", menu_icon(IconName::Copy), Box::new(CopyFile))
                 .menu_with_icon(
                     "Reveal",
                     menu_icon(IconName::FolderOpen),
                     Box::new(RevealFile),
-                )
-                .menu_with_icon("Rename", menu_icon(IconName::Replace), Box::new(RenameFile))
-                .menu_with_icon(
-                    "Open",
-                    menu_icon(IconName::ExternalLink),
-                    Box::new(OpenFile),
-                )
-                .separator()
-                .menu_with_icon("Trash", menu_icon(Lucide::Trash), Box::new(TrashFiles))
-                .menu_with_icon("Delete", menu_icon(Lucide::Shredder), Box::new(DeleteFiles))
+                );
+            let menu = if pane {
+                menu.menu_with_icon("Rename", menu_icon(IconName::Replace), Box::new(RenameFile))
+            } else {
+                menu
+            };
+            let menu = menu.menu_with_icon(
+                "Open",
+                menu_icon(IconName::ExternalLink),
+                Box::new(OpenFile),
+            );
+            if pane {
+                menu.separator()
+                    .menu_with_icon("Trash", menu_icon(Lucide::Trash), Box::new(TrashFiles))
+                    .menu_with_icon("Delete", menu_icon(Lucide::Shredder), Box::new(DeleteFiles))
+            } else {
+                menu
+            }
         })
         // The window takes focus back on every frame, which would close the
         // menu the moment it opened.

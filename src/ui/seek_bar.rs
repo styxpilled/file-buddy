@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Context, Div, DragMoveEvent, Entity, MouseButton, MouseMoveEvent, Pixels, Render,
-    Stateful, Subscription, Window, div, px, relative,
+    Stateful, Subscription, Window, div, px, relative, rgb,
 };
 use gpui_kit::base::slider::{SliderEvent, SliderState};
 use gpui_kit::base::{Slider, SliderIndicator, SliderTrack};
@@ -24,6 +24,7 @@ use crate::ui::{FileBuddy, Page};
 const SKIP: Duration = Duration::from_secs(5);
 pub(super) const HEIGHT: f32 = 16.;
 const HANDLE_WIDTH: f32 = 10.;
+const RANGE_COLOR: u32 = 0x30a7fe;
 
 /// The clip a bar plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,12 +84,9 @@ impl FileBuddy {
         let Some(video) = self.clip_video(clip).cloned() else {
             return;
         };
-        let held = match clip {
-            Clip::Pane => &mut self.player.held,
-            Clip::Studio => &mut self.studio.held,
-        };
-        if !*held {
-            *held = true;
+        let transport = self.transport(clip);
+        if !transport.held {
+            transport.held = true;
             video.set_paused(true);
         }
     }
@@ -101,17 +99,8 @@ impl FileBuddy {
         if let Some(video) = self.clip_video(clip) {
             video.seek(to, true).ok();
         }
-        match clip {
-            Clip::Pane => {
-                if std::mem::take(&mut self.player.held) {
-                    self.player.sync_paused();
-                }
-            }
-            Clip::Studio => {
-                if std::mem::take(&mut self.studio.held) {
-                    self.sync_studio_paused();
-                }
-            }
+        if std::mem::take(&mut self.transport(clip).held) {
+            self.sync_paused(clip);
         }
     }
 
@@ -136,7 +125,7 @@ impl FileBuddy {
         }
     }
 
-    fn clip_video(&self, clip: Clip) -> Option<&Video> {
+    pub(super) fn clip_video(&self, clip: Clip) -> Option<&Video> {
         match clip {
             Clip::Pane => self.player.video(),
             Clip::Studio => self.studio.video.as_ref(),
@@ -287,6 +276,11 @@ pub(super) fn bar(
     let share = seek_bar
         .dragging
         .unwrap_or_else(|| state.read(cx).value().end());
+    // In the Studio, the bar fills from the in point.
+    let filled_from = match (clip, &this.studio.edit) {
+        (Clip::Studio, Some(edit)) => edit.range.start_ms as f32 / edit.duration_ms.max(1) as f32,
+        _ => 0.,
+    };
     let theme = cx.theme();
     let (popover, border, muted_text) = (theme.popover, theme.border, theme.muted_foreground);
     let time = format!(
@@ -330,10 +324,13 @@ pub(super) fn bar(
                                 .h(px(3.))
                                 .rounded(px(2.))
                                 .bg(theme.muted)
+                                .relative()
                                 .child(
                                     div()
+                                        .absolute()
                                         .h_full()
-                                        .w(relative(share))
+                                        .left(relative(filled_from))
+                                        .w(relative((share - filled_from).max(0.)))
                                         .rounded(px(2.))
                                         .bg(theme.primary),
                                 ),
@@ -375,7 +372,7 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
     let length = edit.duration_ms.max(1) as f32;
     let start = edit.range.start_ms as f32 / length;
     let end = edit.range.end_ms as f32 / length;
-    let theme = cx.theme();
+    let color = gpui::Hsla::from(rgb(RANGE_COLOR));
     let handle = |edge: Edge, share: f32| {
         div()
             .id(match edge {
@@ -391,7 +388,7 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
             .flex()
             .justify_center()
             .cursor_ew_resize()
-            .child(div().w(px(3.)).h_full().rounded(px(1.)).bg(theme.warning))
+            .child(div().w(px(3.)).h_full().rounded(px(1.)).bg(color))
             // The track under it would seek.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_drag(HandleDrag(edge), |drag, _, _, cx| cx.new(|_| *drag))
@@ -403,7 +400,7 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
         .left(relative(start))
         .w(relative(end - start))
         .rounded(px(2.))
-        .bg(theme.warning.opacity(0.3));
+        .bg(color.opacity(0.3));
     let (start_handle, end_handle) = (handle(Edge::Start, start), handle(Edge::End, end));
     bar.on_drag_move(
         cx.listener(|this, event: &DragMoveEvent<HandleDrag>, _, cx| {

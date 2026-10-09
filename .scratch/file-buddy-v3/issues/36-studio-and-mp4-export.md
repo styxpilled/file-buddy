@@ -1,6 +1,6 @@
 # 36 - The Studio page, the range and MP4 export
 
-Status: ready-for-agent
+Status: done
 
 Depends on nothing. Read the Studio, Range, Export and Export folder sections
 of the v3 spec first.

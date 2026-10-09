@@ -67,7 +67,7 @@ impl FileBuddy {
         if walk {
             // The clip on screen may already be the first file, and the
             // preview keeps that one as it is.
-            self.player.paused = false;
+            self.player.pane.paused = false;
             if let Some(Entry::File(first)) = results.first()
                 && let Some(video) = self.player.video_of(&first.file.hash)
             {

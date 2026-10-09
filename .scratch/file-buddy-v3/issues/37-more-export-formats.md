@@ -27,3 +27,12 @@ Export one range in each format. Each pastes, plays, and indexes from the
 export folder. A WebP export probes as animated.
 
 ## Comments
+
+AV1 levels were matched to the H.264 levels by SSIM on an 8 s, 480x852 clip
+from Downloads, with frames aligned by index: Best 15, High 20, Medium 25,
+Low 32. At equal SSIM, `av1_nvenc` wrote larger files than `h264_nvenc`:
+3.7 MB against 2.5 MB at Best, 1.9 MB against 1.0 MB at Medium.
+
+The AV1 levels above are replaced. See "Export quality levels" in
+`research.md`: two lower levels, Lower and Lowest, were added for all formats,
+and the AV1 levels were measured again on four clips.

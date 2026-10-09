@@ -305,9 +305,8 @@ impl FileBuddy {
 
         // A press held while the window loses focus gets no release.
         cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-            if this.player.pressed() && !window.is_window_active() {
-                this.player.cancel_press();
-                cx.notify();
+            if this.pressed() && !window.is_window_active() {
+                this.cancel_presses(cx);
             }
         })
         .detach();
@@ -331,7 +330,7 @@ impl FileBuddy {
             columns: 1,
             player: Player::default(),
             seek_bar: SeekBar::new(Clip::Pane, cx),
-            studio: Studio::new(cx),
+            studio: Studio::new(window, cx),
             indexer: Indexer::new(config.paused),
             status: "".into(),
             notice: None,
@@ -662,6 +661,16 @@ impl FileBuddy {
         self.input.read(cx).focus_handle(cx).is_focused(window)
     }
 
+    fn studio_input_focused(&self, window: &Window, cx: &App) -> bool {
+        self.page() == Page::Studio
+            && self
+                .studio
+                .width_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+    }
+
     fn focus_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.page(), Page::Browse | Page::Folders) {
             return;
@@ -689,6 +698,7 @@ impl FileBuddy {
         };
         if !held.is_focused(window)
             && !self.query_focused(window, cx)
+            && !self.studio_input_focused(window, cx)
             && self.tagger.is_none()
             && self.renamer.is_none()
             && self.rows.is_none()
@@ -716,6 +726,8 @@ impl FileBuddy {
         } else if self.settings().is_some() && !self.focus.is_focused(window) {
             // A field of the form has focus. Leaving would drop what was typed.
             window.focus(&self.focus, cx);
+        } else if self.studio_input_focused(window, cx) {
+            window.focus(&self.studio.focus, cx);
         } else if self.page() == Page::Studio {
             // Back where `c` was pressed, with the selection it had.
             if !self.go_history(false, window, cx) {
@@ -765,10 +777,25 @@ impl FileBuddy {
         }
     }
 
+    /// The file that copy, reveal and open act on: the source in the Studio,
+    /// the selection elsewhere. It must still be on disk.
+    fn shown_file(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        if self.page() != Page::Studio {
+            return self.selected_file(cx);
+        }
+        let source = self.studio.edit.as_ref()?.source.clone();
+        if source.is_file() {
+            Some(source)
+        } else {
+            self.flash("the file is gone", true, cx);
+            None
+        }
+    }
+
     /// Enter. The file goes on the clipboard as a file and as its path, so the
     /// next paste works in an upload box and in a text field alike.
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.selected_file(cx) else {
+        let Some(path) = self.shown_file(cx) else {
             return;
         };
         match clipboard::copy_file(&path) {
@@ -861,17 +888,9 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &RemoveKey, _, cx| this.remove_key(cx)))
             .on_action(cx.listener(|this, _: &ResetKeys, _, cx| this.reset_keys(cx)))
             .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleMuted, _, cx| {
-                this.player.toggle_muted();
-                this.sync_studio_sound();
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleMuted, _, cx| this.toggle_muted(cx)))
             .on_action(cx.listener(|this, _: &TogglePaused, _, cx| {
-                if this.page() == Page::Studio {
-                    this.toggle_studio_paused(cx);
-                } else {
-                    this.press_play(PressFrom::Key, cx);
-                }
+                this.press_play(this.shown_clip(), PressFrom::Key, cx)
             }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
                 let key = &event.keystroke.key;
@@ -886,20 +905,9 @@ impl Render for FileBuddy {
             }))
             .on_action(cx.listener(|this, _: &SkipBack, _, cx| this.skip(false, cx)))
             .on_action(cx.listener(|this, _: &SkipForward, _, cx| this.skip(true, cx)))
-            .on_action(cx.listener(|this, _: &ToggleAutoplay, _, cx| {
-                this.player.toggle_autoplay();
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
-                this.player.nudge_volume(true);
-                this.sync_studio_sound();
-                cx.notify();
-            }))
-            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
-                this.player.nudge_volume(false);
-                this.sync_studio_sound();
-                cx.notify();
-            }))
+            .on_action(cx.listener(|this, _: &ToggleAutoplay, _, cx| this.toggle_autoplay(cx)))
+            .on_action(cx.listener(|this, _: &VolumeUp, _, cx| this.nudge_volume(true, cx)))
+            .on_action(cx.listener(|this, _: &VolumeDown, _, cx| this.nudge_volume(false, cx)))
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
             .on_action(cx.listener(|this, _: &TrashFiles, window, cx| {
                 this.delete_files(DeleteMode::Trash, window, cx)
@@ -916,12 +924,12 @@ impl Render for FileBuddy {
                 this.set_table(!this.table, window, cx)
             }))
             .on_action(cx.listener(|this, _: &RevealFile, _, cx| {
-                if let Some(path) = this.selected_file(cx) {
+                if let Some(path) = this.shown_file(cx) {
                     cx.reveal_path(&path);
                 }
             }))
             .on_action(cx.listener(|this, _: &OpenFile, _, cx| {
-                if let Some(path) = this.selected_file(cx) {
+                if let Some(path) = this.shown_file(cx) {
                     cx.open_with_system(&path);
                 }
             }))

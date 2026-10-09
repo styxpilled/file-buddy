@@ -52,3 +52,30 @@ The build also has `aac`, `libopus`, `png` and `mjpeg` encoders, and the
 (`RegisterDragDrop` in `src/window.rs`). A drop from Explorer reaches the
 elements as `ExternalPaths`. The application does not handle it yet: no code
 in `src/` takes a drop, and `fb` takes no file arguments.
+
+## NVENC minimum frame size
+
+Measured with `testsrc` in `yuv420p`: `h264_nvenc` takes 145 x 49 and up, and
+fails at 144 x 50 and 145 x 48. `av1_nvenc` takes 129 x 65 and up, and fails at
+128 x 128 and 160 x 64. MP4 and WebM exports below 146 x 50 and 130 x 66 stop
+before FFmpeg runs.
+
+## Export quality levels
+
+Measured on 1:1 center crops of 20 s from four clips in Downloads (720p and
+1080p social clips, 0.4 to 2 Mbit/s), SSIM against the cropped source:
+
+| Level | `h264_nvenc` CQ | `av1_nvenc` CQ | H.264 size against the source's share |
+| --- | --- | --- | --- |
+| Best | 16 | 18 | not measured, above 3x |
+| High | 21 | 23 | 1.7x to 4.7x |
+| Medium | 26 | 30 | 1x to 2.7x |
+| Low | 31 | 38 | 0.7x to 1.5x |
+| Lower | 36 | 45 | 0.4x to 0.85x |
+| Lowest | 41 | 54 | 0.25x to 0.5x |
+
+The AV1 levels give the same SSIM as the H.264 level on the same row. At the
+same SSIM, AV1 is about the size of H.264 here: from 12% larger to 16% smaller,
+by clip. The first
+calibration, on one 8 s clip at high quality, put AV1 below H.264, so the AV1
+levels in issue 37 were too low and are replaced by these.

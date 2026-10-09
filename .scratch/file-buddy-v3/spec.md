@@ -401,6 +401,7 @@ Issues continue from v2, in `issues/`:
 | 53 | Simulated input for the dev window. Tooling, not a feature. Build it before the Studio work, which needs many window checks |
 | 54 | Playback faults: sound and picture drift after scrubbing, a seek that shows the first frame, and GIFs that show no frame |
 | 55 | A drag of the out handle stops playback in the Studio |
+| 56 | A design system based on Adobe Spectrum, around the accent `#30a7fe` |
 
 ## Maybe
 

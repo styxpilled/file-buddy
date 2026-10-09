@@ -1,6 +1,7 @@
-//! The Studio page. It holds one edit: a source and the range cut from it. The
-//! preview plays the range in a loop, the timeline under it holds the range,
-//! and the panel beside it holds the export. The edit stays until another
+//! The Studio page. It holds one edit: a source, the range cut from it, the
+//! crop and the scale. The preview plays the range in a loop under the crop
+//! box, the timeline under it holds the range, and the panel beside it holds
+//! the export. The edit stays until another
 //! source replaces it. The clip closes while the page is not shown, so it holds
 //! no file open.
 
@@ -11,10 +12,12 @@ use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, FocusHandle, MouseButton, ScrollDelta, ScrollWheelEvent, Window, div, px,
-    relative,
+    AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Hsla,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, Subscription, Window, black, div, px,
+    relative, white,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_video::{Video, video as video_element};
 
@@ -22,14 +25,20 @@ use crate::actions::clipboard;
 use crate::ffmpeg::export;
 use crate::media::{self, Kind};
 use crate::paths;
-use crate::studio::{self, Edge, Edit, Format, Quality};
-use crate::ui::player::open_video;
+use crate::studio::{self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxWidth, Quality};
+use crate::ui::player::{Transport, open_video};
 use crate::ui::seek_bar::{self, Clip, SeekBar};
-use crate::ui::{ExportEdit, FileBuddy, Page, SetIn, SetOut, header, toggle};
+use crate::ui::{ExportEdit, FileBuddy, Page, SetIn, SetOut, header, preview, toggle};
 
-const PANEL_WIDTH: f32 = 300.;
+const PANEL_WIDTH: f32 = 320.;
+/// The In and Out buttons, one width for both.
+const POINT_WIDTH: f32 = 40.;
 const PADDING: f32 = 12.;
 const BUFFER: usize = 120;
+/// A grip on the crop box, square.
+const GRIP_SIZE: f32 = 10.;
+/// The input of a maximum width that is not a preset.
+const WIDTH_INPUT: f32 = 56.;
 
 pub(super) struct Studio {
     pub(super) edit: Option<Edit>,
@@ -41,26 +50,68 @@ pub(super) struct Studio {
     pub(super) focus: FocusHandle,
     /// Where the clip was when the page closed. It opens there again.
     resume: Duration,
-    paused: bool,
-    /// A drag on the bar or on a handle holds the clip paused. Pause and play
-    /// wait for the release, which applies them.
-    pub(super) held: bool,
+    /// A drag on a handle holds the clip as a drag on the bar does.
+    pub(super) transport: Transport,
     /// The share done of the export that runs. One runs at a time.
     export: Option<f32>,
+    /// Apart from the edit, so a new source keeps them.
+    controls: Controls,
+    /// The grip a press on the crop box holds.
+    crop_grab: Option<CropGrab>,
+    /// A maximum width that is not a preset.
+    pub(super) width_input: Entity<InputState>,
+    _width_events: Subscription,
+}
+
+struct CropGrab {
+    grip: Grip,
+    from: Point<Pixels>,
+    crop: Crop,
+    /// The pointer moved, so the press is a drag and not a tap on the clip.
+    dragging: bool,
+}
+
+/// A grip of the crop box, while a drag holds it.
+#[derive(Clone, Copy)]
+struct CropDrag;
+
+impl Render for CropDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 impl Studio {
-    pub(super) fn new(cx: &mut Context<FileBuddy>) -> Self {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<FileBuddy>) -> Self {
+        let width_input = cx.new(|cx| InputState::new(window, cx).placeholder("px"));
+        let width_events = cx.subscribe_in(
+            &width_input,
+            window,
+            |this, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    let typed = input.read(cx).value().trim().parse::<u32>();
+                    if let (Ok(width @ 2..), Some(edit)) = (typed, &mut this.studio.edit) {
+                        edit.max_width = MaxWidth::Pixels(width);
+                        cx.notify();
+                    }
+                }
+                InputEvent::PressEnter { .. } => window.focus(&this.studio.focus, cx),
+                _ => {}
+            },
+        );
         Self {
+            crop_grab: None,
+            width_input,
+            _width_events: width_events,
             edit: None,
             video: None,
             seek_bar: SeekBar::new(Clip::Studio, cx),
             handle: None,
             focus: cx.focus_handle(),
             resume: Duration::ZERO,
-            paused: false,
-            held: false,
+            transport: Transport::new(false),
             export: None,
+            controls: Controls::default(),
         }
     }
 }
@@ -94,10 +145,16 @@ impl FileBuddy {
             0 => probed_ms.unwrap_or(0),
             ms => ms,
         };
+        let (width, height) = video.size();
+        let size = (width.max(0) as u32, height.max(0) as u32);
         self.record_step(cx);
-        self.studio.edit = Some(Edit::new(path, input, duration_ms));
+        self.studio.edit = Some(Edit::new(path, input, duration_ms, size));
+        self.studio.crop_grab = None;
+        self.studio
+            .width_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         self.studio.resume = Duration::ZERO;
-        self.studio.paused = false;
+        self.studio.transport = Transport::new(false);
         self.apply_studio(&video);
         self.studio.video = Some(video);
         self.enter_page(Page::Studio, None, window, cx);
@@ -123,46 +180,69 @@ impl FileBuddy {
             self.studio.resume = video.position();
         }
         self.studio.handle = None;
-        self.studio.held = false;
+        self.studio.crop_grab = None;
+        self.studio.transport.drop_press();
+    }
+
+    /// A press on the crop box or on one of its grips.
+    fn grab_crop(&mut self, grip: Grip, from: Point<Pixels>) {
+        if let Some(edit) = &self.studio.edit {
+            self.studio.crop_grab = Some(CropGrab {
+                grip,
+                from,
+                crop: edit.crop,
+                dragging: false,
+            });
+        }
+    }
+
+    /// The pointer moves with a grip held. The first move ends the press on
+    /// the clip, so a drag of the box does not also pause it.
+    fn drag_crop(&mut self, to: Point<Pixels>, stage: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let (Some(edit), Some(grab)) = (&mut self.studio.edit, &mut self.studio.crop_grab) else {
+            return;
+        };
+        let size = (f32::from(stage.size.width), f32::from(stage.size.height));
+        let Some(frame) = frame_in(edit.size, size) else {
+            return;
+        };
+        let dx = f32::from(to.x - grab.from.x) / frame.scale;
+        let dy = f32::from(to.y - grab.from.y) / frame.scale;
+        edit.drag_crop(grab.grip, grab.crop, f64::from(dx), f64::from(dy));
+        let first = !std::mem::replace(&mut grab.dragging, true);
+        if first {
+            self.cancel_press(Clip::Studio);
+        }
+        cx.notify();
+    }
+
+    fn set_aspect(&mut self, aspect: Aspect, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.studio.edit {
+            edit.set_aspect(aspect);
+            cx.notify();
+        }
+    }
+
+    fn set_max_width(&mut self, max_width: MaxWidth, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.studio.edit {
+            edit.max_width = max_width;
+            self.studio
+                .width_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            cx.notify();
+        }
     }
 
     fn apply_studio(&self, video: &Video) {
         video.set_muted(self.player.muted);
         video.set_volume(self.player.volume);
-        video.set_paused(self.studio.paused);
+        self.apply_transport(Clip::Studio, video);
         video.seek(self.studio.resume, true).ok();
     }
 
-    /// The sound is the one the side pane has, so a change reaches both.
-    pub(super) fn sync_studio_sound(&self) {
-        if let Some(video) = &self.studio.video {
-            video.set_muted(self.player.muted);
-            video.set_volume(self.player.volume);
-        }
-    }
-
-    pub(super) fn toggle_studio_paused(&mut self, cx: &mut Context<Self>) {
-        if self.studio.video.is_none() {
-            return;
-        }
-        self.studio.paused = !self.studio.paused;
-        self.sync_studio_paused();
-        cx.notify();
-    }
-
-    /// Pause or play the clip as the user chose. Nothing changes while a drag
-    /// holds it.
-    pub(super) fn sync_studio_paused(&self) {
-        let Some(video) = &self.studio.video else {
-            return;
-        };
-        if self.studio.held {
-            return;
-        }
-        video.set_paused(self.studio.paused);
-        // A clip at its end starts again at the in point, not at zero.
-        if !self.studio.paused
-            && let Some(edit) = &self.studio.edit
+    /// A clip at the out point, or at its end, starts again at the in point.
+    pub(super) fn loop_studio(&self, video: &Video) {
+        if let Some(edit) = &self.studio.edit
             && (video.ended() || video.position() >= Duration::from_millis(edit.range.end_ms))
         {
             video
@@ -190,21 +270,17 @@ impl FileBuddy {
             return;
         }
         self.sync_seek_bar(Clip::Studio, window, cx);
-        let (Some(edit), Some(video)) = (&self.studio.edit, &self.studio.video) else {
+        let Some(video) = &self.studio.video else {
             return;
         };
-        if self.studio.paused
-            || self.studio.handle.is_some()
+        if !self.studio.transport.playing()
+            || self.studio.transport.held
             || self.studio.seek_bar.dragging.is_some()
             || video.seeking()
         {
             return;
         }
-        if video.ended() || video.position() >= Duration::from_millis(edit.range.end_ms) {
-            video
-                .seek(Duration::from_millis(edit.range.start_ms), true)
-                .ok();
-        }
+        self.loop_studio(video);
     }
 
     /// `ctrl-enter`. FFmpeg runs on a thread of its own, and the page shows how
@@ -225,21 +301,35 @@ impl FileBuddy {
             self.flash("the range is empty", true, cx);
             return;
         }
+        let format = self.studio.controls.format;
+        let (min_width, min_height) = format.min_size();
+        let (width, height) = edit.output_size();
+        if edit.size.0 > 0 && (width < min_width || height < min_height) {
+            self.flash(
+                format!(
+                    "{} needs a frame of {min_width} x {min_height} or more",
+                    format.label()
+                ),
+                true,
+                cx,
+            );
+            return;
+        }
         if let Err(e) = std::fs::create_dir_all(&folder) {
             log::error!("create {}: {e}", folder.display());
             self.flash("export failed", true, cx);
             return;
         }
-        let format = Format::Mp4;
+        let controls = self.studio.controls;
         let destination = studio::unique_path(
             &folder,
-            &studio::export_name(&edit.source, edit.range, format),
+            &studio::export_name(&edit.source, edit.range, controls.format),
         );
 
         let (sender, mut events) = mpsc::unbounded();
         let target = destination.clone();
         std::thread::spawn(move || {
-            let result = export::run(&edit, format, &target, |share| {
+            let result = export::run(&edit, &controls, &target, |share| {
                 sender.unbounded_send(Progress::Share(share)).ok();
             });
             sender.unbounded_send(Progress::Done(result)).ok();
@@ -288,13 +378,6 @@ impl FileBuddy {
             }
         }
     }
-
-    fn set_quality(&mut self, quality: Quality, cx: &mut Context<Self>) {
-        if let Some(edit) = &mut self.studio.edit {
-            edit.quality = quality;
-            cx.notify();
-        }
-    }
 }
 
 /// A point in the range, rounded to the tenth of a second as the length is:
@@ -320,9 +403,8 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
     };
     let viewport = window.viewport_size();
     let width = (f32::from(viewport.width) - PANEL_WIDTH - PADDING * 2.).max(160.);
-    let height =
-        (f32::from(viewport.height) - header::HEIGHT - seek_bar::HEIGHT - 8. - PADDING * 2.)
-            .max(120.);
+    let chrome = header::HEIGHT + seek_bar::HEIGHT + 8. + PADDING * 2.;
+    let height = (f32::from(viewport.height) - chrome).max(120.);
 
     h_flex()
         .id("studio")
@@ -345,10 +427,10 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
         .into_any_element()
 }
 
-/// A click pauses or plays the clip, and the wheel sets the sound level.
 fn stage(this: &FileBuddy, width: f32, height: f32, cx: &mut Context<FileBuddy>) -> AnyElement {
-    div()
+    let frame = div()
         .id("studio-stage")
+        .relative()
         .w(px(width))
         .h(px(height))
         .flex_shrink_0()
@@ -356,32 +438,153 @@ fn stage(this: &FileBuddy, width: f32, height: f32, cx: &mut Context<FileBuddy>)
         .bg(cx.theme().secondary)
         .flex()
         .items_center()
-        .justify_center()
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, _, _, cx| this.toggle_studio_paused(cx)),
-        )
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-            let up = match event.delta {
-                ScrollDelta::Lines(delta) => delta.y,
-                ScrollDelta::Pixels(delta) => f32::from(delta.y),
-            };
-            if up != 0. {
-                this.player.nudge_volume(up > 0.);
-                this.sync_studio_sound();
-                cx.notify();
-            }
+        .justify_center();
+    preview::clip_input(frame, Clip::Studio, cx)
+        .on_drag_move(cx.listener(|this, event: &DragMoveEvent<CropDrag>, _, cx| {
+            this.drag_crop(event.event.position, event.bounds, cx)
         }))
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.studio.crop_grab = None),
+        )
+        .on_mouse_up_out(
+            MouseButton::Left,
+            cx.listener(|this, _, _, _| this.studio.crop_grab = None),
+        )
         .children(this.studio.video.as_ref().map(|video| {
             video_element(video.clone())
                 .id("studio-preview")
                 .size(px(width), px(height))
                 .buffer_capacity(60)
         }))
+        .children(crop_box(this, width, height, cx))
         .into_any_element()
 }
 
+/// Where the video letterboxes the frame in the stage, in stage pixels.
+struct Frame {
+    x: f32,
+    y: f32,
+    scale: f32,
+}
+
+fn frame_in((width, height): (u32, u32), (stage_width, stage_height): (f32, f32)) -> Option<Frame> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let (width, height) = (width as f32, height as f32);
+    let scale = (stage_width / width).min(stage_height / height);
+    Some(Frame {
+        x: (stage_width - width * scale) / 2.,
+        y: (stage_height - height * scale) / 2.,
+        scale,
+    })
+}
+
+/// The crop over the preview. Outside the box the frame is dark. A drag inside
+/// the box moves it, and a drag on a grip resizes it.
+fn crop_box(
+    this: &FileBuddy,
+    width: f32,
+    height: f32,
+    cx: &mut Context<FileBuddy>,
+) -> Option<AnyElement> {
+    let edit = this.studio.edit.as_ref()?;
+    this.studio.video.as_ref()?;
+    let frame = frame_in(edit.size, (width, height))?;
+    let crop = edit.crop;
+    let frame_width = edit.size.0 as f32 * frame.scale;
+    let frame_height = edit.size.1 as f32 * frame.scale;
+    let left = frame.x + crop.x as f32 * frame.scale;
+    let top = frame.y + crop.y as f32 * frame.scale;
+    let box_width = crop.width as f32 * frame.scale;
+    let box_height = crop.height as f32 * frame.scale;
+    let right = left + box_width;
+    let bottom = top + box_height;
+
+    let shade = |x: f32, y: f32, w: f32, h: f32| {
+        div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(w.max(0.)))
+            .h(px(h.max(0.)))
+            .bg(black().opacity(0.6))
+    };
+    let grips = Grip::EDGES.into_iter().enumerate().map(|(at, grip)| {
+        let (along, down) = grip.anchor();
+        div()
+            .id(("crop-grip", at))
+            .absolute()
+            .left(px(left + along * box_width - GRIP_SIZE / 2.))
+            .top(px(top + down * box_height - GRIP_SIZE / 2.))
+            .size(px(GRIP_SIZE))
+            .bg(white())
+            .border_1()
+            .border_color(black())
+            .cursor(grip_cursor(grip))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    // The stage under it would take the press as a tap.
+                    cx.stop_propagation();
+                    this.grab_crop(grip, event.position);
+                }),
+            )
+            .on_drag(CropDrag, |drag, _, _, cx| cx.new(|_| *drag))
+    });
+    let border: Hsla = white().opacity(0.8);
+
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(shade(frame.x, frame.y, frame_width, top - frame.y))
+            .child(shade(
+                frame.x,
+                bottom,
+                frame_width,
+                frame.y + frame_height - bottom,
+            ))
+            .child(shade(frame.x, top, left - frame.x, box_height))
+            .child(shade(right, top, frame.x + frame_width - right, box_height))
+            .child(
+                div()
+                    .id("crop-box")
+                    .absolute()
+                    .left(px(left))
+                    .top(px(top))
+                    .w(px(box_width))
+                    .h(px(box_height))
+                    .border_1()
+                    .border_color(border)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, _, _| {
+                            this.grab_crop(Grip::Move, event.position)
+                        }),
+                    )
+                    .on_drag(CropDrag, |drag, _, _, cx| cx.new(|_| *drag)),
+            )
+            .children(grips)
+            .into_any_element(),
+    )
+}
+
+fn grip_cursor(grip: Grip) -> CursorStyle {
+    match grip {
+        Grip::Left | Grip::Right => CursorStyle::ResizeLeftRight,
+        Grip::Top | Grip::Bottom => CursorStyle::ResizeUpDown,
+        Grip::TopLeft | Grip::BottomRight => CursorStyle::ResizeUpLeftDownRight,
+        Grip::TopRight | Grip::BottomLeft => CursorStyle::ResizeUpRightDownLeft,
+        Grip::Move => CursorStyle::Arrow,
+    }
+}
+
 fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let playback = preview::controls(this, Clip::Studio, cx);
     let theme = cx.theme();
     let name = edit
         .source
@@ -389,28 +592,20 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let range = edit.range;
-    let label = |text: &'static str| {
-        div()
-            .w(px(48.))
-            .text_color(theme.muted_foreground)
-            .child(text)
+    let muted = |text: String| div().text_color(theme.muted_foreground).child(text);
+    // A click sets the point at the playhead, as its key does.
+    let point_button = |edge: Edge, label: &'static str, key: &'static str| {
+        Button::new(label)
+            .xsmall()
+            .w(px(POINT_WIDTH))
+            .label(label)
+            .tooltip(key)
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| this.set_point(edge, cx)))
     };
-    let point_row = |edge: Edge, text: &'static str, button: &'static str, key: &'static str| {
-        h_flex()
-            .gap_2()
-            .items_center()
-            .child(label(text))
-            .child(div().flex_1().child(point(range.at(edge))))
-            .child(
-                Button::new(button)
-                    .xsmall()
-                    .label(button)
-                    .tooltip(key)
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_point(edge, cx))),
-            )
-    };
+    let length = |ms: u64| media::duration(ms as f64 / 1000.);
     let running = this.studio.export;
+    let controls = this.studio.controls;
 
     v_flex()
         .w(px(PANEL_WIDTH))
@@ -421,39 +616,151 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
         .border_l_1()
         .border_color(theme.border)
         .text_sm()
+        .child(playback)
         .child(div().child(name))
+        .child(
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .whitespace_nowrap()
+                .child(point_button(Edge::Start, "In", "["))
+                .child(point(range.start_ms))
+                .child(muted("-".into()))
+                .child(point(range.end_ms))
+                .child(point_button(Edge::End, "Out", "]"))
+                .child(div().flex_1())
+                .child(length(range.len_ms()))
+                .child(muted(format!("/ {}", length(edit.duration_ms)))),
+        )
         .child(
             v_flex()
                 .gap_1()
-                .child(point_row(Edge::Start, "In", "Set in", "["))
-                .child(point_row(Edge::End, "Out", "Set out", "]"))
                 .child(
                     h_flex()
-                        .gap_2()
-                        .child(label("Length"))
-                        .child(media::duration(range.len_ms() as f64 / 1000.)),
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(theme.muted_foreground)
+                                .child("Crop"),
+                        )
+                        .child(
+                            Button::new("crop-reset")
+                                .xsmall()
+                                .label("Reset")
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(edit) = &mut this.studio.edit {
+                                        edit.reset_crop();
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                )
+                .child(h_flex().gap_1().children(Aspect::ALL.map(|aspect| {
+                    toggle(
+                        ("aspect", aspect as usize),
+                        aspect.label(),
+                        edit.aspect == aspect,
+                    )
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_aspect(aspect, cx)))
+                }))),
+        )
+        .child(
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(theme.muted_foreground)
+                                .child("Max width"),
+                        )
+                        .child(div().text_xs().text_color(theme.muted_foreground).child({
+                            let (width, height) = edit.output_size();
+                            format!("{width} x {height}")
+                        })),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            toggle("width-source", "Source", edit.max_width == MaxWidth::Source)
+                                .xsmall()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.set_max_width(MaxWidth::Source, window, cx)
+                                })),
+                        )
+                        .children(studio::MAX_WIDTHS.map(|width| {
+                            let max_width = MaxWidth::Pixels(width);
+                            toggle(
+                                ("width", width as usize),
+                                width.to_string(),
+                                edit.max_width == max_width
+                                    && this.studio.width_input.read(cx).value().is_empty(),
+                            )
+                            .xsmall()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.set_max_width(max_width, window, cx)
+                                },
+                            ))
+                        }))
+                        .child(
+                            div()
+                                .w(px(WIDTH_INPUT))
+                                .child(Input::new(&this.studio.width_input).xsmall()),
+                        ),
                 ),
         )
         .child(
             v_flex()
                 .gap_1()
                 .child(div().text_color(theme.muted_foreground).child("Format"))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .child(toggle("format-mp4", "MP4", true).xsmall()),
-                ),
-        )
-        .child(
-            v_flex()
-                .gap_1()
-                .child(div().text_color(theme.muted_foreground).child("Quality"))
-                .child(h_flex().gap_1().children(Quality::ALL.map(|quality| {
-                    toggle(quality.label(), quality.label(), edit.quality == quality)
-                        .xsmall()
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_quality(quality, cx)))
+                .child(h_flex().gap_1().children(Format::ALL.map(|format| {
+                    toggle(
+                        ("format", format as usize),
+                        format.label(),
+                        controls.format == format,
+                    )
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.studio.controls.format = format;
+                        cx.notify();
+                    }))
                 }))),
         )
+        .when_some(controls.fps(), |panel, current| {
+            panel.child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_color(theme.muted_foreground).child("Frame rate"))
+                    .child(h_flex().gap_1().children(studio::FPS.map(|fps| {
+                        toggle(("fps", fps as usize), fps.to_string(), current == fps)
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.studio.controls.set_fps(fps);
+                                cx.notify();
+                            }))
+                    }))),
+            )
+        })
+        .when_some(controls.quality(), |panel, current| {
+            panel.child(
+                v_flex()
+                    .gap_1()
+                    .child(div().text_color(theme.muted_foreground).child("Quality"))
+                    .child(h_flex().gap_1().children(Quality::ALL.map(|quality| {
+                        toggle(quality.label(), quality.label(), current == quality)
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.studio.controls.set_quality(quality);
+                                cx.notify();
+                            }))
+                    }))),
+            )
+        })
         .child(
             h_flex().child(
                 Button::new("export")
@@ -491,15 +798,13 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                     ),
             )
         })
-        .child(div().text_xs().map(|line| {
-            match &this.config.export_folder {
-                Some(folder) => line
-                    .text_color(theme.muted_foreground)
-                    .child(format!("To {}", folder.display())),
-                None => line
+        .when(this.config.export_folder.is_none(), |panel| {
+            panel.child(
+                div()
+                    .text_xs()
                     .text_color(theme.warning)
                     .child("No export folder. Set one in Settings."),
-            }
-        }))
+            )
+        })
         .into_any_element()
 }

@@ -154,8 +154,12 @@ pub(super) fn click(
     } else {
         this.select(index, cx);
         this.renamer_follows(window, cx);
-        if event.click_count() == 2 && matches!(this.results.get(index), Some(Entry::Folder(_))) {
-            this.activate(window, cx);
+        if event.click_count() == 2 {
+            match this.results.get(index) {
+                Some(Entry::Folder(_)) => this.activate(window, cx),
+                Some(Entry::File(_)) => this.open_in_studio(window, cx),
+                _ => {}
+            }
         }
     }
 }

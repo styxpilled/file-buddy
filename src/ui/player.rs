@@ -1,5 +1,6 @@
 //! The videos that may play: the clip in the side pane, the file opened ahead
-//! of it, and the tile under the pointer.
+//! of it, and the tile under the pointer. The pause and the press of the pane
+//! and of the Studio work the same way, through `Transport`.
 
 use std::path::Path;
 use std::time::Duration;
@@ -11,6 +12,7 @@ use url::Url;
 use crate::media::Kind;
 use crate::paths;
 use crate::ui::FileBuddy;
+use crate::ui::seek_bar::Clip;
 
 /// How long the selection must rest before the side pane opens a decoder. Held
 /// arrow keys would otherwise open one file per keystroke.
@@ -53,14 +55,21 @@ pub(super) struct Player {
     /// Whether a new preview starts playing. Pausing one clip does not change
     /// it, and it never touches a tile.
     pub autoplay: bool,
-    pub paused: bool,
-    /// 1x or 2x, from the speed button. Kept across selections, as the sound
-    /// is. A hold plays at 2x whatever it is, and goes back to it.
+    /// 1x or 2x, from the speed button, for the pane and the Studio. Kept
+    /// across selections, as the sound is. A hold plays at 2x whatever it is,
+    /// and goes back to it.
     pub speed: f64,
+    pub pane: Transport,
+}
+
+/// The pause of one clip, and what holds it: a drag on the bar, or space or
+/// the mouse button down on the clip.
+#[derive(Default)]
+pub(super) struct Transport {
+    pub paused: bool,
     /// A drag on the bar holds the clip paused. Pause and play wait for the
     /// release, which applies them.
     pub held: bool,
-    /// Space or the mouse button, down on the clip.
     press: Option<Press>,
     hold_task: Option<Task<()>>,
 }
@@ -99,11 +108,8 @@ impl Default for Player {
             muted: cfg!(feature = "sim"),
             volume: 0.5,
             autoplay: false,
-            paused: true,
             speed: 1.0,
-            held: false,
-            press: None,
-            hold_task: None,
+            pane: Transport::new(true),
         }
     }
 }
@@ -126,51 +132,7 @@ impl Player {
         video.set_muted(self.muted);
         video.set_volume(self.volume);
         video.set_speed(self.speed).ok();
-        video.set_paused(self.paused);
-    }
-
-    pub fn toggle_muted(&mut self) {
-        self.muted = !self.muted;
-        if let Some(video) = self.video() {
-            video.set_muted(self.muted);
-        }
-    }
-
-    /// One step of the level. Turning it up is a request to hear the clip, so
-    /// it lifts the mute.
-    pub fn nudge_volume(&mut self, up: bool) {
-        let step = if up { VOLUME_STEP } else { -VOLUME_STEP };
-        self.volume = (self.volume + step).clamp(0., 1.);
-        if up && self.volume > 0. {
-            self.muted = false;
-        }
-        if let Some(video) = self.video() {
-            video.set_volume(self.volume);
-            video.set_muted(self.muted);
-        }
-    }
-
-    /// Pause or play the clip as the user chose. A hold of the speed plays it
-    /// whatever that is. Nothing changes while a drag holds it.
-    pub fn sync_paused(&self) {
-        if self.held {
-            return;
-        }
-        if let Some(video) = self.video() {
-            video.set_paused(self.paused && !self.holding());
-        }
-    }
-
-    /// One clip only. The next selection follows the autoplay flag again.
-    pub fn toggle_paused(&mut self) {
-        self.paused = !self.paused;
-        self.sync_paused();
-    }
-
-    pub fn toggle_autoplay(&mut self) {
-        self.autoplay = !self.autoplay;
-        self.paused = !self.autoplay;
-        self.sync_paused();
+        video.set_paused(self.pane.paused);
     }
 
     /// The level as the pane shows it. The pane strikes it through while the
@@ -179,23 +141,46 @@ impl Player {
         format!("{}%", (self.volume * 100.).round() as u32).into()
     }
 
-    /// The speed button: 1x or 2x.
-    pub fn toggle_speed(&mut self) {
-        self.speed = if self.speed == 1.0 { FAST } else { 1.0 };
-        if !self.holding()
-            && let Some(video) = self.video()
-        {
-            video.set_speed(self.speed).ok();
-        }
-    }
-
-    /// The speed the clip plays at now, for the speed button.
-    pub fn speed_label(&self) -> &'static str {
-        if self.holding() || self.speed != 1.0 {
+    /// The speed a clip plays at now, for the speed button.
+    pub fn speed_label(&self, transport: &Transport) -> &'static str {
+        if self.speed_of(transport) != 1.0 {
             "2x"
         } else {
             "1x"
         }
+    }
+
+    fn speed_of(&self, transport: &Transport) -> f64 {
+        if transport.holding() {
+            FAST
+        } else {
+            self.speed
+        }
+    }
+
+    /// Keep the tile that plays and the file opened ahead only where `keep`
+    /// says their row still holds the file they were opened for.
+    pub fn retain(&mut self, keep: impl Fn(usize) -> bool) {
+        if self.hovered.as_ref().is_some_and(|(at, _)| !keep(*at)) {
+            self.hovered = None;
+        }
+        if self.preloaded.as_ref().is_some_and(|(at, _)| !keep(*at)) {
+            self.preloaded = None;
+        }
+    }
+}
+
+impl Transport {
+    pub fn new(paused: bool) -> Self {
+        Self {
+            paused,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the clip plays now. A hold plays it whatever the pause says.
+    pub fn playing(&self) -> bool {
+        !self.paused || self.holding()
     }
 
     /// Returns false if a press is already down. Key repeat sends the action
@@ -211,94 +196,192 @@ impl Player {
     /// The press became a hold. `paused` stays what the user chose, so the
     /// release can go back to it.
     fn speed_up(&mut self) {
-        let Some(press) = &mut self.press else {
-            return;
-        };
-        press.fast = true;
-        if let Some(video) = self.video() {
-            video.set_speed(FAST).ok();
+        if let Some(press) = &mut self.press {
+            press.fast = true;
         }
-        self.sync_paused();
     }
 
-    /// A tap toggles pause. A hold goes back to 1x and to the pause from
-    /// before it.
-    fn release(&mut self, from: PressFrom) {
+    /// A tap toggles pause. A hold goes back to the pause from before it.
+    /// Returns whether a press ended.
+    fn release(&mut self, from: PressFrom) -> bool {
         if self.press.as_ref().is_some_and(|press| press.from == from) {
             self.end_press(true);
+            return true;
         }
+        false
     }
 
-    /// The window lost focus, so no release will come. A hold ends, and a tap
-    /// does nothing.
-    pub fn cancel_press(&mut self) {
-        self.end_press(false);
-    }
-
+    /// `tap` is false when the window lost focus, so a tap does nothing.
     fn end_press(&mut self, tap: bool) {
         self.hold_task = None;
-        let Some(press) = self.press.take() else {
-            return;
-        };
-        if !press.fast {
-            if tap {
-                self.toggle_paused();
-            }
-            return;
+        if let Some(press) = self.press.take()
+            && !press.fast
+            && tap
+        {
+            self.paused = !self.paused;
         }
-        if let Some(video) = self.video() {
-            video.set_speed(self.speed).ok();
-        }
-        self.sync_paused();
     }
 
-    /// A new clip in the pane. The press was for the old one.
-    fn drop_press(&mut self) {
+    /// A new clip. The press and the drag were for the old one.
+    pub fn drop_press(&mut self) {
         self.press = None;
         self.hold_task = None;
         self.held = false;
     }
 
-    pub fn pressed(&self) -> bool {
-        self.press.is_some()
-    }
-
     fn holding(&self) -> bool {
         self.press.as_ref().is_some_and(|press| press.fast)
-    }
-
-    /// Keep the tile that plays and the file opened ahead only where `keep`
-    /// says their row still holds the file they were opened for.
-    pub fn retain(&mut self, keep: impl Fn(usize) -> bool) {
-        if self.hovered.as_ref().is_some_and(|(at, _)| !keep(*at)) {
-            self.hovered = None;
-        }
-        if self.preloaded.as_ref().is_some_and(|(at, _)| !keep(*at)) {
-            self.preloaded = None;
-        }
     }
 }
 
 impl FileBuddy {
-    /// Space down, or the mouse button down on the clip. Held past
-    /// `HOLD_DELAY`, it plays the clip fast.
-    pub(super) fn press_play(&mut self, from: PressFrom, cx: &mut Context<Self>) {
-        if !self.player.press(from) {
+    pub(super) fn transport(&mut self, clip: Clip) -> &mut Transport {
+        match clip {
+            Clip::Pane => &mut self.player.pane,
+            Clip::Studio => &mut self.studio.transport,
+        }
+    }
+
+    pub(super) fn transport_of(&self, clip: Clip) -> &Transport {
+        match clip {
+            Clip::Pane => &self.player.pane,
+            Clip::Studio => &self.studio.transport,
+        }
+    }
+
+    /// Pause or play the clip as the user chose. Nothing changes while a drag
+    /// holds it. In the Studio, a clip that plays on from the out point starts
+    /// again at the in point.
+    pub(super) fn sync_paused(&self, clip: Clip) {
+        let transport = self.transport_of(clip);
+        let Some(video) = self.clip_video(clip) else {
+            return;
+        };
+        if transport.held {
             return;
         }
-        self.player.hold_task = Some(cx.spawn(async move |this, cx| {
+        video.set_paused(!transport.playing());
+        if clip == Clip::Studio && transport.playing() {
+            self.loop_studio(video);
+        }
+    }
+
+    fn sync_speed(&self, clip: Clip) {
+        if let Some(video) = self.clip_video(clip) {
+            video
+                .set_speed(self.player.speed_of(self.transport_of(clip)))
+                .ok();
+        }
+    }
+
+    /// The sound is one for the pane and the Studio, so a change reaches both.
+    fn sync_sound(&self) {
+        for clip in [Clip::Pane, Clip::Studio] {
+            if let Some(video) = self.clip_video(clip) {
+                video.set_volume(self.player.volume);
+                video.set_muted(self.player.muted);
+            }
+        }
+    }
+
+    pub(super) fn toggle_muted(&mut self, cx: &mut Context<Self>) {
+        self.player.muted = !self.player.muted;
+        self.sync_sound();
+        cx.notify();
+    }
+
+    /// One step of the level. Turning it up is a request to hear the clip, so
+    /// it lifts the mute.
+    pub(super) fn nudge_volume(&mut self, up: bool, cx: &mut Context<Self>) {
+        let player = &mut self.player;
+        let step = if up { VOLUME_STEP } else { -VOLUME_STEP };
+        player.volume = (player.volume + step).clamp(0., 1.);
+        if up && player.volume > 0. {
+            player.muted = false;
+        }
+        self.sync_sound();
+        cx.notify();
+    }
+
+    /// The pause and the speed the user chose, on a clip the Studio opens.
+    pub(super) fn apply_transport(&self, clip: Clip, video: &Video) {
+        let transport = self.transport_of(clip);
+        video.set_speed(self.player.speed_of(transport)).ok();
+        video.set_paused(!transport.playing());
+    }
+
+    pub(super) fn toggle_paused(&mut self, clip: Clip, cx: &mut Context<Self>) {
+        let transport = self.transport(clip);
+        transport.paused = !transport.paused;
+        self.sync_paused(clip);
+        cx.notify();
+    }
+
+    /// The speed button, for both clips.
+    pub(super) fn toggle_speed(&mut self, cx: &mut Context<Self>) {
+        self.player.speed = if self.player.speed == 1.0 { FAST } else { 1.0 };
+        self.sync_speed(Clip::Pane);
+        self.sync_speed(Clip::Studio);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_autoplay(&mut self, cx: &mut Context<Self>) {
+        self.player.autoplay = !self.player.autoplay;
+        self.player.pane.paused = !self.player.autoplay;
+        self.sync_paused(Clip::Pane);
+        cx.notify();
+    }
+
+    /// Space down, or the mouse button down on the clip. Held past
+    /// `HOLD_DELAY`, it plays the clip fast.
+    pub(super) fn press_play(&mut self, clip: Clip, from: PressFrom, cx: &mut Context<Self>) {
+        if !self.transport(clip).press(from) {
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
             cx.background_executor().timer(HOLD_DELAY).await;
             this.update(cx, |this, cx| {
-                this.player.speed_up();
+                this.transport(clip).speed_up();
+                this.sync_speed(clip);
+                this.sync_paused(clip);
                 cx.notify();
             })
             .ok();
-        }));
+        });
+        self.transport(clip).hold_task = Some(task);
     }
 
     pub(super) fn release_play(&mut self, from: PressFrom, cx: &mut Context<Self>) {
-        self.player.release(from);
+        for clip in [Clip::Pane, Clip::Studio] {
+            if self.transport(clip).release(from) {
+                self.sync_speed(clip);
+                self.sync_paused(clip);
+            }
+        }
         cx.notify();
+    }
+
+    pub(super) fn pressed(&self) -> bool {
+        [Clip::Pane, Clip::Studio]
+            .iter()
+            .any(|clip| self.transport_of(*clip).press.is_some())
+    }
+
+    /// The window lost focus, so no release will come. A hold ends, and a tap
+    /// does nothing.
+    pub(super) fn cancel_presses(&mut self, cx: &mut Context<Self>) {
+        self.cancel_press(Clip::Pane);
+        self.cancel_press(Clip::Studio);
+        cx.notify();
+    }
+
+    /// The press became something else, such as a drag of the crop box.
+    pub(super) fn cancel_press(&mut self, clip: Clip) {
+        if self.transport_of(clip).press.is_some() {
+            self.transport(clip).end_press(false);
+            self.sync_speed(clip);
+            self.sync_paused(clip);
+        }
     }
 
     /// The side pane plays the selection, after it stops moving. The clip on
@@ -332,10 +415,10 @@ impl FileBuddy {
             self.schedule_preload(cx);
             return;
         }
-        self.player.drop_press();
+        self.player.pane.drop_press();
 
         // The walk asks the user to name what they see, so the clip plays.
-        self.player.paused = !(self.player.autoplay || self.walking());
+        self.player.pane.paused = !(self.player.autoplay || self.walking());
 
         // The file opened ahead is already decoded, so it costs no wait at all,
         // unless it must seek to a moment first.
@@ -548,66 +631,71 @@ pub(super) fn open_video(path: &Path, buffer: usize, looping: bool) -> Option<Vi
 mod tests {
     use super::*;
 
-    fn player(paused: bool) -> Player {
-        Player {
-            paused,
-            ..Player::default()
-        }
-    }
-
     #[test]
     fn a_tap_toggles_pause() {
-        let mut player = player(true);
-        assert!(player.press(PressFrom::Key));
-        player.release(PressFrom::Key);
-        assert!(!player.paused);
-        assert!(!player.holding());
+        let mut transport = Transport::new(true);
+        assert!(transport.press(PressFrom::Key));
+        assert!(transport.release(PressFrom::Key));
+        assert!(!transport.paused);
+        assert!(!transport.holding());
     }
 
     #[test]
     fn a_hold_goes_back_to_the_state_from_before() {
         for paused in [true, false] {
-            let mut player = player(paused);
-            player.press(PressFrom::Mouse);
-            player.speed_up();
-            assert!(player.holding());
-            player.release(PressFrom::Mouse);
-            assert_eq!(player.paused, paused);
-            assert!(!player.holding());
+            let mut transport = Transport::new(paused);
+            transport.press(PressFrom::Mouse);
+            transport.speed_up();
+            assert!(transport.holding());
+            assert!(transport.playing());
+            transport.release(PressFrom::Mouse);
+            assert_eq!(transport.paused, paused);
+            assert!(!transport.holding());
         }
     }
 
     #[test]
     fn key_repeat_does_not_start_a_second_press() {
-        let mut player = player(true);
-        assert!(player.press(PressFrom::Key));
-        assert!(!player.press(PressFrom::Key));
-        player.release(PressFrom::Key);
-        assert!(!player.paused);
+        let mut transport = Transport::new(true);
+        assert!(transport.press(PressFrom::Key));
+        assert!(!transport.press(PressFrom::Key));
+        transport.release(PressFrom::Key);
+        assert!(!transport.paused);
     }
 
     #[test]
     fn a_release_of_the_other_input_does_nothing() {
-        let mut player = player(true);
-        player.press(PressFrom::Key);
-        player.release(PressFrom::Mouse);
-        assert!(player.paused);
-        player.release(PressFrom::Key);
-        assert!(!player.paused);
+        let mut transport = Transport::new(true);
+        transport.press(PressFrom::Key);
+        assert!(!transport.release(PressFrom::Mouse));
+        assert!(transport.paused);
+        transport.release(PressFrom::Key);
+        assert!(!transport.paused);
+    }
+
+    #[test]
+    fn a_lost_focus_ends_a_hold_and_drops_a_tap() {
+        let mut transport = Transport::new(true);
+        transport.press(PressFrom::Key);
+        transport.end_press(false);
+        assert!(transport.paused);
+        transport.press(PressFrom::Key);
+        transport.speed_up();
+        transport.end_press(false);
+        assert!(transport.paused && !transport.holding());
     }
 
     #[test]
     fn the_speed_button_shows_the_speed_and_a_hold_goes_back_to_it() {
-        let mut player = player(false);
-        assert_eq!(player.speed_label(), "1x");
-        player.press(PressFrom::Key);
-        player.speed_up();
-        assert_eq!(player.speed_label(), "2x");
-        player.release(PressFrom::Key);
-        assert_eq!(player.speed_label(), "1x");
-        player.toggle_speed();
-        assert_eq!(player.speed_label(), "2x");
-        player.toggle_speed();
-        assert_eq!(player.speed, 1.0);
+        let mut player = Player::default();
+        let mut transport = Transport::new(false);
+        assert_eq!(player.speed_label(&transport), "1x");
+        transport.press(PressFrom::Key);
+        transport.speed_up();
+        assert_eq!(player.speed_label(&transport), "2x");
+        transport.release(PressFrom::Key);
+        assert_eq!(player.speed_label(&transport), "1x");
+        player.speed = FAST;
+        assert_eq!(player.speed_label(&transport), "2x");
     }
 }
