@@ -93,6 +93,23 @@ pub fn tile(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyE
                 // nothing until the decoder presents a frame, so dropping the
                 // thumbnail on hover left the tile empty for a moment.
                 .child(picture)
+                .when_some(playing, |container, (_, playing)| {
+                    container.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                video_element(playing.clone())
+                                    .id(("video", index))
+                                    .size(px(TILE_WIDTH - 4.), px(TILE_HEIGHT - 4.))
+                                    .buffer_capacity(30),
+                            ),
+                    )
+                })
+                // Over the clip, or the clip would hide it.
                 .when(marked, |container| {
                     container.child(
                         div()
@@ -108,22 +125,6 @@ pub fn tile(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyE
                             .text_xs()
                             .text_color(cx.theme().background)
                             .child("✓"),
-                    )
-                })
-                .when_some(playing, |container, (_, playing)| {
-                    container.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                video_element(playing.clone())
-                                    .id(("video", index))
-                                    .size(px(TILE_WIDTH - 4.), px(TILE_HEIGHT - 4.))
-                                    .buffer_capacity(30),
-                            ),
                     )
                 }),
         )

@@ -118,13 +118,14 @@ impl FileBuddy {
         self.travel.late = None;
     }
 
-    /// The mouse back and forward buttons, `alt-left` and `alt-right`.
+    /// The mouse back and forward buttons, `alt-left` and `alt-right`. Returns
+    /// false when there is no step to go to.
     pub(super) fn go_history(
         &mut self,
         forward: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         let current = self.step(cx);
         let step = if forward {
             self.travel.steps.forward(current, Step::usable)
@@ -132,7 +133,7 @@ impl FileBuddy {
             self.travel.steps.back(current, Step::usable)
         };
         let Some(step) = step else {
-            return;
+            return false;
         };
         self.end_autoscroll(cx);
         self.folder = step.folder;
@@ -145,6 +146,7 @@ impl FileBuddy {
         });
         self.travel.late = None;
         self.enter_page(step.page, step.group, window, cx);
+        true
     }
 
     /// A page with the state that page has. Its results are new.
@@ -158,6 +160,9 @@ impl FileBuddy {
         self.tagger = None;
         self.renamer = None;
         window.focus(&self.focus, cx);
+        if page != Page::Studio {
+            self.close_studio_clip();
+        }
         match page {
             Page::Browse => {
                 self.mode = Mode::Browse;
@@ -174,6 +179,12 @@ impl FileBuddy {
                 // Nothing plays behind the form, and no key acts on a file that
                 // cannot be seen.
                 self.show_results(Vec::new(), cx);
+            }
+            Page::Studio => {
+                self.mode = Mode::Studio;
+                self.listing = false;
+                self.show_results(Vec::new(), cx);
+                self.open_studio_clip();
             }
         }
     }
@@ -228,7 +239,7 @@ pub(super) fn mouse_buttons(cx: &mut Context<FileBuddy>) -> impl IntoElement {
                     && let MouseButton::Navigate(direction) = event.button
                 {
                     view.update(cx, |this, cx| {
-                        this.go_history(direction == NavigationDirection::Forward, window, cx)
+                        this.go_history(direction == NavigationDirection::Forward, window, cx);
                     });
                     cx.stop_propagation();
                 }

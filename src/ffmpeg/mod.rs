@@ -2,6 +2,7 @@
 //! links FFmpeg itself: a subprocess that crashes cannot stop the window.
 
 pub mod audio;
+pub mod export;
 pub mod frames;
 pub mod probe;
 pub mod thumbnail;

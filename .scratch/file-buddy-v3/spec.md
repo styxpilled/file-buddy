@@ -303,7 +303,8 @@ to undo and the search box holds text, it clears the box. It works with focus
 outside the box. Like typing, it makes no history step.
 
 The order is now: middle-click autoscroll, the tag panel, the rename input, the row input, the rows, a
-Settings field, back to Browse from Review or Settings, focus out of the search
+Settings field, one step back in history from the Studio, back to Browse from
+Review or Settings, focus out of the search
 box, the marks, one step out of "more like this", then the query.
 
 ## Side pane width
@@ -398,6 +399,8 @@ Issues continue from v2, in `issues/`:
 | 51 | Tags carry over to exports. Needs 36 |
 | 52 | Paste to add. Needs 45 |
 | 53 | Simulated input for the dev window. Tooling, not a feature. Build it before the Studio work, which needs many window checks |
+| 54 | Playback faults: sound and picture drift after scrubbing, a seek that shows the first frame, and GIFs that show no frame |
+| 55 | A drag of the out handle stops playback in the Studio |
 
 ## Maybe
 

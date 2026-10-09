@@ -19,6 +19,7 @@ mod seek_bar;
 mod settings;
 #[cfg(feature = "sim")]
 pub mod sim;
+mod studio;
 mod table;
 mod tagger;
 mod thumbnails;
@@ -48,8 +49,9 @@ use self::player::{Player, PressFrom};
 use self::renamer::Renamer;
 use self::review::Review;
 use self::rows::RowEditor;
-use self::seek_bar::SeekBar;
+use self::seek_bar::{Clip, SeekBar};
 use self::settings::Settings;
+use self::studio::Studio;
 use self::tagger::Tagger;
 use self::thumbnails::Thumbnails;
 use self::visual::Visual;
@@ -122,7 +124,12 @@ gpui_kit::actions!(
         HistoryBack,
         HistoryForward,
         TrashFiles,
-        DeleteFiles
+        DeleteFiles,
+        ShowStudio,
+        OpenInStudio,
+        SetIn,
+        SetOut,
+        ExportEdit
     ]
 );
 
@@ -159,6 +166,8 @@ pub struct FileBuddy {
     columns: usize,
     player: Player,
     seek_bar: SeekBar,
+    /// The edit, which stays when the page closes.
+    studio: Studio,
     indexer: Indexer,
     status: SharedString,
     /// A confirmation, shown in place of the result count until it expires. The
@@ -217,6 +226,7 @@ enum Mode {
     Review(Review),
     /// The unsaved form.
     Settings(Box<Settings>),
+    Studio,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +235,7 @@ enum Page {
     Folders,
     Review,
     Settings,
+    Studio,
 }
 
 /// What the side pane shows under the name: the speech the transcriber heard,
@@ -309,7 +320,8 @@ impl FileBuddy {
             kinds: vec![Kind::Video, Kind::Animated, Kind::Still],
             columns: 1,
             player: Player::default(),
-            seek_bar: SeekBar::new(cx),
+            seek_bar: SeekBar::new(Clip::Pane, cx),
+            studio: Studio::new(cx),
             indexer: Indexer::new(config.paused),
             status: "".into(),
             notice: None,
@@ -345,7 +357,14 @@ impl FileBuddy {
             Mode::Folders => Page::Folders,
             Mode::Review(_) => Page::Review,
             Mode::Settings(_) => Page::Settings,
+            Mode::Studio => Page::Studio,
         }
+    }
+
+    /// Settings and the Studio show no results, and no key acts on a file that
+    /// cannot be seen.
+    fn results_page(&self) -> bool {
+        !matches!(self.mode, Mode::Settings(_) | Mode::Studio)
     }
 
     /// The tab the pane shows. Only a video has speech, so any other file shows
@@ -357,7 +376,7 @@ impl FileBuddy {
         }
     }
 
-    /// A page tab, or `ctrl-1` to `ctrl-4`.
+    /// A page tab, or `ctrl-1` to `ctrl-5`.
     fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
         if page == self.page() {
             return;
@@ -446,7 +465,7 @@ impl FileBuddy {
     /// A new query. Review holds its own results, which a background refresh
     /// must not replace.
     fn run_search(&mut self, cx: &mut Context<Self>) {
-        if self.review().is_none() && !self.search_like(true, cx) {
+        if self.results_page() && self.review().is_none() && !self.search_like(true, cx) {
             let results = self.fetch_results(cx);
             self.show_results(results, cx);
         }
@@ -454,7 +473,7 @@ impl FileBuddy {
 
     /// The same query again, after the index changed under it.
     fn rerun_search(&mut self, cx: &mut Context<Self>) {
-        if self.review().is_none() && !self.search_like(false, cx) {
+        if self.results_page() && self.review().is_none() && !self.search_like(false, cx) {
             let results = self.fetch_results(cx);
             self.update_results(results, cx);
         }
@@ -586,14 +605,14 @@ impl FileBuddy {
         self.reload_review(cx);
     }
 
-    /// Every page with results can show the table. Settings has none.
+    /// Every page with results can show the table.
     fn table_shown(&self) -> bool {
-        self.table && self.settings().is_none()
+        self.table && self.results_page()
     }
 
     /// `v`, or a view button.
     fn set_table(&mut self, table: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings().is_some() || self.table == table {
+        if !self.results_page() || self.table == table {
             return;
         }
         self.table = table;
@@ -649,9 +668,15 @@ impl FileBuddy {
     }
 
     /// Focus given in the constructor is lost while the window finishes
-    /// opening, so every frame takes it back for the window keys.
+    /// opening, so every frame takes it back for the window keys. The Studio
+    /// holds its own, so its keys win there.
     fn hold_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus.is_focused(window)
+        let held = if self.page() == Page::Studio && self.studio.edit.is_some() {
+            &self.studio.focus
+        } else {
+            &self.focus
+        };
+        if !held.is_focused(window)
             && !self.query_focused(window, cx)
             && self.tagger.is_none()
             && self.renamer.is_none()
@@ -659,7 +684,7 @@ impl FileBuddy {
             && self.settings().is_none()
             && !self.menu_open
         {
-            window.focus(&self.focus, cx);
+            window.focus(&held.clone(), cx);
         }
     }
 
@@ -680,6 +705,11 @@ impl FileBuddy {
         } else if self.settings().is_some() && !self.focus.is_focused(window) {
             // A field of the form has focus. Leaving would drop what was typed.
             window.focus(&self.focus, cx);
+        } else if self.page() == Page::Studio {
+            // Back where `c` was pressed, with the selection it had.
+            if !self.go_history(false, window, cx) {
+                self.show_page(Page::Browse, window, cx);
+            }
         } else if matches!(self.page(), Page::Review | Page::Settings) {
             self.show_page(Page::Browse, window, cx);
         } else if self.query_focused(window, cx) {
@@ -789,7 +819,8 @@ impl Render for FileBuddy {
         self.sync_rows();
         self.hold_focus(window, cx);
         self.sync_placeholder(window, cx);
-        self.sync_seek_bar(window, cx);
+        self.sync_seek_bar(Clip::Pane, window, cx);
+        self.step_studio(window, cx);
         let width = self.grid_width(window, cx);
         self.columns = self.column_count(window, cx);
         self.step_autoscroll(window, cx);
@@ -821,11 +852,16 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &FocusQuery, window, cx| this.focus_query(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleMuted, _, cx| {
                 this.player.toggle_muted();
+                this.sync_studio_sound();
                 cx.notify();
             }))
-            .on_action(
-                cx.listener(|this, _: &TogglePaused, _, cx| this.press_play(PressFrom::Key, cx)),
-            )
+            .on_action(cx.listener(|this, _: &TogglePaused, _, cx| {
+                if this.page() == Page::Studio {
+                    this.toggle_studio_paused(cx);
+                } else {
+                    this.press_play(PressFrom::Key, cx);
+                }
+            }))
             .on_key_up(cx.listener(|this, event: &KeyUpEvent, _, cx| {
                 let key = &event.keystroke.key;
                 let bound = cx
@@ -845,10 +881,12 @@ impl Render for FileBuddy {
             }))
             .on_action(cx.listener(|this, _: &VolumeUp, _, cx| {
                 this.player.nudge_volume(true);
+                this.sync_studio_sound();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &VolumeDown, _, cx| {
                 this.player.nudge_volume(false);
+                this.sync_studio_sound();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopyFile, _, cx| this.copy_selected(cx)))
@@ -881,14 +919,12 @@ impl Render for FileBuddy {
                 cx.listener(|this, _: &ToggleMark, _, cx| this.toggle_mark(this.selected, cx)),
             )
             .on_action(cx.listener(|this, _: &Dismiss, window, cx| this.dismiss(window, cx)))
-            .on_action(
-                cx.listener(|this, _: &HistoryBack, window, cx| this.go_history(false, window, cx)),
-            )
-            .on_action(
-                cx.listener(|this, _: &HistoryForward, window, cx| {
-                    this.go_history(true, window, cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &HistoryBack, window, cx| {
+                this.go_history(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &HistoryForward, window, cx| {
+                this.go_history(true, window, cx);
+            }))
             .on_action(
                 cx.listener(|this, _: &MoreLikeThis, window, cx| this.more_like_this(window, cx)),
             )
@@ -919,6 +955,12 @@ impl Render for FileBuddy {
             .on_action(cx.listener(|this, _: &ShowSettings, window, cx| {
                 this.show_page(Page::Settings, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ShowStudio, window, cx| {
+                this.show_page(Page::Studio, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &OpenInStudio, window, cx| this.open_in_studio(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &SaveSettings, _, cx| this.save_settings(cx)))
             .on_action(cx.listener(|this, _: &Rescan, _, cx| {
                 this.flash("scanning the folders", false, cx);
@@ -946,11 +988,17 @@ impl Render for FileBuddy {
             // The search box propagates the escape it does not need itself.
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.dismiss(window, cx)))
             .child(header::header(self, window, cx))
-            .map(|page| match self.settings() {
-                Some(_) => page.child(settings::page(self, cx)),
+            .map(|page| match &self.mode {
+                Mode::Settings(_) => page.child(settings::page(self, cx)),
+                Mode::Studio => page.child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(studio::page(self, window, cx)),
+                ),
                 // The group is as tall as its parent, so it gets a parent of
                 // the height under the header, or it runs past the window.
-                None => {
+                Mode::Browse | Mode::Folders | Mode::Review(_) => {
                     page.child(
                         div().flex_1().min_h_0().child(
                             h_resizable("panes")

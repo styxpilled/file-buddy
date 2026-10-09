@@ -325,14 +325,17 @@ impl FileBuddy {
         // The walk asks the user to name what they see, so the clip plays.
         self.player.paused = !(self.player.autoplay || self.walking());
 
-        // The file opened ahead is already decoded, so it costs no wait at all.
-        if let Some((_, video)) = self
+        // The file opened ahead is already decoded, so it costs no wait at all,
+        // unless it must seek to a moment first.
+        let preloaded = self
             .player
             .preloaded
             .take_if(|(at, _)| *at == self.selected)
+            .map(|(_, video)| video);
+        if let Some(video) = preloaded.clone()
+            && moment.is_none()
         {
             self.player.apply(&video);
-            open_at(&video, moment);
             self.player.preview = Some(Preview { hash, video });
             self.schedule_preload(cx);
             cx.notify();
@@ -344,10 +347,13 @@ impl FileBuddy {
         }
         let index = self.selected;
         self.player.preview_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(PREVIEW_DELAY).await;
+            if preloaded.is_none() {
+                cx.background_executor().timer(PREVIEW_DELAY).await;
+            }
             let opened = this
                 .update(cx, |this, _| {
-                    this.open_clip(&path, &hash, PREVIEW_BUFFER)
+                    preloaded
+                        .or_else(|| this.open_clip(&path, &hash, PREVIEW_BUFFER))
                         .inspect(|video| {
                             this.player.apply(video);
                             open_at(video, moment);
@@ -367,9 +373,11 @@ impl FileBuddy {
                 .ok();
                 return;
             };
-            // A file that never decodes must not hold the old clip forever.
+            // A file that never decodes must not hold the old clip forever. A
+            // clip opened at a moment shows its first frame until the seek
+            // lands, so that frame is not shown.
             for _ in 0..FIRST_FRAME_TRIES {
-                if video.frame_seq() > 0 {
+                if video.frame_seq() > 0 && !video.seeking() {
                     break;
                 }
                 cx.background_executor().timer(FIRST_FRAME_POLL).await;
@@ -467,7 +475,7 @@ impl FileBuddy {
         if self.deleting.iter().any(|deleting| deleting == hash) {
             return None;
         }
-        open_video(&paths::playable(&self.cache, hash, path), buffer)
+        open_video(&paths::playable(&self.cache, hash, path), buffer, true)
     }
 
     /// Close every clip that has these bytes open. FFmpeg opens a file without
@@ -504,15 +512,15 @@ fn open_at(video: &Video, moment: Option<i64>) {
     }
 }
 
-/// Open a file for playback in a tile or in the side pane. It loops; the caller
+/// Open a file for playback in a tile, the side pane or the Studio. The caller
 /// decides about sound and about pausing. A file FFmpeg cannot open gives
 /// `None`, and the tile keeps its thumbnail. `buffer` caps the decoded frames it
 /// holds, which matters because a frame is the full size of the clip.
-fn open_video(path: &Path, buffer: usize) -> Option<Video> {
+pub(super) fn open_video(path: &Path, buffer: usize, looping: bool) -> Option<Video> {
     let uri = Url::from_file_path(path).ok()?;
     let options = VideoOptions {
         frame_buffer_capacity: buffer,
-        looping: true,
+        looping,
         ..VideoOptions::default()
     };
     match Video::new_with_options(&uri, options) {

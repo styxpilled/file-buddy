@@ -668,6 +668,16 @@ impl Video {
         self.0.shared.eos()
     }
 
+    /// The stream is at its end and every buffered frame has played. `eos` is
+    /// true once the last packet is read, which in a short clip is long before
+    /// its last frame shows.
+    pub fn ended(&self) -> bool {
+        let shared = &self.0.shared;
+        shared.eos()
+            && shared.frame_buffer.lock().is_empty()
+            && (!self.has_audio() || shared.audio_ring.lock().len == 0)
+    }
+
     pub fn looping(&self) -> bool {
         self.0.shared.looping.load(Ordering::SeqCst)
     }

@@ -30,6 +30,7 @@ Two things follow from that:
                       reindex, status, and the worker processes
       worker.rs       a model in a child `fb` process, one JSON line each way
       speech.rs       whisper-rs: the model the `whisper` worker loads once
+      studio.rs       the Studio edit: the source, the range, the export name
       clip/           visual, as vectors, through ONNX Runtime
         mod.rs        the runtime DLLs, the model config, the vector math
         image.rs      the image encoder, which the `clip` worker loads once
@@ -62,6 +63,8 @@ Two things follow from that:
       ffmpeg/         every call out to the FFmpeg command line tools
         mod.rs        tool lookup, the shared command, the error text
         audio.rs      the first audio track as 16 kHz mono samples
+        export.rs     the arguments of a Studio export, and the run with its
+                      progress
         frames.rs     the frames OCR reads and CLIP embeds, spread over the
                       duration
         probe.rs      ffprobe and its JSON
@@ -106,7 +109,8 @@ Two things follow from that:
         preview.rs    the side pane and its two tabs
         rows.rs       the cursor and the input that edit the Speech and Text
                       tabs
-        seek_bar.rs   the bar under the clip in the pane, and the skip keys
+        seek_bar.rs   the bar under the clip in the pane and in the Studio, the
+                      range handles, and the skip keys
         player.rs     the clip in the pane, the file opened ahead, the tile
                       that plays, and the sound
         indexing.rs   the scan, the watcher and the text stages while the
@@ -120,6 +124,8 @@ Two things follow from that:
         folders.rs    the Folders page: the folder, the breadcrumb, the sort
         review.rs     the Review page, its groups and the rename walk
         settings.rs   the Settings page
+        studio.rs     the Studio page: the preview that loops the range, the
+                      panel, and the export while it runs
         visual.rs     the visual half of a search, which merges in after the
                       text matches, and `a` with its escape steps
         sim.rs        simulated input for the dev window, behind the `sim`

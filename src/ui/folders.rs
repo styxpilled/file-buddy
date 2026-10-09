@@ -123,7 +123,7 @@ impl FileBuddy {
         let kept = match self.page() {
             Page::Folders => &mut self.folder_sort,
             Page::Browse => &mut self.browse_sort,
-            Page::Review | Page::Settings => return,
+            Page::Review | Page::Settings | Page::Studio => return,
         };
         if *kept == sort {
             return;

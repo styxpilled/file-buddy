@@ -12,6 +12,9 @@ pub struct Config {
     pub roots: Vec<PathBuf>,
     #[serde(default = "default_ignore")]
     pub ignore: Vec<String>,
+    /// Where the Studio writes. Unset, it does not export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_folder: Option<PathBuf>,
     #[serde(default)]
     pub weights: Weights,
     #[serde(default)]
@@ -75,6 +78,7 @@ impl Default for Config {
         Self {
             roots: vec![PathBuf::from("D:/clips")],
             ignore: default_ignore(),
+            export_folder: None,
             weights: Weights::default(),
             paused: Paused::default(),
             keys: BTreeMap::new(),
@@ -113,6 +117,7 @@ impl Config {
     pub fn edited(
         roots: Vec<PathBuf>,
         ignore: &str,
+        export_folder: Option<PathBuf>,
         weights: [&str; 5],
         paused: Paused,
         keys: BTreeMap<String, Vec<String>>,
@@ -143,6 +148,7 @@ impl Config {
                 .filter(|line| !line.is_empty())
                 .map(String::from)
                 .collect(),
+            export_folder,
             weights: Weights {
                 tags: parsed[0],
                 filename: parsed[1],
@@ -207,16 +213,25 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         assert_eq!(written.roots, read.roots);
         assert_eq!(written.weights.speech, read.weights.speech);
 
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("export_folder")
+        );
+
         let paused = Config {
             paused: Paused {
                 ocr: false,
                 clip: false,
                 whisper: true,
             },
+            export_folder: Some(PathBuf::from("D:/exports")),
             ..written
         };
         paused.write(&path).unwrap();
-        assert_eq!(Config::load_or_create(&path).unwrap().paused, paused.paused);
+        let read = Config::load_or_create(&path).unwrap();
+        assert_eq!(read.paused, paused.paused);
+        assert_eq!(read.export_folder, paused.export_folder);
     }
 
     #[test]
@@ -225,6 +240,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         let config = Config::edited(
             roots.clone(),
             "**/thumbs/**\n\n  **/.git/**  \n",
+            Some(PathBuf::from("D:/exports")),
             ["20", "10.5", " 3 ", "0", "0.5"],
             Paused::default(),
             BTreeMap::new(),
@@ -234,11 +250,19 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         assert_eq!(config.weights.filename, 10.5);
         assert_eq!(config.weights.ocr, 0.0);
         assert_eq!(config.weights.visual, 0.5);
+        assert_eq!(config.export_folder, Some(PathBuf::from("D:/exports")));
 
         let error = |roots, ignore, weights| {
-            Config::edited(roots, ignore, weights, Paused::default(), BTreeMap::new())
-                .unwrap_err()
-                .to_string()
+            Config::edited(
+                roots,
+                ignore,
+                None,
+                weights,
+                Paused::default(),
+                BTreeMap::new(),
+            )
+            .unwrap_err()
+            .to_string()
         };
         assert_eq!(
             error(vec![], "", ["1", "1", "1", "1", "1"]),

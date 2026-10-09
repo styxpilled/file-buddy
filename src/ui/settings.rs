@@ -1,5 +1,6 @@
 //! The Settings page. It edits the fields of `file-buddy.toml`: the folders to
-//! index, the ignore globs, the search weights, the paused stages and the keys.
+//! index, the ignore globs, the export folder, the search weights, the paused
+//! stages and the keys.
 //! A switch that pauses a stage is written at once. Nothing else is written
 //! until Save, and Save writes nothing that `Config::edited` refuses or that
 //! gives one key to two actions.
@@ -33,6 +34,7 @@ const KEY_NAME_WIDTH: f32 = 180.;
 pub struct Settings {
     roots: Vec<PathBuf>,
     ignore: Entity<TextareaState>,
+    export_folder: Option<PathBuf>,
     /// In column order, as `Config::edited` takes them.
     weights: [Entity<InputState>; 5],
     /// The `[keys]` table as edited: only the actions that differ.
@@ -62,6 +64,7 @@ impl Settings {
                     .auto_grow(4, 12)
                     .default_value(config.ignore.join("\n"))
             }),
+            export_folder: config.export_folder.clone(),
             weights: values.map(|value| {
                 cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
             }),
@@ -93,6 +96,7 @@ impl Settings {
         Config::edited(
             self.roots.clone(),
             &ignore,
+            self.export_folder.clone(),
             weights.each_ref().map(String::as_str),
             paused,
             self.keys.clone(),
@@ -183,6 +187,35 @@ impl FileBuddy {
             .ok();
         })
         .detach();
+    }
+
+    fn choose_export_folder(&mut self, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(folders))) = chosen.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if let Some(settings) = this.settings_mut() {
+                    settings.export_folder = folders.into_iter().next();
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn clear_export_folder(&mut self, cx: &mut Context<Self>) {
+        if let Some(settings) = self.settings_mut() {
+            settings.export_folder = None;
+            cx.notify();
+        }
     }
 
     /// Up or down on the page, outside the fields, goes into the keys.
@@ -302,6 +335,7 @@ pub fn page(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                     )
                     .child(Textarea::new(&settings.ignore)),
                 )
+                .child(export_folder(settings, cx))
                 .child(weights(settings, cx))
                 .child(stages(this.config.paused, cx))
                 .child(key_list(settings, cx))
@@ -355,6 +389,51 @@ fn folders(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .cursor_pointer()
                 .on_click(cx.listener(|this, _, _, cx| this.add_roots(cx))),
         ),
+    )
+    .into_any_element()
+}
+
+fn export_folder(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let (text, set) = match &settings.export_folder {
+        Some(folder) => (folder.display().to_string(), true),
+        None => (
+            "None. The Studio does not export without one.".to_string(),
+            false,
+        ),
+    };
+    section(
+        "Export folder",
+        "The Studio writes its exports here. Add it to the folders above to index them.",
+        cx,
+    )
+    .child(
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .truncate()
+                    .when(!set, |text| text.text_color(cx.theme().muted_foreground))
+                    .child(text),
+            )
+            .child(
+                Button::new("choose-export-folder")
+                    .small()
+                    .label("Choose folder")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_export_folder(cx))),
+            )
+            .when(set, |row| {
+                row.child(
+                    Button::new("clear-export-folder")
+                        .small()
+                        .label("Clear")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_export_folder(cx))),
+                )
+            }),
     )
     .into_any_element()
 }

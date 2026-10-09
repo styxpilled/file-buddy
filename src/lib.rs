@@ -14,6 +14,7 @@ pub mod ocr;
 pub mod paths;
 pub mod search;
 pub mod speech;
+pub mod studio;
 pub mod ui;
 pub mod worker;
 

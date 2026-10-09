@@ -15,6 +15,8 @@ enum Scope {
     Window,
     /// The rows of the Speech and Text tabs, while they have the cursor.
     Rows,
+    /// The Studio page.
+    Studio,
 }
 
 pub(super) struct Action {
@@ -63,8 +65,12 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("rescan", Window, Rescan, ["f5"]),
     action!("cycle_detail", Window, CycleDetail, ["i"]),
     action!("edit_rows", Window, EditRows, ["e"]),
+    action!("open_in_studio", Window, OpenInStudio, ["c"]),
     action!("delete_row", Rows, DeleteRow, ["delete"]),
     action!("add_row", Rows, AddRow, ["l"]),
+    action!("set_in", Studio, SetIn, ["["]),
+    action!("set_out", Studio, SetOut, ["]"]),
+    action!("export", Studio, ExportEdit, ["ctrl-enter"]),
 ];
 
 /// The keys that cannot change, with the action that holds each.
@@ -85,6 +91,7 @@ const FIXED: &[(&str, &str)] = &[
     ("ctrl-2", "show_folders"),
     ("ctrl-3", "show_review"),
     ("ctrl-4", "show_settings"),
+    ("ctrl-5", "show_studio"),
     ("alt-up", "previous_suggestion"),
     ("alt-down", "next_suggestion"),
     ("alt-left", "history_back"),
@@ -112,6 +119,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-2", ShowFolders, window),
         KeyBinding::new("ctrl-3", ShowReview, window),
         KeyBinding::new("ctrl-4", ShowSettings, window),
+        KeyBinding::new("ctrl-5", ShowStudio, window),
         // Plain arrows belong to the text in the tag input, so the suggestion
         // list takes the ones the input leaves alone.
         KeyBinding::new("alt-down", NextSuggestion, window),
@@ -179,6 +187,7 @@ fn context(scope: Scope, key: &str) -> String {
     let base = match scope {
         Scope::Window => "FileBuddy",
         Scope::Rows => "Rows",
+        Scope::Studio => "Studio",
     };
     if works_in_inputs(key) {
         base.to_string()
@@ -248,7 +257,7 @@ pub(super) fn resolve(changes: &BTreeMap<String, Vec<String>>) -> Keymap {
     // The defaults hold their keys first, so a change that takes a key from
     // another action is the one that loses it. The rows are a context inside
     // the window, and their keys win there, so a key can have one action in
-    // each.
+    // each. The Studio is the same.
     let mut order: Vec<usize> = (0..ACTIONS.len()).collect();
     order.sort_by_key(|at| changes.contains_key(ACTIONS[*at].name));
     let mut holder: HashMap<(Scope, String), usize> = HashMap::new();
@@ -355,6 +364,8 @@ mod tests {
         assert_eq!(context(Scope::Window, "space"), "FileBuddy && !Input");
         assert_eq!(context(Scope::Rows, "l"), "Rows && !Input");
         assert_eq!(context(Scope::Rows, "ctrl-n"), "Rows");
+        assert_eq!(context(Scope::Studio, "["), "Studio && !Input");
+        assert_eq!(context(Scope::Studio, "ctrl-enter"), "Studio");
     }
 
     #[test]

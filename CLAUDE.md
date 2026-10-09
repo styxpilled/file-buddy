@@ -22,7 +22,7 @@ Any changes you haven't made are probably deliberate. If your build fails becaus
 
 ## Running the app
 
-My release build is often open while you work. Ask me before you drive the window, unless I said yes a short time ago in this session. Drive and stop only the debug build. See `docs/agents/checking-the-window.md`. During the work, check with `scripts/sim.ps1` and a `--features sim` dev build. It needs no question. Use `drive.ps1` for the final check.
+My release build is often open while you work. Ask me before you drive the window, unless I said yes a short time ago in this session. Drive and stop only the debug build. See `docs/agents/checking-the-window.md`. During the work, check with `scripts/sim.ps1` and a `--features sim` dev build. It needs no question. If a 100% concrete test is needed, use `drive.ps1`.
 
 ## Issue tracker
 

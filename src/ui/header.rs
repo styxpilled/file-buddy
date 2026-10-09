@@ -14,7 +14,7 @@ use crate::ui::{FileBuddy, Mode, Page, counted, folders, review, toggle};
 
 /// One height for every page, so the body does not jump when the search box
 /// comes and goes.
-const HEIGHT: f32 = 58.;
+pub(super) const HEIGHT: f32 = 58.;
 /// Half of what the search box had when it filled the header.
 const SEARCH_WIDTH: f32 = 440.;
 const WINDOW_BUTTON_SIZE: f32 = 36.;
@@ -22,11 +22,12 @@ const WINDOW_BUTTON_SIZE: f32 = 36.;
 /// gap under it. The bar matches it, so both start their content on one line.
 const BAR_HEIGHT: f32 = 12. + 24. + 8.;
 
-const PAGES: [(Page, &str, &str); 4] = [
+const PAGES: [(Page, &str, &str); 5] = [
     (Page::Browse, "Browse", "Ctrl+1"),
     (Page::Folders, "Folders", "Ctrl+2"),
     (Page::Review, "Review", "Ctrl+3"),
     (Page::Settings, "Settings", "Ctrl+4"),
+    (Page::Studio, "Studio", "Ctrl+5"),
 ];
 
 /// The media kind filters. All are on by default, and the last one on cannot
@@ -54,7 +55,7 @@ pub fn header(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy>) ->
         .border_color(cx.theme().border)
         .child(div().occlude().child(pages(this, cx)))
         .map(|header| match &this.mode {
-            Mode::Review(_) | Mode::Settings(_) => header,
+            Mode::Review(_) | Mode::Settings(_) | Mode::Studio => header,
             Mode::Browse | Mode::Folders => header.child(
                 div()
                     .occlude()
@@ -189,7 +190,7 @@ pub fn bar(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             Mode::Folders => bar.child(folders::breadcrumb(this, cx)),
             Mode::Browse => bar.child("All files"),
             Mode::Review(state) => bar.child(review::tabs(state, cx)),
-            Mode::Settings(_) => bar,
+            Mode::Settings(_) | Mode::Studio => bar,
         })
         .child(div().flex_1())
         .when(matches!(this.page(), Page::Browse | Page::Folders), |bar| {
@@ -214,7 +215,7 @@ fn state(this: &FileBuddy) -> SharedString {
             format!("naming {} / {}", this.selected + 1, this.results.len()).into()
         }
         Mode::Review(_) => counted(this.results.len()).into(),
-        Mode::Settings(_) => SharedString::default(),
+        Mode::Settings(_) | Mode::Studio => SharedString::default(),
         Mode::Browse | Mode::Folders => this.status.clone(),
     }
 }
