@@ -92,7 +92,8 @@ impl Default for Player {
             preload_task: None,
             step: 1,
             hovered: None,
-            muted: false,
+            // Simulated checks run while the user works, so they are silent.
+            muted: cfg!(feature = "sim"),
             volume: 0.5,
             autoplay: false,
             paused: true,

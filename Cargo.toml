@@ -9,6 +9,16 @@ edition = "2024"
 # Heap profiling of the window with dhat-rs. It writes `dhat-heap.json` in the
 # working directory when the application quits.
 dhat-heap = ["dep:dhat"]
+# Simulated input for the dev window: a named pipe takes drive.ps1 steps and
+# `render_to_image` takes the pictures. Never in a release build.
+sim = [
+    "gpui/test-support",
+    "dep:gpui_platform",
+    "gpui_platform/test-support",
+    "dep:raw-window-handle",
+    "windows/Win32_Graphics_Gdi",
+    "windows/Win32_System_Pipes",
+]
 
 [dependencies]
 anyhow = "=1.0.104"
@@ -21,6 +31,9 @@ futures = "=0.3.34"
 globset = "=0.4.20"
 gpui = { package = "gpui-pre", version = "=0.3.1" }
 gpui-kit = "=0.6.1"
+# Only for `sim`: its test-support turns on `render_to_image` in the Windows
+# renderer. The version is the one gpui-kit pins.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.1", optional = true }
 gpui-video = { path = "gpui-video" }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
 image-webp = "=0.2.4"
@@ -28,6 +41,7 @@ log = "=0.4.34"
 notify = "=8.2.0"
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "directml", "api-24"] }
 pollster = "=0.4.0"
+raw-window-handle = { version = "=0.6.2", optional = true }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["bundled"] }
 rusqlite_migration = "=2.6.0"
 serde = { version = "=1.0.229", features = ["derive"] }

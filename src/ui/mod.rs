@@ -17,6 +17,8 @@ mod review;
 mod rows;
 mod seek_bar;
 mod settings;
+#[cfg(feature = "sim")]
+pub mod sim;
 mod table;
 mod tagger;
 mod thumbnails;
@@ -279,6 +281,15 @@ impl FileBuddy {
 
         let thumbnails = Thumbnails::new(cx);
         cx.observe(&thumbnails, |_, _, cx| cx.notify()).detach();
+
+        // A press held while the window loses focus gets no release.
+        cx.observe_window_activation(window, |this: &mut Self, window, cx| {
+            if this.player.pressed() && !window.is_window_active() {
+                this.player.cancel_press();
+                cx.notify();
+            }
+        })
+        .detach();
 
         let mut this = Self {
             db,
@@ -782,9 +793,6 @@ impl Render for FileBuddy {
         let width = self.grid_width(window, cx);
         self.columns = self.column_count(window, cx);
         self.step_autoscroll(window, cx);
-        if self.player.pressed() && !window.is_window_active() {
-            self.player.cancel_press();
-        }
 
         v_flex()
             .key_context("FileBuddy")

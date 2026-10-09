@@ -122,6 +122,8 @@ Two things follow from that:
         settings.rs   the Settings page
         visual.rs     the visual half of a search, which merges in after the
                       text matches, and `a` with its escape steps
+        sim.rs        simulated input for the dev window, behind the `sim`
+                      feature: a named pipe of `drive.ps1` steps
 
 `config` and `paths` stay at the root because every directory uses them and they
 belong to none.

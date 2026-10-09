@@ -1,6 +1,6 @@
 # 53 - Drive the dev window with simulated input
 
-Status: ready-for-agent
+Status: done
 
 Depends on nothing. Read `docs/agents/checking-the-window.md` first.
 
@@ -33,6 +33,19 @@ Answer these before anything else is built, and write the answers here:
 
 If 2 or 3 fails, record why and stop.
 
+### Answers
+
+1. Yes. `gpui-pre/test-support` alone is not sufficient: the Windows
+   `render_to_image` is behind the `test-support` feature of
+   `gpui-pre-windows`. `gpui-pre-platform/test-support` turns on both, so `sim`
+   has a direct optional dependency on `gpui-pre-platform` too.
+2. Yes. The window opens with `SW_SHOWNOACTIVATE`, goes to `HWND_BOTTOM`, and
+   is never activated. Typed text, clicks, scrolls and drags all show in the
+   next picture. GPUI draws an inactive window at 30 frames a second. A
+   minimized window was not tested.
+3. Yes. Two pictures 1.5 seconds apart during playback show different frames
+   in the side pane.
+
 ## Work
 
 - A Cargo feature, `sim`, that turns on `gpui-pre/test-support` through a
@@ -60,5 +73,16 @@ If 2 or 3 fails, record why and stop.
 Native Windows UI: the shell's delete dialogs, a drop from Explorer, the title
 bar buttons, and a paste into another application. Anything that depends on
 the window being the active window. Write each one found here.
+
+Found:
+
+- `space` did not play, pause or hold for 2x. `FileBuddy::render` cancelled a
+  press in every frame while the window was not active. The press is there
+  for a hold that is still down when the user leaves the window, which gets no
+  release. It is now cancelled when the window becomes inactive, which keeps
+  that case and lets sim press keys.
+- `hover` cannot read the cursor. GPUI keeps the cursor it picks to itself, and
+  sets it only while the real pointer is over the window. The reply says
+  `unknown`. The pointer still moves, so a picture shows the hover state.
 
 ## Comments

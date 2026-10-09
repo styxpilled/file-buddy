@@ -1,6 +1,60 @@
 # Checking the window
 
-## Rules
+## Two scripts
+
+- **`scripts/sim.ps1` for checks during the work.** It needs no question to the
+  user. A dev build with the `sim` feature takes the steps through a named pipe
+  and sends them through GPUI's own dispatch. The window stays behind the
+  user's windows, and no real input moves.
+- **`scripts/drive.ps1` for the final check of a feature**, and for anything
+  sim cannot do. It uses real input, so ask first.
+
+Both take the same steps at the same coordinates, so one step list works in
+both.
+
+    cargo run --bin file-buddy --features sim &
+    # ...
+    & ./scripts/sim.ps1 -OutDir <scratch> -Steps @('keys:sopr','shot:narrowed','keys:{ESC}','shot:cleared')
+
+### Using sim
+
+1. Stop the dev build first if it runs: `& ./scripts/stop-dev.ps1`. A running
+   debug exe makes the build fail with "Access is denied".
+2. Build and start it: `cargo build --bin file-buddy --features sim`, then
+   `Start-Process target\debug\file-buddy.exe`. Wait about 5 seconds for the
+   pipe. The window opens behind the others and does not take focus.
+3. Run the steps with `sim.ps1`. It prints the picture path of each `shot`, and
+   it stops with the error if a step fails. Read the pictures, then delete them.
+4. Stop it with `stop-dev.ps1` when the check is done.
+
+Things to know:
+
+- Each step waits 250 ms for a frame to be drawn, and `shot` waits 250 ms more
+  first. `kdown` waits only 30 ms, so a `kdown` and `kup` pair is a tap. Use
+  `wait:` for anything slower, such as a clip that opens after the selection
+  stops moving (about 1.5 s).
+- `keys:` sends each key down and up, as SendKeys does. `keys: ` types a space.
+  A modifier held with `kdown:16`, `17` or `18` applies to the keys and
+  clicks that follow it, until its `kup`.
+- The audio starts muted in a `sim` build, so a check never plays sound.
+- Take a fresh `shot` before you click. The coordinates are those of the last
+  picture.
+- To see why a key did nothing, start the exe with `RUST_LOG=file_buddy=warn`
+  and `-RedirectStandardError <file>`, and add a temporary `log::warn!`.
+- To compare one region over several pictures, crop it with
+  `System.Drawing` into one strip and read that. This uses fewer tokens than
+  full pictures.
+
+### What sim cannot do
+
+- Native Windows UI: the shell's delete dialogs, a drop from Explorer, the
+  title bar buttons, and a paste into another application.
+- Anything that depends on the active window. The window never becomes active.
+- `hover` cannot read the cursor. It moves the pointer, so a picture shows the
+  hover state, but the reply says `unknown`.
+- A minimized window. Do not minimize the dev window.
+
+## Rules for drive.ps1
 
 - **Ask before you take the screen.** `drive.ps1` moves the mouse, types and
   covers the desktop. Ask the user first. One answer covers the checks that
@@ -15,7 +69,7 @@
 - **Stop only the dev build.** `scripts/stop-dev.ps1` stops the processes whose
   executable is in `target\debug`, and nothing else.
 
-## The script
+## drive.ps1
 
 `scripts/drive.ps1` types into the running application and saves a picture of
 its window. Use it when a change only shows itself in the real window. Tests

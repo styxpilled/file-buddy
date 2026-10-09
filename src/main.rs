@@ -81,7 +81,8 @@ fn main() -> Result<()> {
             }
 
             let options = WindowOptions {
-                focus: true,
+                // Simulated input works behind the user's windows.
+                focus: !cfg!(feature = "sim"),
                 window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                     None,
                     size(px(1335.), px(800.)),
@@ -101,13 +102,21 @@ fn main() -> Result<()> {
                 }),
                 ..Default::default()
             };
-            cx.open_window(options, |window, cx| {
-                let db = Db::open(&db_path).expect("failed to open the database");
-                let view = cx.new(|cx| FileBuddy::new(db, &config, &db_path, &cache, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-            .expect("failed to open the window");
-            cx.activate(true);
+            let window = cx
+                .open_window(options, |window, cx| {
+                    let db = Db::open(&db_path).expect("failed to open the database");
+                    let view =
+                        cx.new(|cx| FileBuddy::new(db, &config, &db_path, &cache, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .expect("failed to open the window");
+            #[cfg(feature = "sim")]
+            ui::sim::serve(window.into(), cx);
+            #[cfg(not(feature = "sim"))]
+            {
+                let _ = window;
+                cx.activate(true);
+            }
         });
     #[cfg(feature = "dhat-heap")]
     PROFILER.lock().unwrap().take();
