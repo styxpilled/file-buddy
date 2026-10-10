@@ -516,7 +516,7 @@ pub(super) fn clip_input(
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _, _, cx| {
-                if this.clip_video(clip).is_some() {
+                if this.clip_video(clip).is_some() || clip == Clip::Studio && this.framed() {
                     this.press_play(clip, PressFrom::Mouse, cx);
                 }
             }),
@@ -547,7 +547,8 @@ pub(super) fn clip_input(
 pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyElement {
     let player = &this.player;
     let transport = this.transport_of(clip);
-    let playable = this.clip_video(clip).is_some();
+    let sound = this.clip_video(clip).is_some();
+    let playable = sound || clip == Clip::Studio && this.framed();
     let still = clip == Clip::Studio && this.studio.edit.as_ref().is_some_and(|edit| edit.still);
     let row = h_flex()
         .w_full()
@@ -588,8 +589,8 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
             .small()
             // As wide as Unmute, so the row does not move when it changes.
             .w(px(MUTE_WIDTH))
-            .disabled(!playable)
-            .when(playable, |button| button.cursor_pointer())
+            .disabled(!sound)
+            .when(sound, |button| button.cursor_pointer())
             .label(if player.muted { "Unmute" } else { "Mute" })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_muted(cx))),
     )

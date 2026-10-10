@@ -14,12 +14,10 @@ use crate::ffmpeg::probe::Probe;
 use crate::ffmpeg::{self, Tool};
 use crate::media::Kind;
 use crate::paths;
+use crate::studio;
 
 /// The `VP8X` flag that marks an animation.
 const ANIMATION_FLAG: u8 = 0x02;
-/// Browsers play a delay this short or shorter at `SHORT_DELAY_PLAYS_AT`.
-const SHORT_DELAY_MS: u32 = 10;
-const SHORT_DELAY_PLAYS_AT: u32 = 100;
 /// The finest step the proxy keeps a delay to.
 const MIN_TICK_MS: u32 = 10;
 const QUALITY: &str = "12";
@@ -104,11 +102,7 @@ fn read_delays(path: &Path) -> Result<Vec<u32>> {
     let mut delays = Vec::with_capacity(decoder.num_frames() as usize);
     for _ in 0..decoder.num_frames() {
         let delay = decoder.read_frame(&mut frame).context("decode a frame")?;
-        delays.push(if delay <= SHORT_DELAY_MS {
-            SHORT_DELAY_PLAYS_AT
-        } else {
-            delay
-        });
+        delays.push(studio::frames::played(delay));
     }
     if delays.is_empty() {
         bail!("the animation has no frames");

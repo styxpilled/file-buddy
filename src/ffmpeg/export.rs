@@ -1,14 +1,22 @@
 //! The Studio export: the FFmpeg arguments from an edit, and the run that
 //! writes the file. The filters go in the order trim, crop, scale, text, speed.
+//! In frame mode FFmpeg reads the frames as images through the concat
+//! demuxer, each with its own delay, and the speed is in the delays.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, bail};
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ImageEncoder, RgbaImage};
 
 use crate::ffmpeg::{self, Tool};
+use crate::studio::frames::MIN_DELAY_MS;
 use crate::studio::{self, Controls, Crop, Edit, Format, MaxWidth, Quality, Text};
 
 /// H.264 needs even dimensions. This takes at most one pixel off an edge.
@@ -67,11 +75,13 @@ fn jpg_q(quality: Quality) -> u8 {
 
 /// Everything after the shared options of `ffmpeg::command`. The trim is an
 /// input option, so FFmpeg does not decode what comes before the in point. A
-/// still has no trim.
-pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
+/// still has no trim. `input` is the file, or in frame mode the concat list.
+pub fn args(edit: &Edit, controls: &Controls, input: &Path, output: &Path) -> Vec<OsString> {
     let range = edit.range;
     let mut args = Args::default();
-    if !edit.still {
+    if edit.framed() {
+        args.push(&["-f", "concat", "-safe", "0"]);
+    } else if !edit.still {
         args.push(&[
             "-ss",
             &seconds(range.start_ms),
@@ -80,33 +90,57 @@ pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
         ]);
     }
     args.push(&["-i"]);
-    args.0.push(edit.input.clone().into_os_string());
+    args.0.push(input.as_os_str().to_owned());
     args.push(&["-map", "0:v:0"]);
-    match controls.format {
-        Format::Mp4 | Format::Webm => args.push(&["-map", "0:a:0?"]),
-        Format::Gif | Format::Webp | Format::Png | Format::Jpg => args.push(&["-an"]),
+    let sound = !edit.framed() && matches!(controls.format, Format::Mp4 | Format::Webm);
+    if sound {
+        args.push(&["-map", "0:a:0?"]);
+    } else {
+        args.push(&["-an"]);
     }
     args.push(&["-sn", "-dn", "-vf", &video_filter(edit, controls)]);
-    let sound = matches!(controls.format, Format::Mp4 | Format::Webm);
     if sound && edit.speed != 1. {
         args.push(&["-af", &atempo(edit.speed)]);
+    }
+    // Frame mode keeps each frame at its own time. A B-frame reorders the
+    // frames, and then MP4 and WebM take the times of the wrong frames.
+    if edit.framed() {
+        args.push(&["-fps_mode", "passthrough"]);
     }
     match controls.format {
         Format::Mp4 => {
             let cq = h264_cq(controls.mp4_quality).to_string();
             args.push(&["-c:v", "h264_nvenc", "-preset", "p5", "-tune", "hq"]);
             args.push(&["-rc", "vbr", "-cq", &cq, "-b:v", "0", "-pix_fmt", "yuv420p"]);
-            args.push(&["-c:a", "aac", "-b:a", AAC_BITRATE]);
+            if edit.framed() {
+                args.push(&["-bf", "0"]);
+            }
+            if sound {
+                args.push(&["-c:a", "aac", "-b:a", AAC_BITRATE]);
+            }
             args.push(&["-movflags", "+faststart", "-f", "mp4"]);
         }
         Format::Webm => {
             let cq = av1_cq(controls.webm_quality).to_string();
             args.push(&["-c:v", "av1_nvenc", "-preset", "p5", "-tune", "hq"]);
             args.push(&["-rc", "vbr", "-cq", &cq, "-b:v", "0", "-pix_fmt", "yuv420p"]);
-            args.push(&["-c:a", "libopus", "-b:a", OPUS_BITRATE]);
+            if edit.framed() {
+                args.push(&["-bf", "0"]);
+            }
+            if sound {
+                args.push(&["-c:a", "libopus", "-b:a", OPUS_BITRATE]);
+            }
             args.push(&["-f", "webm"]);
         }
-        Format::Gif => args.push(&["-c:v", "gif", "-loop", "0", "-f", "gif"]),
+        Format::Gif => {
+            args.push(&["-c:v", "gif", "-loop", "0"]);
+            // The muxer has no delay of its own for the last frame. It takes
+            // hundredths of a second.
+            if let Some(last) = output_delays(edit, Format::Gif).last() {
+                args.push(&["-final_delay", &((last + 5) / 10).to_string()]);
+            }
+            args.push(&["-f", "gif"]);
+        }
         Format::Webp => {
             let quality = webp_quality(controls.webp_quality).to_string();
             args.push(&[
@@ -135,25 +169,195 @@ pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
 }
 
 /// A GIF makes its palette from its own frames, in the same FFmpeg call. The
-/// frame rate applies after the speed change.
+/// frame rate applies after the speed change. Frame mode keeps its delays, so
+/// it has neither.
 fn video_filter(edit: &Edit, controls: &Controls) -> String {
+    let delays = edit.framed().then(|| output_delays(edit, controls.format));
     let mut filter = frame_filter(edit);
     for text in &edit.texts {
-        if let Some(drawtext) = text_filter(edit, text) {
+        let window = match &delays {
+            _ if edit.still => None,
+            Some(delays) => match frame_window(edit, delays, text) {
+                Some(window) => Some(window),
+                None => continue,
+            },
+            None => match edit.text_window(text) {
+                Some(window) => Some(window),
+                None => continue,
+            },
+        };
+        if let Some(drawtext) = text_filter(edit, text, window) {
             filter.push(',');
             filter.push_str(&drawtext);
         }
     }
-    if edit.speed != 1. {
-        filter.push_str(&format!(",setpts=PTS/{}", edit.speed));
-    }
-    if let Some(fps) = controls.fps() {
-        filter.push_str(&format!(",fps={fps}"));
+    if !edit.framed() {
+        if edit.speed != 1. {
+            filter.push_str(&format!(",setpts=PTS/{}", edit.speed));
+        }
+        if let Some(fps) = controls.fps() {
+            filter.push_str(&format!(",fps={fps}"));
+        }
     }
     if controls.format == Format::Gif {
         filter.push_str(",split[a][b];[a]palettegen[p];[b][p]paletteuse");
     }
     filter
+}
+
+/// The delay of each frame in the export, after the speed. A GIF or a WebP
+/// delay stays at `MIN_DELAY_MS` or more, because a browser plays a shorter one
+/// slower than asked.
+pub fn output_delays(edit: &Edit, format: Format) -> Vec<u32> {
+    let floor = if matches!(format, Format::Gif | Format::Webp) {
+        MIN_DELAY_MS
+    } else {
+        1
+    };
+    edit.frames
+        .iter()
+        .map(|frame| ((f64::from(frame.delay_ms) / edit.speed).round() as u32).max(floor))
+        .collect()
+}
+
+/// When a text shows in a frame mode export, in seconds. Its times are in the
+/// strip, before the speed.
+fn frame_window(edit: &Edit, delays: &[u32], text: &Text) -> Option<(f64, f64)> {
+    let end = text.end_ms.min(edit.duration_ms);
+    (end > text.start_ms).then(|| {
+        (
+            output_seconds(edit, delays, text.start_ms),
+            output_seconds(edit, delays, end),
+        )
+    })
+}
+
+/// A time of the strip in the export. Inside a frame it moves at the rate of
+/// that frame's change of delay.
+fn output_seconds(edit: &Edit, delays: &[u32], at_ms: u64) -> f64 {
+    let (mut strip, mut out) = (0u64, 0u64);
+    for (frame, &delay) in edit.frames.iter().zip(delays) {
+        let length = u64::from(frame.delay_ms);
+        if at_ms < strip + length {
+            let into = (at_ms - strip) as f64 * f64::from(delay) / length as f64;
+            return (out as f64 + into) / 1000.;
+        }
+        strip += length;
+        out += u64::from(delay);
+    }
+    out as f64 / 1000.
+}
+
+/// The concat list. The image demuxer times a frame by its frame rate, so a
+/// rate of 1000 keeps every delay to the millisecond. The last delay counts
+/// only up to the next frame, so MP4 and WebM end on the last image once more.
+/// GIF and WebP set the last delay in their own way.
+fn frame_list(images: &[usize], delays: &[u32], end_again: bool) -> String {
+    let mut list = String::from("ffconcat version 1.0\n");
+    let entry = |list: &mut String, image: usize| {
+        list.push_str(&format!("file '{image}.png'\noption framerate 1000\n"));
+    };
+    for (&image, &delay) in images.iter().zip(delays) {
+        entry(&mut list, image);
+        list.push_str(&format!("duration {}\n", seconds(u64::from(delay))));
+    }
+    if end_again && let Some(&last) = images.last() {
+        entry(&mut list, last);
+    }
+    list
+}
+
+/// libwebp gives the last frame the mean delay of the others. This sets it so
+/// the animation ends at `total_ms`. Each `ANMF` chunk holds its delay in the
+/// three bytes after the place and the size of its frame.
+fn end_webp_at(bytes: &mut [u8], total_ms: u64) -> Result<()> {
+    let mut fields = Vec::new();
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into()?) as usize;
+        if &bytes[at..at + 4] == b"ANMF" {
+            let field = at + 8 + 12;
+            if field + 3 > bytes.len() {
+                bail!("a WebP frame is cut short");
+            }
+            fields.push(field);
+        }
+        at += 8 + size + size % 2;
+    }
+    let Some((&last, before)) = fields.split_last() else {
+        bail!("the WebP has no frames");
+    };
+    let delay = |field: usize| {
+        u64::from(bytes[field])
+            | u64::from(bytes[field + 1]) << 8
+            | u64::from(bytes[field + 2]) << 16
+    };
+    let shown: u64 = before.iter().map(|&field| delay(field)).sum();
+    let ms = total_ms.saturating_sub(shown).clamp(1, 0xff_ffff) as u32;
+    bytes[last..last + 3].copy_from_slice(&ms.to_le_bytes()[..3]);
+    Ok(())
+}
+
+/// The frames of an edit as PNG files and the concat list, in a directory of
+/// their own that goes with them. A copy of a frame shares its file.
+struct FrameFiles {
+    dir: PathBuf,
+}
+
+impl Drop for FrameFiles {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.dir).ok();
+    }
+}
+
+impl FrameFiles {
+    fn new() -> Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let call = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("file-buddy-frames-{}-{call}", std::process::id()));
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+        Ok(Self { dir })
+    }
+
+    /// Returns the path of the list.
+    fn write(&self, edit: &Edit, format: Format) -> Result<PathBuf> {
+        let mut files: HashMap<*const RgbaImage, usize> = HashMap::new();
+        let mut images = Vec::with_capacity(edit.frames.len());
+        for frame in &edit.frames {
+            let next = files.len();
+            let image = *files.entry(Arc::as_ptr(&frame.image)).or_insert(next);
+            if image == next {
+                write_png(&frame.image, &self.dir.join(format!("{image}.png")))?;
+            }
+            images.push(image);
+        }
+        let end_again = matches!(format, Format::Mp4 | Format::Webm);
+        let list = self.dir.join("frames.txt");
+        std::fs::write(
+            &list,
+            frame_list(&images, &output_delays(edit, format), end_again),
+        )
+        .context("write the frame list")?;
+        Ok(list)
+    }
+}
+
+/// Fast compression: the file lives only until FFmpeg has read it.
+fn write_png(image: &RgbaImage, path: &Path) -> Result<()> {
+    let file = std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    PngEncoder::new_with_quality(
+        std::io::BufWriter::new(file),
+        CompressionType::Fast,
+        FilterType::Sub,
+    )
+    .write_image(
+        image.as_raw(),
+        image.width(),
+        image.height(),
+        image::ExtendedColorType::Rgba8,
+    )
+    .with_context(|| format!("write {}", path.display()))
 }
 
 /// The crop, then the scale. A frame with no crop only loses an odd pixel.
@@ -175,22 +379,21 @@ fn frame_filter(edit: &Edit) -> String {
     filter
 }
 
-/// One text, centered on its place and shown in its time. The times are
-/// before the speed change, because the filter comes before it. `y_align=font`
-/// puts the ascent at `y` on every line, as GPUI does a little lower.
-fn text_filter(edit: &Edit, text: &Text) -> Option<String> {
+/// One text, centered on its place and shown from the start of `window` to
+/// just before its end, in seconds of the filter, or always with none. On a
+/// video the times are before the speed change, because the filter comes
+/// before it. `y_align=font` puts the ascent at `y` on every line, as GPUI does
+/// a little lower.
+fn text_filter(edit: &Edit, text: &Text, window: Option<(f64, f64)>) -> Option<String> {
     if edit.size.0 == 0 || edit.size.1 == 0 || text.trimmed().is_empty() {
         return None;
     }
-    let enable = if edit.still {
-        String::new()
-    } else {
-        let (start, end) = edit.text_window(text)?;
+    let enable = window.map_or_else(String::new, |(start, end)| {
         format!(
             ":enable={}",
-            escape(&format!("between(t,{start:.3},{end:.3})"))
+            escape(&format!("gte(t,{start:.3})*lt(t,{end:.3})"))
         )
-    };
+    });
     let output = edit.output_size();
     let font_px = text.font_px(output.1);
     let (x, y) = text.center_px(output);
@@ -302,13 +505,27 @@ fn screenshot_filter(edit: &Edit, at_ms: u64) -> String {
         edit.texts
             .iter()
             .filter(|text| edit.shows(text, at_ms))
-            .filter_map(|text| text_filter(&frame, text)),
+            .filter_map(|text| text_filter(&frame, text, None)),
     );
     filters.join(",")
 }
 
-/// The PNG bytes of one frame.
+/// The PNG bytes of one frame. In frame mode the frame of the strip at
+/// `at_ms` goes to FFmpeg as a still.
 pub fn screenshot(edit: &Edit, at_ms: u64) -> Result<Vec<u8>> {
+    if edit.framed() {
+        let files = FrameFiles::new()?;
+        let input = files.dir.join("frame.png");
+        write_png(&edit.frames[edit.frame_at(at_ms)].image, &input)?;
+        let mut still = Edit {
+            input,
+            still: true,
+            frames: Vec::new(),
+            ..edit.clone()
+        };
+        still.texts.retain(|text| edit.shows(text, at_ms));
+        return screenshot(&still, 0);
+    }
     let mut command = ffmpeg::command(Tool::Ffmpeg);
     command.args(screenshot_args(edit, at_ms));
     let png = ffmpeg::output(command).context("extract the frame")?;
@@ -328,10 +545,23 @@ pub fn run(
     mut progress: impl FnMut(f32),
 ) -> Result<()> {
     let partial = partial_path(destination);
+    let files = edit.framed().then(FrameFiles::new).transpose()?;
+    let input = match &files {
+        Some(files) => files.write(edit, controls.format)?,
+        None => edit.input.clone(),
+    };
+    let length_ms = if edit.framed() {
+        output_delays(edit, controls.format)
+            .iter()
+            .map(|&delay| u64::from(delay))
+            .sum()
+    } else {
+        edit.output_ms()
+    };
     let mut command = ffmpeg::command(Tool::Ffmpeg);
     command
         .args(["-progress", "pipe:1", "-nostats"])
-        .args(args(edit, controls, &partial))
+        .args(args(edit, controls, &input, &partial))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command.spawn().context("run FFmpeg")?;
@@ -344,7 +574,7 @@ pub fn run(
         text
     });
 
-    let length_us = (edit.output_ms() * 1000).max(1) as f32;
+    let length_us = (length_ms * 1000).max(1) as f32;
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             if let Some(us) = line
@@ -365,6 +595,11 @@ pub fn run(
             bail!("FFmpeg exited with {status}");
         }
         bail!("{errors}");
+    }
+    if edit.framed() && controls.format == Format::Webp {
+        let mut bytes = std::fs::read(&partial).context("read the WebP")?;
+        end_webp_at(&mut bytes, length_ms)?;
+        std::fs::write(&partial, bytes).context("write the WebP")?;
     }
     std::fs::rename(&partial, destination)
         .with_context(|| format!("move the export to {}", destination.display()))
@@ -401,7 +636,7 @@ mod tests {
 
     fn strings_of(edit: &Edit, controls: Controls) -> Vec<String> {
         let output = format!("D:/out/x.{}.part", controls.format.extension());
-        args(edit, &controls, Path::new(&output))
+        args(edit, &controls, &edit.input, Path::new(&output))
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
             .collect()
@@ -704,7 +939,7 @@ mod tests {
                 r"crop=1280:720:0:0,scale=640:360:flags=lanczos,",
                 r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
                 r":text=it\\\'s 5\\:00:fontsize=29:fontcolor=white:text_align=C:y_align=font",
-                r":x=320.00-text_w/2:y=180.48-text_h/2:enable=between(t\,0.750\,3.750)",
+                r":x=320.00-text_w/2:y=180.48-text_h/2:enable=gte(t\,0.750)*lt(t\,3.750)",
                 r":box=1:boxcolor=black:boxborderw=7,setpts=PTS/2",
             )
         );
@@ -871,6 +1106,157 @@ mod tests {
         assert!(!args.contains(&"-vf".to_string()));
         let still = Edit::still("b.png".into(), (640, 480));
         assert_eq!(&strings(&still)[..2], ["-i", "b.png"]);
+    }
+
+    /// Frames of 1 x 1 pixels, each its own image.
+    fn framed(delays: &[u32]) -> Edit {
+        let frames = delays
+            .iter()
+            .map(|&delay_ms| studio::Frame {
+                image: Arc::new(RgbaImage::new(1, 1)),
+                delay_ms,
+            })
+            .collect();
+        let mut edit = Edit::with_frames("D:/clips/cat.gif".into(), frames);
+        edit.size = (640, 480);
+        edit.crop = Crop::full(edit.size);
+        edit
+    }
+
+    #[test]
+    fn frame_mode_reads_a_list_and_keeps_each_frame_with_no_rate() {
+        let edit = framed(&[30, 250, 70, 500]);
+        let with = |format| {
+            let controls = Controls {
+                format,
+                ..Controls::default()
+            };
+            args(
+                &edit,
+                &controls,
+                Path::new("T:/f/frames.txt"),
+                Path::new("x"),
+            )
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect::<Vec<_>>()
+        };
+        let gif = with(Format::Gif);
+        assert_eq!(
+            gif[..13],
+            [
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                "T:/f/frames.txt",
+                "-map",
+                "0:v:0",
+                "-an",
+                "-sn",
+                "-dn",
+                "-vf",
+                &format!("{EVEN},split[a][b];[a]palettegen[p];[b][p]paletteuse"),
+            ]
+        );
+        assert_eq!(after(&gif, "-fps_mode"), "passthrough");
+        assert_eq!(after(&gif, "-final_delay"), "50");
+        let mp4 = with(Format::Mp4);
+        assert_eq!(after(&mp4, "-bf"), "0");
+        assert!(mp4.contains(&"-an".to_string()));
+        assert!(!mp4.contains(&"-c:a".to_string()));
+        assert_eq!(after(&with(Format::Webp), "-vf"), EVEN);
+    }
+
+    #[test]
+    fn frame_durations_follow_the_speed_with_a_floor_for_browsers() {
+        let mut edit = framed(&[30, 250, 70, 500]);
+        assert_eq!(output_delays(&edit, Format::Gif), [30, 250, 70, 500]);
+        edit.speed = 2.;
+        assert_eq!(output_delays(&edit, Format::Gif), [20, 125, 35, 250]);
+        assert_eq!(output_delays(&edit, Format::Webp), [20, 125, 35, 250]);
+        assert_eq!(output_delays(&edit, Format::Mp4), [15, 125, 35, 250]);
+        assert_eq!(
+            frame_list(&[0, 1, 0, 2], &[15, 125, 35, 250], false),
+            "ffconcat version 1.0\n\
+             file '0.png'\noption framerate 1000\nduration 0.015\n\
+             file '1.png'\noption framerate 1000\nduration 0.125\n\
+             file '0.png'\noption framerate 1000\nduration 0.035\n\
+             file '2.png'\noption framerate 1000\nduration 0.250\n"
+        );
+        assert!(frame_list(&[0, 1], &[15, 125], true).ends_with(
+            "file '1.png'\noption framerate 1000\nduration 0.125\n\
+             file '1.png'\noption framerate 1000\n"
+        ));
+    }
+
+    #[test]
+    fn a_frame_mode_text_shows_in_output_time() {
+        let mut edit = framed(&[100, 100, 200]);
+        edit.speed = 2.;
+        let at = edit.add_text();
+        edit.texts[at].words = "hi".into();
+        edit.texts[at].start_ms = 150;
+        edit.texts[at].end_ms = 9_000;
+        let vf = after(
+            &strings_of(
+                &edit,
+                Controls {
+                    format: Format::Webp,
+                    ..Controls::default()
+                },
+            ),
+            "-vf",
+        );
+        assert!(vf.ends_with(r":enable=gte(t\,0.075)*lt(t\,0.200)"), "{vf}");
+        // A floor stretches a frame, and the text moves with it.
+        edit.speed = 8.;
+        let delays = output_delays(&edit, Format::Gif);
+        assert_eq!(delays, [20, 20, 25]);
+        assert_eq!(output_seconds(&edit, &delays, 150), 0.03);
+        assert_eq!(output_seconds(&edit, &delays, 300), 0.0525);
+    }
+
+    /// A RIFF file of `delays.len()` frames, each `ANMF` chunk with a frame
+    /// of `pad` bytes, which may be odd.
+    fn webp_bytes(delays: &[u32], pad: usize) -> Vec<u8> {
+        let mut bytes = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        bytes.extend_from_slice(&10u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 10]);
+        for delay in delays {
+            let size = 16 + pad;
+            bytes.extend_from_slice(b"ANMF");
+            bytes.extend_from_slice(&(size as u32).to_le_bytes());
+            bytes.extend_from_slice(&[0; 12]);
+            bytes.extend_from_slice(&delay.to_le_bytes()[..3]);
+            bytes.push(0);
+            bytes.extend(std::iter::repeat_n(7, pad + size % 2));
+        }
+        bytes
+    }
+
+    fn webp_delays(bytes: &[u8], pad: usize) -> Vec<u32> {
+        let chunk = 8 + 16 + pad + (16 + pad) % 2;
+        (0..)
+            .map(|n| 30 + n * chunk + 8 + 12)
+            .take_while(|at| at + 3 <= bytes.len())
+            .map(|at| u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], 0]))
+            .collect()
+    }
+
+    #[test]
+    fn the_last_webp_frame_ends_the_animation_on_time() {
+        for pad in [4, 5] {
+            let mut bytes = webp_bytes(&[30, 250, 70, 116], pad);
+            end_webp_at(&mut bytes, 850).unwrap();
+            assert_eq!(webp_delays(&bytes, pad), [30, 250, 70, 500]);
+        }
+        // libwebp joins a frame to the one before when the two are the same.
+        let mut bytes = webp_bytes(&[30, 320], 4);
+        end_webp_at(&mut bytes, 850).unwrap();
+        assert_eq!(webp_delays(&bytes, 4), [30, 820]);
+        assert!(end_webp_at(&mut webp_bytes(&[], 4), 850).is_err());
     }
 
     #[test]

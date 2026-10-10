@@ -96,6 +96,12 @@ impl FileBuddy {
         if let Some(index) = index {
             self.studio.tab = Tab::Text;
             self.studio.text_scroll.scroll_to_item(index);
+            // A frame and a text are never selected together, so `delete`
+            // has one target.
+            if !self.studio.strip.selected.is_empty() {
+                self.studio.strip.selected.clear();
+                self.sync_delay_input(window, cx);
+            }
         }
         let words = self
             .selected_text_mut()
@@ -210,11 +216,7 @@ pub(super) fn layer(
 ) -> AnyElement {
     let output = edit.output_size();
     let scale = width / output.0.max(1) as f32;
-    let at_ms = this
-        .studio
-        .video
-        .as_ref()
-        .map_or(0, |video| video.position().as_millis() as u64);
+    let at_ms = this.studio_at_ms();
     let accent = Hsla::from(rgb(seek_bar::RANGE_COLOR));
     // A frame much larger than any text, centered on the text's place, centers
     // the text with no measure of it.
@@ -319,10 +321,8 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                if let Some(video) = &this.studio.video {
-                    video.seek(Duration::from_millis(ms), true).ok();
-                    cx.notify();
-                }
+                this.seek_studio(Duration::from_millis(ms));
+                cx.notify();
             }))
             .child(super::point(ms))
     };

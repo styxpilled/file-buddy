@@ -2,9 +2,12 @@
 //! crop, the scale, the speed and the texts. The preview plays the range in a
 //! loop at the speed, under the crop box and the texts. The timeline under it
 //! holds the range and a row for each text, and the panel beside it holds the
-//! export. The edit stays until another source replaces it. The clip closes while the page is not shown, so it holds
-//! no file open.
+//! export. A GIF or an animated WebP opens in frame mode, with a strip of its
+//! frames over the timeline in place of the range. The edit stays until
+//! another source replaces it. The clip closes while the page is not shown, so
+//! it holds no file open.
 
+mod strip;
 mod text;
 
 use std::path::Path;
@@ -15,8 +18,8 @@ use futures::channel::mpsc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable, Hsla,
-    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, Subscription, Window, black,
-    div, img, px, relative, white,
+    MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, Subscription, Task, Window,
+    black, div, img, px, relative, white,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
@@ -31,7 +34,8 @@ use crate::studio::{self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxW
 use crate::ui::player::{Transport, open_video};
 use crate::ui::seek_bar::{self, Clip, SeekBar};
 use crate::ui::{
-    AddText, DeleteText, ExportEdit, FileBuddy, Page, SetIn, SetOut, header, preview, toggle,
+    AddText, DeleteText, DuplicateFrames, ExportEdit, FileBuddy, Page, SetIn, SetOut, header,
+    preview, toggle,
 };
 
 const PANEL_WIDTH: f32 = 320.;
@@ -77,6 +81,9 @@ pub(super) struct Studio {
     pub(super) text_move: Option<(usize, Pixels, (u64, u64))>,
     pub(super) words_input: Entity<TextareaState>,
     _words_events: Subscription,
+    pub(in crate::ui) strip: strip::Strip,
+    /// The frames of a GIF or a WebP, while they decode.
+    opening: Option<Task<()>>,
 }
 
 /// The tabs of the panel.
@@ -128,6 +135,8 @@ impl Studio {
         );
         let (words_input, words_events) = text::words_input(window, cx);
         Self {
+            strip: strip::Strip::new(window, cx),
+            opening: None,
             tab: Tab::Edit,
             editing_text: false,
             text_scroll: ScrollHandle::new(),
@@ -164,11 +173,22 @@ impl FileBuddy {
             return;
         };
         let still = hit.file.kind == Kind::Still;
+        let animated = hit.file.kind == Kind::Animated;
         let hash = hit.file.hash.clone();
         let probed_ms = hit.file.duration.map(|seconds| (seconds * 1000.) as u64);
         let Some(path) = self.selected_file(cx) else {
             return;
         };
+        self.studio.opening = None;
+        // Frame mode is for GIF and WebP. An animated PNG opens as a video.
+        let framed = animated
+            && path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("gif") || e.eq_ignore_ascii_case("webp"));
+        if framed {
+            self.open_frames(path, window, cx);
+            return;
+        }
         let (edit, video) = if still {
             let size = match probe::probe(&path, Kind::Still) {
                 Ok(probe) => (probe.width, probe.height),
@@ -196,8 +216,20 @@ impl FileBuddy {
             let size = (width.max(0) as u32, height.max(0) as u32);
             (Edit::new(path, input, duration_ms, size), Some(video))
         };
+        self.start_edit(edit, video, window, cx);
+        self.reset_strip(Default::default(), window, cx);
+    }
+
+    /// The new edit replaces the old one, as a new history step.
+    fn start_edit(
+        &mut self,
+        edit: Edit,
+        video: Option<Video>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.record_step(cx);
-        self.studio.controls.suit(still);
+        self.studio.controls.suit(edit.still);
         self.studio.edit = Some(edit);
         self.studio.crop_grab = None;
         self.studio.text_grab = None;
@@ -220,7 +252,12 @@ impl FileBuddy {
         if self.studio.video.is_some() {
             return;
         }
-        let Some(edit) = self.studio.edit.as_ref().filter(|edit| !edit.still) else {
+        let Some(edit) = self
+            .studio
+            .edit
+            .as_ref()
+            .filter(|edit| !edit.still && !edit.framed())
+        else {
             return;
         };
         if let Some(video) = open_video(&edit.input, BUFFER, false) {
@@ -239,6 +276,7 @@ impl FileBuddy {
         self.studio.text_grab = None;
         self.studio.text_move = None;
         self.studio.transport.drop_press();
+        self.studio.strip.stop();
     }
 
     fn release_grabs(&mut self) {
@@ -352,6 +390,7 @@ impl FileBuddy {
             self.studio.editing_text = false;
             cx.notify();
         }
+        self.step_strip(window, cx);
         let Some(video) = &self.studio.video else {
             return;
         };
@@ -444,7 +483,7 @@ impl FileBuddy {
             let Some(edit) = self.studio.edit.clone() else {
                 return;
             };
-            (edit, position(self.studio.video.as_ref()))
+            (edit, self.studio_at_ms())
         } else {
             let Some(hit) = self.selected_hit() else {
                 return;
@@ -537,6 +576,8 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
     let rows = seek_bar::TEXT_ROWS_HEIGHT;
     let timeline = if edit.still {
         0.
+    } else if edit.framed() {
+        strip::HEIGHT + seek_bar::HEIGHT + rows + 16.
     } else {
         seek_bar::HEIGHT + rows + 8.
     };
@@ -552,7 +593,16 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
         .on_action(cx.listener(|this, _: &SetOut, _, cx| this.set_point(Edge::End, cx)))
         .on_action(cx.listener(|this, _: &ExportEdit, _, cx| this.export_edit(cx)))
         .on_action(cx.listener(|this, _: &AddText, window, cx| this.add_text(window, cx)))
-        .on_action(cx.listener(|this, _: &DeleteText, window, cx| this.delete_text(window, cx)))
+        .on_action(cx.listener(|this, _: &DeleteText, window, cx| {
+            if this.framed() && !this.studio.strip.selected.is_empty() {
+                this.delete_frames(window, cx)
+            } else {
+                this.delete_text(window, cx)
+            }
+        }))
+        .on_action(
+            cx.listener(|this, _: &DuplicateFrames, window, cx| this.duplicate_frames(window, cx)),
+        )
         .child(
             v_flex()
                 .flex_1()
@@ -560,6 +610,9 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
                 .gap_2()
                 .p(px(PADDING))
                 .child(stage(this, width, height, cx))
+                .when(edit.framed(), |column| {
+                    column.child(strip::strip(this, edit, width, cx))
+                })
                 .when(!edit.still, |column| {
                     column
                         .child(seek_bar::bar(this, Clip::Studio, width, cx))
@@ -607,6 +660,7 @@ fn stage(this: &FileBuddy, width: f32, height: f32, cx: &mut Context<FileBuddy>)
                 .into_any_element()
         }))
         .children(still_image(this, width, height))
+        .children(strip::stage_frame(this, width, height))
         .children(crop_box(this, width, height, cx))
         .into_any_element()
 }
@@ -652,7 +706,7 @@ fn crop_box(
     cx: &mut Context<FileBuddy>,
 ) -> Option<AnyElement> {
     let edit = this.studio.edit.as_ref()?;
-    if !edit.still {
+    if !edit.still && !edit.framed() {
         this.studio.video.as_ref()?;
     }
     let frame = frame_in(edit.size, (width, height))?;
@@ -759,6 +813,7 @@ fn grip_cursor(grip: Grip) -> CursorStyle {
 fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let playback = preview::controls(this, Clip::Studio, cx);
     let texts = text::panel(this, edit, cx);
+    let frames = edit.framed().then(|| strip::panel(this, edit, cx));
     let theme = cx.theme();
     let name = edit
         .source
@@ -786,7 +841,7 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
     } else {
         &Format::MOVING
     };
-    let range_row = (!edit.still).then(|| {
+    let range_row = (!edit.still && !edit.framed()).then(|| {
         h_flex()
             .gap_1p5()
             .items_center()
@@ -823,6 +878,7 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
         .gap_4()
         .child(div().child(name))
         .children(range_row)
+        .children(frames)
         .child(
             v_flex()
                 .gap_1()
@@ -923,21 +979,24 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                     }))
                 }))),
         )
-        .when_some(controls.fps(), |panel, current| {
-            panel.child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_color(theme.muted_foreground).child("Frame rate"))
-                    .child(h_flex().gap_1().children(studio::FPS.map(|fps| {
-                        toggle(("fps", fps as usize), fps.to_string(), current == fps)
-                            .xsmall()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.studio.controls.set_fps(fps);
-                                cx.notify();
-                            }))
-                    }))),
-            )
-        })
+        .when_some(
+            controls.fps().filter(|_| !edit.framed()),
+            |panel, current| {
+                panel.child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_color(theme.muted_foreground).child("Frame rate"))
+                        .child(h_flex().gap_1().children(studio::FPS.map(|fps| {
+                            toggle(("fps", fps as usize), fps.to_string(), current == fps)
+                                .xsmall()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.studio.controls.set_fps(fps);
+                                    cx.notify();
+                                }))
+                        }))),
+                )
+            },
+        )
         .when_some(controls.quality(), |panel, current| {
             panel.child(
                 v_flex()

@@ -1,8 +1,12 @@
-//! The edit the Studio holds: a source, the range cut from it, the crop, the
-//! scale, the speed and the texts. Nothing of it goes to the database. `ffmpeg::export` makes a file from
-//! it.
+//! The edit the Studio holds: a source, the range cut from it or its frames,
+//! the crop, the scale, the speed and the texts. Nothing of it goes to the
+//! database. `ffmpeg::export` makes a file from it.
+
+pub mod frames;
 
 use std::path::{Path, PathBuf};
+
+pub use frames::Frame;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Edit {
@@ -23,6 +27,8 @@ pub struct Edit {
     pub texts: Vec<Text>,
     /// One frame: no range, no speed, and no time on a text.
     pub still: bool,
+    /// Frame mode, for a GIF or an animated WebP. Empty for any other source.
+    pub frames: Vec<Frame>,
 }
 
 impl Edit {
@@ -43,6 +49,7 @@ impl Edit {
             speed: 1.,
             texts: Vec::new(),
             still: false,
+            frames: Vec::new(),
         }
     }
 

@@ -132,7 +132,8 @@ gpui_kit::actions!(
         SetOut,
         ExportEdit,
         AddText,
-        DeleteText
+        DeleteText,
+        DuplicateFrames
     ]
 );
 
@@ -674,6 +675,12 @@ impl FileBuddy {
                 .is_focused(window)
                 || studio
                     .words_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+                || studio
+                    .strip
+                    .delay_input
                     .read(cx)
                     .focus_handle(cx)
                     .is_focused(window))

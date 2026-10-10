@@ -30,8 +30,11 @@ Two things follow from that:
                       reindex, status, and the worker processes
       worker.rs       a model in a child `fb` process, one JSON line each way
       speech.rs       whisper-rs: the model the `whisper` worker loads once
-      studio.rs       the Studio edit: the source, the range, the crop, the
-                      speed, the texts, the export name
+      studio/         the Studio edit
+        mod.rs        the source, the range, the crop, the speed, the texts,
+                      the export name
+        frames.rs     frame mode: the frames of a GIF or a WebP in memory, and
+                      delete, duplicate, move and delay on the strip
       clip/           visual, as vectors, through ONNX Runtime
         mod.rs        the runtime DLLs, the model config, the vector math
         image.rs      the image encoder, which the `clip` worker loads once
@@ -129,6 +132,8 @@ Two things follow from that:
           mod.rs      the preview that loops the range, the crop box, the
                       panel, and the export while it runs
           text.rs     the texts on the preview and the Text tab of the panel
+          strip.rs    frame mode: the strip of frames, the frame on the stage,
+                      playback by the delays, and the delay in the panel
         visual.rs     the visual half of a search, which merges in after the
                       text matches, and `a` with its escape steps
         sim.rs        simulated input for the dev window, behind the `sim`

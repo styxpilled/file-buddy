@@ -7,6 +7,7 @@ use std::process::Command;
 use file_buddy::ffmpeg::probe::{Probe, probe};
 use file_buddy::ffmpeg::{self, Tool, export, webp};
 use file_buddy::media::Kind;
+use file_buddy::studio::frames;
 use file_buddy::studio::{Controls, Crop, Edit, Format, MaxWidth, Range};
 
 fn fixture(path: &Path) {
@@ -209,4 +210,94 @@ fn a_crop_and_a_scale_set_the_frame_size() {
     export::run(&edit, &Controls::default(), &destination, |_| {}).expect("export");
     let probe = probe(&destination, Kind::Video).unwrap();
     assert_eq!((probe.width, probe.height), (Some(160), Some(120)));
+}
+
+/// Four frames of one color each, red, green, blue and yellow.
+fn gif_fixture(path: &Path, delays: [u32; 4]) {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    use image::{Delay, Frame, Rgba, RgbaImage};
+    let colors = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]];
+    let file = std::fs::File::create(path).unwrap();
+    let mut encoder = GifEncoder::new(file);
+    encoder.set_repeat(Repeat::Infinite).unwrap();
+    let frames = colors.iter().zip(delays).map(|([r, g, b], ms)| {
+        let image = RgbaImage::from_pixel(64, 48, Rgba([*r, *g, *b, 255]));
+        Frame::from_parts(image, 0, 0, Delay::from_numer_denom_ms(ms, 1))
+    });
+    encoder.encode_frames(frames).unwrap();
+}
+
+/// Each frame as its color, and its delay.
+fn colors_and_delays(frames: &[frames::Frame]) -> Vec<(char, u32)> {
+    frames
+        .iter()
+        .map(|frame| {
+            let [r, g, b, _] = frame.image.get_pixel(32, 24).0;
+            let color = match (r > 128, g > 128, b > 128) {
+                (true, false, false) => 'r',
+                (false, true, false) => 'g',
+                (false, false, true) => 'b',
+                (true, true, false) => 'y',
+                _ => '?',
+            };
+            (color, frame.delay_ms)
+        })
+        .collect()
+}
+
+#[test]
+fn frames_cut_from_a_gif_keep_their_delays_in_each_format() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("cat.gif");
+    gif_fixture(&source, [40, 250, 70, 500]);
+    let decoded = frames::decode(&source).unwrap();
+    assert_eq!(
+        colors_and_delays(&decoded),
+        [('r', 40), ('g', 250), ('b', 70), ('y', 500)]
+    );
+
+    let mut edit = Edit::with_frames(source, decoded);
+    let one = |index| std::collections::BTreeSet::from([index]);
+    edit.delete_frames(&one(1));
+    edit.duplicate_frames(&one(0));
+    edit.move_frames(&one(1), 3);
+    edit.set_delay(&one(1), 120);
+    let expected = [('r', 40), ('b', 120), ('r', 40), ('y', 500)];
+    assert_eq!(colors_and_delays(&edit.frames), expected);
+
+    // A screenshot takes the frame of the strip at its moment: blue, from 40 ms.
+    let shot = export::screenshot(&edit, 100).unwrap();
+    let shot = image::load_from_memory(&shot).unwrap().to_rgba8();
+    assert_eq!(shot.dimensions(), (64, 48));
+    assert_eq!(shot.get_pixel(32, 24).0, [0, 0, 255, 255]);
+
+    for format in [Format::Gif, Format::Webp] {
+        let destination = dir.path().join(format!("out.{}", format.extension()));
+        let controls = Controls {
+            format,
+            ..Controls::default()
+        };
+        export::run(&edit, &controls, &destination, |_| {}).expect("export");
+        let exported = frames::decode(&destination).unwrap();
+        assert_eq!(colors_and_delays(&exported), expected, "{format:?}");
+    }
+
+    let destination = dir.path().join("out.mp4");
+    let controls = Controls {
+        format: Format::Mp4,
+        ..Controls::default()
+    };
+    // NVENC takes no frame this small.
+    edit.max_width = MaxWidth::Source;
+    let mut large = edit.clone();
+    for frame in &mut large.frames {
+        let color = *frame.image.get_pixel(0, 0);
+        frame.image = std::sync::Arc::new(image::RgbaImage::from_pixel(320, 240, color));
+    }
+    large.size = (320, 240);
+    large.crop = Crop::full(large.size);
+    export::run(&large, &controls, &destination, |_| {}).expect("export");
+    let probe = probe(&destination, Kind::Video).unwrap();
+    let duration = probe.duration.expect("a duration");
+    assert!((duration - 0.7).abs() < 0.02, "{duration} s");
 }

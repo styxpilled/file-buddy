@@ -274,7 +274,7 @@ impl FileBuddy {
 
     /// The speed button or a hold, and in the Studio the speed of the edit on
     /// top of it.
-    fn clip_speed(&self, clip: Clip) -> f64 {
+    pub(super) fn clip_speed(&self, clip: Clip) -> f64 {
         let speed = self.player.speed_of(self.transport_of(clip));
         match (clip, &self.studio.edit) {
             (Clip::Studio, Some(edit)) => speed * edit.speed,

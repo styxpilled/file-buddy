@@ -3,7 +3,8 @@
 //! shows the time under it. `shift-left` and `shift-right` skip, and a time in
 //! the Speech tab seeks. In the Studio the bar also holds the range, with a
 //! handle at each end, and a row under it for each text, from its start to its
-//! end.
+//! end. In frame mode the bar runs on the playhead of the strip, with no
+//! range.
 
 use std::time::Duration;
 
@@ -107,8 +108,8 @@ const TEXT_ROWS_SHOWN: f32 = 5.;
 pub(super) const TEXT_ROWS_HEIGHT: f32 =
     TEXT_ROW_GAP + TEXT_ROWS_SHOWN * (TEXT_ROW_HEIGHT + TEXT_ROW_GAP);
 
-fn time_at(video: &Video, share: f32) -> Duration {
-    video.duration().mul_f32(share.clamp(0., 1.))
+fn time_at(length: Duration, share: f32) -> Duration {
+    length.mul_f32(share.clamp(0., 1.))
 }
 
 impl FileBuddy {
@@ -130,8 +131,11 @@ impl FileBuddy {
     /// chose, also with a choice made during the drag.
     fn let_go(&mut self, clip: Clip, to: Duration) {
         self.bar_of(clip).pending = None;
-        if let Some(video) = self.clip_video(clip) {
-            video.seek(to, true).ok();
+        match self.clip_video(clip) {
+            Some(video) => {
+                video.seek(to, true).ok();
+            }
+            None => self.seek_strip(to),
         }
         if std::mem::take(&mut self.transport(clip).held) {
             self.sync_paused(clip);
@@ -142,6 +146,10 @@ impl FileBuddy {
     /// decodes fast follows the pointer closely and a slow one does not fall
     /// behind it.
     fn scrub_to(&mut self, clip: Clip, to: Duration) {
+        if self.clip_video(clip).is_none() {
+            self.seek_strip(to);
+            return;
+        }
         self.hold(clip);
         self.bar_of(clip).pending = Some(to);
         self.send_pending(clip);
@@ -166,6 +174,21 @@ impl FileBuddy {
         }
     }
 
+    /// Where the clip is, and how long it is. In frame mode the Studio has no
+    /// video, and the playhead runs on the strip.
+    pub(super) fn clip_times(&self, clip: Clip) -> Option<(Duration, Duration)> {
+        if let Some(video) = self.clip_video(clip) {
+            return Some((video.position(), video.duration()));
+        }
+        match (clip, &self.studio.edit) {
+            (Clip::Studio, Some(edit)) if edit.framed() => Some((
+                Duration::from_millis(self.studio.strip.at_ms()),
+                Duration::from_millis(edit.duration_ms),
+            )),
+            _ => None,
+        }
+    }
+
     fn bar_of(&mut self, clip: Clip) -> &mut SeekBar {
         match clip {
             Clip::Pane => &mut self.seek_bar,
@@ -183,17 +206,17 @@ impl FileBuddy {
     }
 
     fn scrub(&mut self, clip: Clip, event: &SliderEvent, cx: &mut Context<Self>) {
-        let Some(video) = self.clip_video(clip).cloned() else {
+        let Some((_, length)) = self.clip_times(clip) else {
             return;
         };
         match event {
             SliderEvent::Change(value) => {
                 self.bar_of(clip).dragging = Some(value.end());
-                self.scrub_to(clip, time_at(&video, value.end()));
+                self.scrub_to(clip, time_at(length, value.end()));
             }
             SliderEvent::Release(value) => {
                 self.bar_of(clip).dragging = None;
-                self.let_go(clip, time_at(&video, value.end()));
+                self.let_go(clip, time_at(length, value.end()));
             }
         }
         cx.notify();
@@ -234,7 +257,7 @@ impl FileBuddy {
         snap: f32,
         cx: &mut Context<Self>,
     ) {
-        let playhead = self.studio.video.as_ref().map(|video| video.position());
+        let playhead = self.clip_times(Clip::Studio).map(|(at, _)| at);
         let Some(edit) = &mut self.studio.edit else {
             return;
         };
@@ -301,14 +324,14 @@ impl FileBuddy {
         if self.bar_of(clip).dragging.is_some() {
             return;
         }
-        let Some(video) = self.clip_video(clip) else {
+        let Some((position, length)) = self.clip_times(clip) else {
             return;
         };
-        let length = video.duration().as_secs_f32();
+        let length = length.as_secs_f32();
         if length <= 0. {
             return;
         }
-        let share = (video.position().as_secs_f32() / length).clamp(0., 1.);
+        let share = (position.as_secs_f32() / length).clamp(0., 1.);
         let state = self.bar_of(clip).state.clone();
         if (state.read(cx).value().end() - share).abs() > 1e-4 {
             state.update(cx, |state, cx| state.set_value(share, window, cx));
@@ -331,7 +354,7 @@ pub(super) fn bar(
         .flex_shrink_0()
         .gap_2()
         .items_center();
-    let Some(video) = this.clip_video(clip) else {
+    let Some((_, length)) = this.clip_times(clip) else {
         return row
             .child(
                 div()
@@ -352,16 +375,14 @@ pub(super) fn bar(
         .unwrap_or_else(|| state.read(cx).value().end());
     // In the Studio, the bar fills from the in point.
     let filled_from = match (clip, &this.studio.edit) {
-        (Clip::Studio, Some(edit)) => edit.range.start_ms as f32 / edit.duration_ms.max(1) as f32,
+        (Clip::Studio, Some(edit)) if !edit.framed() => {
+            edit.range.start_ms as f32 / edit.duration_ms.max(1) as f32
+        }
         _ => 0.,
     };
     let theme = cx.theme();
     let (popover, border, muted_text) = (theme.popover, theme.border, theme.muted_foreground);
-    let time = format!(
-        "{} / {}",
-        clock(time_at(video, share)),
-        clock(video.duration())
-    );
+    let time = format!("{} / {}", clock(time_at(length, share)), clock(length));
 
     row.child(
         div()
@@ -424,7 +445,7 @@ pub(super) fn bar(
                         .border_1()
                         .border_color(border)
                         .text_xs()
-                        .child(clock(time_at(video, hovered))),
+                        .child(clock(time_at(length, hovered))),
                 )
             }),
     )
@@ -513,9 +534,9 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
         MouseButton::Left,
         cx.listener(|this, _, _, cx| this.release_handle(cx)),
     )
-    .child(band)
-    .child(start_handle)
-    .child(end_handle)
+    .when(!edit.framed(), |bar| {
+        bar.child(band).child(start_handle).child(end_handle)
+    })
     .child(text_rows(this, edit, cx))
 }
 
@@ -532,8 +553,9 @@ fn text_rows(
     let theme = cx.theme();
     let (foreground, muted) = (theme.foreground, theme.muted_foreground);
     let rows = edit.texts.iter().enumerate().map(|(index, text)| {
-        let start = text.start_ms as f32 / length;
-        let end = text.end_ms as f32 / length;
+        // In frame mode a delete can leave a text past the end of the strip.
+        let start = (text.start_ms as f32 / length).min(1.);
+        let end = (text.end_ms as f32 / length).min(1.);
         let selected = this.studio.selected_text == Some(index);
         let top = index as f32 * (TEXT_ROW_HEIGHT + TEXT_ROW_GAP);
         let (fill, ends) = if selected {
