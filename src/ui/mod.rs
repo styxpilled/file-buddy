@@ -127,6 +127,7 @@ gpui_kit::actions!(
         DeleteFiles,
         ShowStudio,
         OpenInStudio,
+        Screenshot,
         SetIn,
         SetOut,
         ExportEdit,
@@ -987,6 +988,7 @@ impl Render for FileBuddy {
             .on_action(
                 cx.listener(|this, _: &OpenInStudio, window, cx| this.open_in_studio(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &Screenshot, _, cx| this.screenshot(cx)))
             .on_action(cx.listener(|this, _: &SaveSettings, _, cx| this.save_settings(cx)))
             .on_action(cx.listener(|this, _: &Rescan, _, cx| {
                 this.flash("scanning the folders", false, cx);

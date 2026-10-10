@@ -548,64 +548,71 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
     let player = &this.player;
     let transport = this.transport_of(clip);
     let playable = this.clip_video(clip).is_some();
-    h_flex()
+    let still = clip == Clip::Studio && this.studio.edit.as_ref().is_some_and(|edit| edit.still);
+    let row = h_flex()
         .w_full()
         .h(px(CONTROLS_HEIGHT))
         .flex_shrink_0()
-        .gap_2()
-        .when(clip == Clip::Pane, |row| {
-            row.child(
-                toggle("preview-autoplay", "Autoplay", player.autoplay)
-                    .small()
-                    .tooltip("Ctrl+Space")
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
-            )
-        })
-        .child(
-            Button::new("preview-pause")
+        .gap_2();
+    if still {
+        return row
+            .child(div().flex_1())
+            .child(file_menu(this, clip, cx))
+            .into_any_element();
+    }
+    row.when(clip == Clip::Pane, |row| {
+        row.child(
+            toggle("preview-autoplay", "Autoplay", player.autoplay)
                 .small()
-                // As wide as Pause, so the row does not move when it changes.
-                .w(px(PAUSE_WIDTH))
-                .disabled(!playable)
-                .when(playable, |button| button.cursor_pointer())
-                .icon(if transport.paused {
-                    IconName::Play
-                } else {
-                    IconName::Pause
-                })
-                .label(if transport.paused { "Play" } else { "Pause" })
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_paused(clip, cx))),
+                .tooltip("Ctrl+Space")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
         )
-        .child(
-            Button::new("preview-mute")
-                .small()
-                // As wide as Unmute, so the row does not move when it changes.
-                .w(px(MUTE_WIDTH))
-                .disabled(!playable)
-                .when(playable, |button| button.cursor_pointer())
-                .label(if player.muted { "Unmute" } else { "Mute" })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_muted(cx))),
-        )
-        .child(
-            Button::new("preview-speed")
-                .small()
-                .cursor_pointer()
-                .label(player.speed_label(transport))
-                .tooltip("Hold space for 2x")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_speed(cx))),
-        )
-        .child(
-            div()
-                .w(px(VOLUME_WIDTH))
-                .flex_none()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .when(player.muted, |volume| volume.line_through())
-                .child(player.volume_label()),
-        )
-        .child(div().flex_1())
-        .child(file_menu(this, clip, cx))
-        .into_any_element()
+    })
+    .child(
+        Button::new("preview-pause")
+            .small()
+            // As wide as Pause, so the row does not move when it changes.
+            .w(px(PAUSE_WIDTH))
+            .disabled(!playable)
+            .when(playable, |button| button.cursor_pointer())
+            .icon(if transport.paused {
+                IconName::Play
+            } else {
+                IconName::Pause
+            })
+            .label(if transport.paused { "Play" } else { "Pause" })
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_paused(clip, cx))),
+    )
+    .child(
+        Button::new("preview-mute")
+            .small()
+            // As wide as Unmute, so the row does not move when it changes.
+            .w(px(MUTE_WIDTH))
+            .disabled(!playable)
+            .when(playable, |button| button.cursor_pointer())
+            .label(if player.muted { "Unmute" } else { "Mute" })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_muted(cx))),
+    )
+    .child(
+        Button::new("preview-speed")
+            .small()
+            .cursor_pointer()
+            .label(player.speed_label(transport))
+            .tooltip("Hold space for 2x")
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_speed(cx))),
+    )
+    .child(
+        div()
+            .w(px(VOLUME_WIDTH))
+            .flex_none()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .when(player.muted, |volume| volume.line_through())
+            .child(player.volume_label()),
+    )
+    .child(div().flex_1())
+    .child(file_menu(this, clip, cx))
+    .into_any_element()
 }
 
 /// Copy, reveal, rename, open, trash and delete. Each item dispatches the same

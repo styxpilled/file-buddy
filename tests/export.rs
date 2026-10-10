@@ -122,6 +122,77 @@ fn a_text_with_filter_characters_in_its_words_exports() {
 }
 
 #[test]
+fn a_still_with_a_crop_and_a_text_exports_as_png_and_jpg() {
+    let dir = tempfile::tempdir().unwrap();
+    // A `%` in the name must not read as a pattern.
+    let source = dir.path().join("still 100%.png");
+    let output = Command::new(ffmpeg::path_of(Tool::Ffmpeg))
+        .args(["-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i"])
+        .args(["testsrc2=size=640x480,format=rgba", "-frames:v", "1"])
+        .arg(&source)
+        .output()
+        .expect("run ffmpeg");
+    assert!(output.status.success());
+    let mut edit = Edit::still(source, (640, 480));
+    edit.crop = Crop {
+        x: 40,
+        y: 20,
+        width: 401,
+        height: 300,
+    };
+    edit.max_width = MaxWidth::Pixels(200);
+    let at = edit.add_text();
+    edit.texts[at].words = "it's 5:00\nline two".into();
+    edit.texts[at].boxed = true;
+    for (format, codec) in [(Format::Png, "png"), (Format::Jpg, "mjpeg")] {
+        let destination = dir.path().join(format!("out 100%.{}", format.extension()));
+        let controls = Controls {
+            format,
+            ..Controls::default()
+        };
+        export::run(&edit, &controls, &destination, |_| {}).expect("export");
+        let probe = probe(&destination, Kind::Still).unwrap();
+        assert_eq!(probe.kind, Kind::Still);
+        assert_eq!(probe.video_codec.as_deref(), Some(codec));
+        assert_eq!((probe.width, probe.height), (Some(200), Some(150)));
+    }
+}
+
+#[test]
+fn a_screenshot_is_a_png_of_the_crop_at_its_own_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source.mp4");
+    fixture(&source);
+    let mut edit = Edit::new(source.clone(), source.clone(), 3_000, (320, 240));
+    let raw = export::screenshot(&edit, 1_240).unwrap();
+    let raw = image::load_from_memory(&raw).unwrap();
+    assert_eq!((raw.width(), raw.height()), (320, 240));
+    // A seek after the input decodes every frame up to it, so it is exact.
+    let output = Command::new(ffmpeg::path_of(Tool::Ffmpeg))
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(&source)
+        .args(["-ss", "1.240", "-frames:v", "1", "-c:v", "png"])
+        .args(["-f", "image2pipe", "pipe:1"])
+        .output()
+        .expect("run ffmpeg");
+    let exact = image::load_from_memory(&output.stdout).unwrap();
+    assert!(raw.to_rgb8() == exact.to_rgb8(), "not the frame at 1.24 s");
+
+    edit.crop = Crop {
+        x: 40,
+        y: 20,
+        width: 201,
+        height: 151,
+    };
+    edit.max_width = MaxWidth::Pixels(100);
+    let at = edit.add_text();
+    edit.texts[at].words = "it's 5:00".into();
+    let cropped = export::screenshot(&edit, 2_960).unwrap();
+    let cropped = image::load_from_memory(&cropped).unwrap();
+    assert_eq!((cropped.width(), cropped.height()), (201, 151));
+}
+
+#[test]
 fn a_crop_and_a_scale_set_the_frame_size() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source.mp4");

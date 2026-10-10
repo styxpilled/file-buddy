@@ -35,7 +35,7 @@ gpui-kit = "=0.6.1"
 # renderer. The version is the one gpui-kit pins.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.1", optional = true }
 gpui-video = { path = "gpui-video" }
-image = { version = "=0.25.10", default-features = false, features = ["jpeg"] }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 image-webp = "=0.2.4"
 log = "=0.4.34"
 notify = "=8.2.0"

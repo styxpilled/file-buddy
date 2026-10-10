@@ -16,7 +16,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, Context, CursorStyle, DragMoveEvent, Entity, FocusHandle, Focusable, Hsla,
     MouseButton, MouseDownEvent, Pixels, Point, Render, ScrollHandle, Subscription, Window, black,
-    div, px, relative, white,
+    div, img, px, relative, white,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, TextareaState};
@@ -24,7 +24,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_video::{Video, video as video_element};
 
 use crate::actions::clipboard;
-use crate::ffmpeg::export;
+use crate::ffmpeg::{export, probe};
 use crate::media::{self, Kind};
 use crate::paths;
 use crate::studio::{self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxWidth, Quality};
@@ -163,28 +163,42 @@ impl FileBuddy {
         let Some(hit) = self.selected_hit() else {
             return;
         };
-        if hit.file.kind == Kind::Still {
-            self.flash("the Studio does not take stills yet", true, cx);
-            return;
-        }
+        let still = hit.file.kind == Kind::Still;
         let hash = hit.file.hash.clone();
         let probed_ms = hit.file.duration.map(|seconds| (seconds * 1000.) as u64);
         let Some(path) = self.selected_file(cx) else {
             return;
         };
-        let input = paths::playable(&self.cache, &hash, &path);
-        let Some(video) = open_video(&input, BUFFER, false) else {
-            self.flash("this file cannot play", true, cx);
-            return;
+        let (edit, video) = if still {
+            let size = match probe::probe(&path, Kind::Still) {
+                Ok(probe) => (probe.width, probe.height),
+                Err(e) => {
+                    log::warn!("cannot probe {}: {e:#}", path.display());
+                    (None, None)
+                }
+            };
+            let (Some(width @ 1..), Some(height @ 1..)) = size else {
+                self.flash("this image cannot open", true, cx);
+                return;
+            };
+            (Edit::still(path, (width as u32, height as u32)), None)
+        } else {
+            let input = paths::playable(&self.cache, &hash, &path);
+            let Some(video) = open_video(&input, BUFFER, false) else {
+                self.flash("this file cannot play", true, cx);
+                return;
+            };
+            let duration_ms = match video.duration().as_millis() as u64 {
+                0 => probed_ms.unwrap_or(0),
+                ms => ms,
+            };
+            let (width, height) = video.size();
+            let size = (width.max(0) as u32, height.max(0) as u32);
+            (Edit::new(path, input, duration_ms, size), Some(video))
         };
-        let duration_ms = match video.duration().as_millis() as u64 {
-            0 => probed_ms.unwrap_or(0),
-            ms => ms,
-        };
-        let (width, height) = video.size();
-        let size = (width.max(0) as u32, height.max(0) as u32);
         self.record_step(cx);
-        self.studio.edit = Some(Edit::new(path, input, duration_ms, size));
+        self.studio.controls.suit(still);
+        self.studio.edit = Some(edit);
         self.studio.crop_grab = None;
         self.studio.text_grab = None;
         self.studio.text_move = None;
@@ -194,8 +208,10 @@ impl FileBuddy {
             .update(cx, |input, cx| input.set_value("", window, cx));
         self.studio.resume = Duration::ZERO;
         self.studio.transport = Transport::new(false);
-        self.apply_studio(&video);
-        self.studio.video = Some(video);
+        if let Some(video) = &video {
+            self.apply_studio(video);
+        }
+        self.studio.video = video;
         self.enter_page(Page::Studio, None, window, cx);
     }
 
@@ -204,7 +220,7 @@ impl FileBuddy {
         if self.studio.video.is_some() {
             return;
         }
-        let Some(edit) = &self.studio.edit else {
+        let Some(edit) = self.studio.edit.as_ref().filter(|edit| !edit.still) else {
             return;
         };
         if let Some(video) = open_video(&edit.input, BUFFER, false) {
@@ -363,7 +379,7 @@ impl FileBuddy {
             self.flash("set an export folder in Settings", true, cx);
             return;
         };
-        if edit.range.len_ms() == 0 {
+        if !edit.still && edit.range.len_ms() == 0 {
             self.flash("the range is empty", true, cx);
             return;
         }
@@ -419,6 +435,55 @@ impl FileBuddy {
         cx.notify();
     }
 
+    /// `p`. The frame on screen goes to the clipboard as an image, with no
+    /// file: in the Studio with the crop and the texts and no scale, elsewhere
+    /// the raw frame of the selection at its own size.
+    pub(super) fn screenshot(&mut self, cx: &mut Context<Self>) {
+        let position = |video: Option<&Video>| video.map_or(0, |v| v.position().as_millis() as u64);
+        let (edit, at_ms) = if self.page() == Page::Studio {
+            let Some(edit) = self.studio.edit.clone() else {
+                return;
+            };
+            (edit, position(self.studio.video.as_ref()))
+        } else {
+            let Some(hit) = self.selected_hit() else {
+                return;
+            };
+            let still = hit.file.kind == Kind::Still;
+            let hash = hit.file.hash.clone();
+            let at_ms = position(self.player.video_of(&hash));
+            let Some(path) = self.selected_file(cx) else {
+                return;
+            };
+            let edit = if still {
+                Edit::still(path, (0, 0))
+            } else {
+                let input = paths::playable(&self.cache, &hash, &path);
+                Edit::new(path, input, 0, (0, 0))
+            };
+            (edit, at_ms)
+        };
+        cx.spawn(async move |this, cx| {
+            let copied = cx
+                .background_executor()
+                .spawn(async move {
+                    export::screenshot(&edit, at_ms).and_then(|png| clipboard::copy_image(&png))
+                })
+                .await;
+            this.update(cx, |this, cx| match copied {
+                Ok((width, height)) => {
+                    this.flash(format!("copied the frame, {width} x {height}"), false, cx)
+                }
+                Err(e) => {
+                    log::error!("screenshot failed: {e:#}");
+                    this.flash(format!("screenshot failed: {e}"), true, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The file goes on the clipboard, as Enter puts a result there.
     fn finish_export(&mut self, path: &Path, result: anyhow::Result<()>, cx: &mut Context<Self>) {
         self.studio.export = None;
@@ -470,7 +535,12 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
     let viewport = window.viewport_size();
     let width = (f32::from(viewport.width) - PANEL_WIDTH - PADDING * 2.).max(160.);
     let rows = seek_bar::TEXT_ROWS_HEIGHT;
-    let chrome = header::HEIGHT + seek_bar::HEIGHT + rows + 8. + PADDING * 2.;
+    let timeline = if edit.still {
+        0.
+    } else {
+        seek_bar::HEIGHT + rows + 8.
+    };
+    let chrome = header::HEIGHT + timeline + PADDING * 2.;
     let height = (f32::from(viewport.height) - chrome).max(120.);
 
     h_flex()
@@ -490,8 +560,11 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
                 .gap_2()
                 .p(px(PADDING))
                 .child(stage(this, width, height, cx))
-                .child(seek_bar::bar(this, Clip::Studio, width, cx))
-                .child(div().h(px(rows)).flex_shrink_0()),
+                .when(!edit.still, |column| {
+                    column
+                        .child(seek_bar::bar(this, Clip::Studio, width, cx))
+                        .child(div().h(px(rows)).flex_shrink_0())
+                }),
         )
         .child(panel(this, edit, cx))
         .into_any_element()
@@ -531,9 +604,23 @@ fn stage(this: &FileBuddy, width: f32, height: f32, cx: &mut Context<FileBuddy>)
                 .id("studio-preview")
                 .size(px(width), px(height))
                 .buffer_capacity(60)
+                .into_any_element()
         }))
+        .children(still_image(this, width, height))
         .children(crop_box(this, width, height, cx))
         .into_any_element()
+}
+
+/// A still, letterboxed as the video element does it, so the crop box lines up.
+fn still_image(this: &FileBuddy, width: f32, height: f32) -> Option<AnyElement> {
+    let edit = this.studio.edit.as_ref().filter(|edit| edit.still)?;
+    let frame = frame_in(edit.size, (width, height))?;
+    Some(
+        img(edit.input.clone())
+            .w(px(edit.size.0 as f32 * frame.scale))
+            .h(px(edit.size.1 as f32 * frame.scale))
+            .into_any_element(),
+    )
 }
 
 /// Where the video letterboxes the frame in the stage, in stage pixels.
@@ -565,7 +652,9 @@ fn crop_box(
     cx: &mut Context<FileBuddy>,
 ) -> Option<AnyElement> {
     let edit = this.studio.edit.as_ref()?;
-    this.studio.video.as_ref()?;
+    if !edit.still {
+        this.studio.video.as_ref()?;
+    }
     let frame = frame_in(edit.size, (width, height))?;
     let crop = edit.crop;
     let frame_width = edit.size.0 as f32 * frame.scale;
@@ -692,23 +781,48 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
     let running = this.studio.export;
     let controls = this.studio.controls;
 
+    let formats: &[Format] = if edit.still {
+        &Format::STILL
+    } else {
+        &Format::MOVING
+    };
+    let range_row = (!edit.still).then(|| {
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .whitespace_nowrap()
+            .child(point_button(Edge::Start, "In", "["))
+            .child(point(range.start_ms))
+            .child(muted("-".into()))
+            .child(point(range.end_ms))
+            .child(point_button(Edge::End, "Out", "]"))
+            .child(div().flex_1())
+            .child(length(edit.output_ms()))
+            .child(muted(format!("/ {}", length(edit.duration_ms))))
+    });
+    let speed = (!edit.still).then(|| {
+        v_flex()
+            .gap_1()
+            .child(div().text_color(theme.muted_foreground).child("Speed"))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(studio::SPEEDS.into_iter().enumerate().map(|(at, speed)| {
+                        toggle(
+                            ("speed", at),
+                            studio::speed_label(speed),
+                            edit.speed == speed,
+                        )
+                        .xsmall()
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_speed(speed, cx)))
+                    })),
+            )
+    });
+
     let main = v_flex()
         .gap_4()
         .child(div().child(name))
-        .child(
-            h_flex()
-                .gap_1p5()
-                .items_center()
-                .whitespace_nowrap()
-                .child(point_button(Edge::Start, "In", "["))
-                .child(point(range.start_ms))
-                .child(muted("-".into()))
-                .child(point(range.end_ms))
-                .child(point_button(Edge::End, "Out", "]"))
-                .child(div().flex_1())
-                .child(length(edit.output_ms()))
-                .child(muted(format!("/ {}", length(edit.duration_ms)))),
-        )
+        .children(range_row)
         .child(
             v_flex()
                 .gap_1()
@@ -791,29 +905,12 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                         ),
                 ),
         )
-        .child(
-            v_flex()
-                .gap_1()
-                .child(div().text_color(theme.muted_foreground).child("Speed"))
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .children(studio::SPEEDS.into_iter().enumerate().map(|(at, speed)| {
-                            toggle(
-                                ("speed", at),
-                                studio::speed_label(speed),
-                                edit.speed == speed,
-                            )
-                            .xsmall()
-                            .on_click(cx.listener(move |this, _, _, cx| this.set_speed(speed, cx)))
-                        })),
-                ),
-        )
+        .children(speed)
         .child(
             v_flex()
                 .gap_1()
                 .child(div().text_color(theme.muted_foreground).child("Format"))
-                .child(h_flex().gap_1().children(Format::ALL.map(|format| {
+                .child(h_flex().gap_1().children(formats.iter().map(|&format| {
                     toggle(
                         ("format", format as usize),
                         format.label(),

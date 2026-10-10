@@ -21,6 +21,8 @@ pub struct Edit {
     /// One of `SPEEDS`.
     pub speed: f64,
     pub texts: Vec<Text>,
+    /// One frame: no range, no speed, and no time on a text.
+    pub still: bool,
 }
 
 impl Edit {
@@ -40,6 +42,14 @@ impl Edit {
             max_width: MaxWidth::Source,
             speed: 1.,
             texts: Vec::new(),
+            still: false,
+        }
+    }
+
+    pub fn still(source: PathBuf, size: (u32, u32)) -> Self {
+        Self {
+            still: true,
+            ..Self::new(source.clone(), source, 0, size)
         }
     }
 
@@ -99,6 +109,13 @@ impl Edit {
         let end = text.end_ms.min(self.range.end_ms);
         let seconds = |ms: u64| (ms - self.range.start_ms) as f64 / 1000.;
         (end > start).then(|| (seconds(start), seconds(end)))
+    }
+
+    /// Whether a text shows at `at_ms` of the source. On a still it always does.
+    pub fn shows(&self, text: &Text, at_ms: u64) -> bool {
+        self.still
+            || at_ms >= text.start_ms.max(self.range.start_ms)
+                && at_ms < text.end_ms.min(self.range.end_ms)
     }
 
     /// The length of the export: the range after the speed change.
@@ -554,10 +571,17 @@ pub enum Format {
     Webm,
     Gif,
     Webp,
+    Png,
+    Jpg,
 }
 
 impl Format {
-    pub const ALL: [Format; 4] = [Format::Mp4, Format::Webm, Format::Gif, Format::Webp];
+    pub const MOVING: [Format; 4] = [Format::Mp4, Format::Webm, Format::Gif, Format::Webp];
+    pub const STILL: [Format; 2] = [Format::Png, Format::Jpg];
+
+    pub fn is_still(self) -> bool {
+        matches!(self, Format::Png | Format::Jpg)
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -565,6 +589,8 @@ impl Format {
             Format::Webm => "WebM",
             Format::Gif => "GIF",
             Format::Webp => "WebP",
+            Format::Png => "PNG",
+            Format::Jpg => "JPG",
         }
     }
 
@@ -574,6 +600,8 @@ impl Format {
             Format::Webm => "webm",
             Format::Gif => "gif",
             Format::Webp => "webp",
+            Format::Png => "png",
+            Format::Jpg => "jpg",
         }
     }
 
@@ -583,12 +611,12 @@ impl Format {
         match self {
             Format::Mp4 => (146, 50),
             Format::Webm => (130, 66),
-            Format::Gif | Format::Webp => (2, 2),
+            Format::Gif | Format::Webp | Format::Png | Format::Jpg => (2, 2),
         }
     }
 
     pub fn has_quality(self) -> bool {
-        self != Format::Gif
+        !matches!(self, Format::Gif | Format::Png)
     }
 
     pub fn has_fps(self) -> bool {
@@ -609,6 +637,9 @@ pub struct Controls {
     pub gif_fps: u32,
     pub webp_fps: u32,
     pub webp_quality: Quality,
+    pub jpg_quality: Quality,
+    /// The format last chosen for the other kind of source, a still or not.
+    pub other_format: Format,
 }
 
 impl Default for Controls {
@@ -620,18 +651,29 @@ impl Default for Controls {
             gif_fps: 15,
             webp_fps: 20,
             webp_quality: Quality::Low,
+            jpg_quality: Quality::High,
+            other_format: Format::Png,
         }
     }
 }
 
 impl Controls {
-    /// The quality of the chosen format. GIF has none.
+    /// A still takes a still format, and anything else a moving one. Each
+    /// kind keeps the format last chosen for it.
+    pub fn suit(&mut self, still: bool) {
+        if self.format.is_still() != still {
+            std::mem::swap(&mut self.format, &mut self.other_format);
+        }
+    }
+
+    /// The quality of the chosen format. GIF and PNG have none.
     pub fn quality(&self) -> Option<Quality> {
         match self.format {
             Format::Mp4 => Some(self.mp4_quality),
             Format::Webm => Some(self.webm_quality),
-            Format::Gif => None,
+            Format::Gif | Format::Png => None,
             Format::Webp => Some(self.webp_quality),
+            Format::Jpg => Some(self.jpg_quality),
         }
     }
 
@@ -639,15 +681,16 @@ impl Controls {
         match self.format {
             Format::Mp4 => self.mp4_quality = quality,
             Format::Webm => self.webm_quality = quality,
-            Format::Gif => {}
+            Format::Gif | Format::Png => {}
             Format::Webp => self.webp_quality = quality,
+            Format::Jpg => self.jpg_quality = quality,
         }
     }
 
     /// The frame rate of the chosen format. MP4 and WebM keep the source rate.
     pub fn fps(&self) -> Option<u32> {
         match self.format {
-            Format::Mp4 | Format::Webm => None,
+            Format::Mp4 | Format::Webm | Format::Png | Format::Jpg => None,
             Format::Gif => Some(self.gif_fps),
             Format::Webp => Some(self.webp_fps),
         }
@@ -655,19 +698,23 @@ impl Controls {
 
     pub fn set_fps(&mut self, fps: u32) {
         match self.format {
-            Format::Mp4 | Format::Webm => {}
+            Format::Mp4 | Format::Webm | Format::Png | Format::Jpg => {}
             Format::Gif => self.gif_fps = fps,
             Format::Webp => self.webp_fps = fps,
         }
     }
 }
 
-/// `<source stem> <in>-<out>.<ext>`, for example `cat jump 0m03-0m07.mp4`.
+/// `<source stem> <in>-<out>.<ext>`, for example `cat jump 0m03-0m07.mp4`. A
+/// still has no range: `<source stem>.<ext>`.
 pub fn export_name(source: &Path, range: Range, format: Format) -> String {
     let stem = source
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
+    if format.is_still() {
+        return format!("{stem}.{}", format.extension());
+    }
     format!(
         "{stem} {}-{}.{}",
         stamp(range.start_ms),
@@ -883,6 +930,41 @@ mod tests {
             export_name(Path::new("a.b.webm"), range, Format::Mp4),
             "a.b 1m02-1h02m03.mp4"
         );
+    }
+
+    #[test]
+    fn a_still_name_has_no_range_and_gets_a_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("cat.png");
+        std::fs::write(&source, b"").unwrap();
+        let edit = Edit::still(source.clone(), (640, 480));
+        let name = export_name(&edit.source, edit.range, Format::Jpg);
+        assert_eq!(name, "cat.jpg");
+        assert_eq!(unique_path(dir.path(), &name), dir.path().join("cat.jpg"));
+        let name = export_name(&edit.source, edit.range, Format::Png);
+        assert_eq!(
+            unique_path(dir.path(), &name),
+            dir.path().join("cat (2).png")
+        );
+    }
+
+    #[test]
+    fn each_kind_of_source_keeps_its_own_format() {
+        let mut controls = Controls {
+            format: Format::Gif,
+            ..Controls::default()
+        };
+        controls.suit(false);
+        assert_eq!(controls.format, Format::Gif);
+        controls.suit(true);
+        assert_eq!(controls.format, Format::Png);
+        controls.format = Format::Jpg;
+        assert_eq!(controls.quality(), Some(Quality::High));
+        assert_eq!(controls.fps(), None);
+        controls.suit(false);
+        assert_eq!(controls.format, Format::Gif);
+        controls.suit(true);
+        assert_eq!(controls.format, Format::Jpg);
     }
 
     #[test]

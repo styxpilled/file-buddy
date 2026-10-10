@@ -6,12 +6,14 @@
 //! for a text field, a terminal or a chat message. Writing only the first makes
 //! the copy look broken everywhere text is expected, and only the second makes
 //! it look broken everywhere a file is expected.
+//!
+//! A screenshot is an image with no file, as `PNG` and as `CF_DIB`.
 
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use clipboard_win::options::NoClear;
-use clipboard_win::{Clipboard, raw};
+use clipboard_win::{Clipboard, formats, raw};
 
 /// Tries at opening the clipboard. Only one process may hold it at a time, and
 /// another one often holds it for a few milliseconds after a paste.
@@ -37,9 +39,70 @@ pub fn copy_file(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Put an image on the clipboard as the registered `PNG` format, which keeps
+/// alpha, and as `CF_DIB`, for applications that read only that. Returns the
+/// size of the image.
+pub fn copy_image(png: &[u8]) -> Result<(u32, u32)> {
+    let rgba = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| anyhow!("cannot read the frame: {e}"))?
+        .into_rgba8();
+    let size = rgba.dimensions();
+    let dib = dib(&rgba);
+    let png_format =
+        raw::register_format("PNG").ok_or_else(|| anyhow!("cannot register the PNG format"))?;
+
+    let _clipboard = Clipboard::new_attempts(ATTEMPTS)
+        .map_err(|e| anyhow!("another application is holding the clipboard: {e}"))?;
+    raw::empty().map_err(|e| anyhow!("cannot empty the clipboard: {e}"))?;
+    raw::set_without_clear(png_format.get(), png)
+        .map_err(|e| anyhow!("cannot write the PNG: {e}"))?;
+    raw::set_without_clear(formats::CF_DIB, &dib)
+        .map_err(|e| anyhow!("cannot write the bitmap: {e}"))?;
+    Ok(size)
+}
+
+/// A `BITMAPINFOHEADER` and 32-bit BGRA rows, bottom row first.
+fn dib(rgba: &image::RgbaImage) -> Vec<u8> {
+    const HEADER: u32 = 40;
+    let (width, height) = rgba.dimensions();
+    let pixels = width * height * 4;
+    let mut dib = Vec::with_capacity((HEADER + pixels) as usize);
+    dib.extend(HEADER.to_le_bytes());
+    dib.extend((width as i32).to_le_bytes());
+    dib.extend((height as i32).to_le_bytes());
+    dib.extend(1u16.to_le_bytes());
+    dib.extend(32u16.to_le_bytes());
+    // BI_RGB, the image size, the resolution and the palette.
+    dib.extend(0u32.to_le_bytes());
+    dib.extend(pixels.to_le_bytes());
+    dib.extend([0; 16]);
+    for row in rgba.rows().rev() {
+        for pixel in row {
+            let [r, g, b, a] = pixel.0;
+            dib.extend([b, g, r, a]);
+        }
+    }
+    dib
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dib_is_bottom_up_bgra_after_its_header() {
+        let mut rgba = image::RgbaImage::new(2, 2);
+        rgba.put_pixel(0, 0, image::Rgba([1, 2, 3, 4]));
+        rgba.put_pixel(1, 1, image::Rgba([5, 6, 7, 8]));
+        let dib = dib(&rgba);
+        assert_eq!(dib.len(), 40 + 16);
+        assert_eq!(&dib[..4], &40u32.to_le_bytes());
+        assert_eq!(&dib[4..12], &[2, 0, 0, 0, 2, 0, 0, 0]);
+        assert_eq!(&dib[14..16], &32u16.to_le_bytes());
+        // The bottom row comes first.
+        assert_eq!(&dib[40..48], &[0, 0, 0, 0, 7, 6, 5, 8]);
+        assert_eq!(&dib[48..56], &[3, 2, 1, 4, 0, 0, 0, 0]);
+    }
     use clipboard_win::Getter;
     use clipboard_win::formats::{FileList, Unicode};
     use std::path::PathBuf;

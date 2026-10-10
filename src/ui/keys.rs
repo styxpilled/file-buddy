@@ -66,6 +66,7 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("cycle_detail", Window, CycleDetail, ["i"]),
     action!("edit_rows", Window, EditRows, ["e"]),
     action!("open_in_studio", Window, OpenInStudio, ["c"]),
+    action!("screenshot", Window, Screenshot, ["p"]),
     action!("delete_row", Rows, DeleteRow, ["delete"]),
     action!("add_row", Rows, AddRow, ["l"]),
     action!("set_in", Studio, SetIn, ["["]),

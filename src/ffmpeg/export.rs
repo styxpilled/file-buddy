@@ -9,7 +9,7 @@ use std::process::Stdio;
 use anyhow::{Context, Result, bail};
 
 use crate::ffmpeg::{self, Tool};
-use crate::studio::{self, Controls, Crop, Edit, Format, Quality, Text};
+use crate::studio::{self, Controls, Crop, Edit, Format, MaxWidth, Quality, Text};
 
 /// H.264 needs even dimensions. This takes at most one pixel off an edge.
 const EVEN: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2";
@@ -53,23 +53,38 @@ fn webp_quality(quality: Quality) -> u8 {
     }
 }
 
+/// The `mjpeg` scale, from 2 to 31. Lower is better and larger.
+fn jpg_q(quality: Quality) -> u8 {
+    match quality {
+        Quality::Best => 2,
+        Quality::High => 3,
+        Quality::Medium => 5,
+        Quality::Low => 8,
+        Quality::Lower => 12,
+        Quality::Lowest => 18,
+    }
+}
+
 /// Everything after the shared options of `ffmpeg::command`. The trim is an
-/// input option, so FFmpeg does not decode what comes before the in point.
+/// input option, so FFmpeg does not decode what comes before the in point. A
+/// still has no trim.
 pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
     let range = edit.range;
     let mut args = Args::default();
-    args.push(&[
-        "-ss",
-        &seconds(range.start_ms),
-        "-t",
-        &seconds(range.len_ms()),
-    ]);
+    if !edit.still {
+        args.push(&[
+            "-ss",
+            &seconds(range.start_ms),
+            "-t",
+            &seconds(range.len_ms()),
+        ]);
+    }
     args.push(&["-i"]);
     args.0.push(edit.input.clone().into_os_string());
     args.push(&["-map", "0:v:0"]);
     match controls.format {
         Format::Mp4 | Format::Webm => args.push(&["-map", "0:a:0?"]),
-        Format::Gif | Format::Webp => args.push(&["-an"]),
+        Format::Gif | Format::Webp | Format::Png | Format::Jpg => args.push(&["-an"]),
     }
     args.push(&["-sn", "-dn", "-vf", &video_filter(edit, controls)]);
     let sound = matches!(controls.format, Format::Mp4 | Format::Webm);
@@ -104,6 +119,16 @@ pub fn args(edit: &Edit, controls: &Controls, output: &Path) -> Vec<OsString> {
             ]);
             args.push(&["-loop", "0", "-f", "webp"]);
         }
+        // `-update` takes the name as it is, so a `%` in it is no pattern.
+        Format::Png => args.push(&["-frames:v", "1", "-c:v", "png", "-update", "1"]),
+        Format::Jpg => {
+            let q = jpg_q(controls.jpg_quality).to_string();
+            args.push(&["-frames:v", "1", "-c:v", "mjpeg", "-q:v", &q]);
+            args.push(&["-pix_fmt", "yuvj444p", "-update", "1"]);
+        }
+    }
+    if controls.format.is_still() {
+        args.push(&["-f", "image2"]);
     }
     args.0.push(output.as_os_str().to_owned());
     args.0
@@ -157,17 +182,24 @@ fn text_filter(edit: &Edit, text: &Text) -> Option<String> {
     if edit.size.0 == 0 || edit.size.1 == 0 || text.trimmed().is_empty() {
         return None;
     }
-    let (start, end) = edit.text_window(text)?;
+    let enable = if edit.still {
+        String::new()
+    } else {
+        let (start, end) = edit.text_window(text)?;
+        format!(
+            ":enable={}",
+            escape(&format!("between(t,{start:.3},{end:.3})"))
+        )
+    };
     let output = edit.output_size();
     let font_px = text.font_px(output.1);
     let (x, y) = text.center_px(output);
     let y = y + Text::ascent_offset_px(font_px);
     let mut filter = format!(
         "drawtext=fontfile={}:expansion=none:text={}:fontsize={font_px}:fontcolor=white\
-         :text_align=C:y_align=font:x={x:.2}-text_w/2:y={y:.2}-text_h/2:enable={}",
+         :text_align=C:y_align=font:x={x:.2}-text_w/2:y={y:.2}-text_h/2{enable}",
         escape(studio::FONT_FILE),
         escape(text.trimmed()),
-        escape(&format!("between(t,{start:.3},{end:.3})")),
     );
     if text.boxed {
         filter.push_str(&format!(
@@ -222,6 +254,68 @@ impl Args {
 
 fn seconds(ms: u64) -> String {
     format!("{}.{:03}", ms / 1000, ms % 1000)
+}
+
+/// `p`. One frame at `at_ms` of the source as PNG on standard output, with
+/// the crop and the texts that show then. A seek before the input is exact,
+/// because FFmpeg decodes and drops the frames up to it.
+pub fn screenshot_args(edit: &Edit, at_ms: u64) -> Vec<OsString> {
+    let mut args = Args::default();
+    if !edit.still {
+        args.push(&["-ss", &seconds(at_ms)]);
+    }
+    args.push(&["-i"]);
+    args.0.push(edit.input.clone().into_os_string());
+    args.push(&["-map", "0:v:0", "-an", "-sn", "-dn"]);
+    let filter = screenshot_filter(edit, at_ms);
+    if !filter.is_empty() {
+        args.push(&["-vf", &filter]);
+    }
+    args.push(&[
+        "-frames:v",
+        "1",
+        "-c:v",
+        "png",
+        "-f",
+        "image2pipe",
+        "pipe:1",
+    ]);
+    args.0
+}
+
+/// The crop at its own size: no scale, and no pixel lost to an even size.
+fn screenshot_filter(edit: &Edit, at_ms: u64) -> String {
+    let frame = Edit {
+        max_width: MaxWidth::Source,
+        still: true,
+        ..edit.clone()
+    };
+    let mut filters = Vec::new();
+    let crop = edit.crop;
+    if edit.size.0 > 0 && edit.size.1 > 0 && crop != Crop::full(edit.size) {
+        filters.push(format!(
+            "crop={}:{}:{}:{}:exact=1",
+            crop.width, crop.height, crop.x, crop.y
+        ));
+    }
+    filters.extend(
+        edit.texts
+            .iter()
+            .filter(|text| edit.shows(text, at_ms))
+            .filter_map(|text| text_filter(&frame, text)),
+    );
+    filters.join(",")
+}
+
+/// The PNG bytes of one frame.
+pub fn screenshot(edit: &Edit, at_ms: u64) -> Result<Vec<u8>> {
+    let mut command = ffmpeg::command(Tool::Ffmpeg);
+    command.args(screenshot_args(edit, at_ms));
+    let png = ffmpeg::output(command).context("extract the frame")?;
+    if png.is_empty() {
+        bail!("FFmpeg gave no frame");
+    }
+    Ok(png)
 }
 
 /// Write the export to `destination`. FFmpeg writes a partial file beside it,
@@ -624,6 +718,159 @@ mod tests {
         let none = edit.add_text();
         edit.texts[none].words = "  \n ".into();
         assert_eq!(after(&strings_of(&edit, Controls::default()), "-vf"), EVEN);
+    }
+
+    #[test]
+    fn a_still_with_a_crop_and_a_text_is_one_frame_with_no_time() {
+        let mut edit = Edit::still("D:/pics/cat.png".into(), (1920, 1080));
+        edit.crop = Crop {
+            x: 100,
+            y: 50,
+            width: 1280,
+            height: 720,
+        };
+        edit.max_width = crate::studio::MaxWidth::Pixels(640);
+        let at = edit.add_text();
+        edit.texts[at].words = "hi".into();
+        let filter = concat!(
+            r"crop=1280:720:100:50,scale=640:360:flags=lanczos,",
+            r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
+            r":text=hi:fontsize=29:fontcolor=white:text_align=C:y_align=font",
+            r":x=320.00-text_w/2:y=180.48-text_h/2",
+        );
+        let with = |format| {
+            strings_of(
+                &edit,
+                Controls {
+                    format,
+                    ..Controls::default()
+                },
+            )
+        };
+        let start = [
+            "-i",
+            "D:/pics/cat.png",
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            filter,
+        ];
+        let expect = |rest: &[&str]| -> Vec<String> {
+            start
+                .iter()
+                .chain(rest)
+                .map(|arg| arg.to_string())
+                .collect()
+        };
+        assert_eq!(
+            with(Format::Png),
+            expect(&[
+                "-frames:v",
+                "1",
+                "-c:v",
+                "png",
+                "-update",
+                "1",
+                "-f",
+                "image2",
+                "D:/out/x.png.part"
+            ])
+        );
+        assert_eq!(
+            with(Format::Jpg),
+            expect(&[
+                "-frames:v",
+                "1",
+                "-c:v",
+                "mjpeg",
+                "-q:v",
+                "3",
+                "-pix_fmt",
+                "yuvj444p",
+                "-update",
+                "1",
+                "-f",
+                "image2",
+                "D:/out/x.jpg.part",
+            ])
+        );
+        let lowest = strings_of(
+            &edit,
+            Controls {
+                format: Format::Jpg,
+                jpg_quality: Quality::Lowest,
+                ..Controls::default()
+            },
+        );
+        assert_eq!(after(&lowest, "-q:v"), "18");
+    }
+
+    #[test]
+    fn a_screenshot_has_the_crop_at_its_own_size_and_the_texts_of_its_moment() {
+        let mut edit = edit();
+        edit.crop = Crop {
+            x: 101,
+            y: 50,
+            width: 641,
+            height: 481,
+        };
+        edit.max_width = MaxWidth::Pixels(320);
+        edit.speed = 2.;
+        let shown = edit.add_text();
+        edit.texts[shown].words = "now".into();
+        let later = edit.add_text();
+        edit.texts[later].words = "later".into();
+        edit.texts[later].start_ms = 6_000;
+        let args: Vec<String> = screenshot_args(&edit, 4_000)
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        let filter = concat!(
+            r"crop=641:481:101:50:exact=1,",
+            r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
+            r":text=now:fontsize=38:fontcolor=white:text_align=C:y_align=font",
+            r":x=320.00-text_w/2:y=240.62-text_h/2",
+        );
+        let expected = [
+            "-ss",
+            "4.000",
+            "-i",
+            "D:/cache/ab/abcd.proxy.mp4",
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            filter,
+            "-frames:v",
+            "1",
+            "-c:v",
+            "png",
+            "-f",
+            "image2pipe",
+            "pipe:1",
+        ];
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn a_raw_screenshot_has_no_filter_and_a_still_no_seek() {
+        let strings = |edit: &Edit| -> Vec<String> {
+            screenshot_args(edit, 1_500)
+                .into_iter()
+                .map(|arg| arg.into_string().unwrap())
+                .collect()
+        };
+        let pane = Edit::new("a.mp4".into(), "a.mp4".into(), 0, (0, 0));
+        let args = strings(&pane);
+        assert_eq!(&args[..4], ["-ss", "1.500", "-i", "a.mp4"]);
+        assert!(!args.contains(&"-vf".to_string()));
+        let still = Edit::still("b.png".into(), (640, 480));
+        assert_eq!(&strings(&still)[..2], ["-i", "b.png"]);
     }
 
     #[test]

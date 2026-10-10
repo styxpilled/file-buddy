@@ -222,8 +222,7 @@ pub(super) fn layer(
 
     let texts = edit.texts.iter().enumerate().filter_map(|(index, text)| {
         let selected = this.studio.selected_text == Some(index);
-        let showing = at_ms >= text.start_ms.max(edit.range.start_ms)
-            && at_ms < text.end_ms.min(edit.range.end_ms);
+        let showing = edit.shows(text, at_ms);
         if !(showing || selected) || text.trimmed().is_empty() {
             return None;
         }
@@ -373,14 +372,16 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
                     this.select_text(Some(index), window, cx);
                 }
             }))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .text_color(muted)
-                    .child(time(("text-start", index), text.start_ms))
-                    .child("-")
-                    .child(time(("text-end", index), text.end_ms)),
-            )
+            .when(!edit.still, |row| {
+                row.child(
+                    h_flex()
+                        .gap_1()
+                        .text_color(muted)
+                        .child(time(("text-start", index), text.start_ms))
+                        .child("-")
+                        .child(time(("text-end", index), text.end_ms)),
+                )
+            })
             .child(words)
     });
     let list = div()
