@@ -5,7 +5,10 @@
 //! of Review, the sort, the chips, the view buttons and the count.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, MouseDownEvent, SharedString, Window, WindowControlArea, div, px};
+use gpui::{
+    AnyElement, ClickEvent, Context, MouseDownEvent, SharedString, Window, WindowControlArea, div,
+    px,
+};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
 
@@ -239,7 +242,9 @@ fn chips(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .children(CHIPS.map(|(kind, label)| {
             toggle(kind.as_str(), label, this.kinds.contains(&kind))
                 .xsmall()
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_kind(kind, cx)))
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    this.toggle_kind(kind, event.modifiers().control, cx)
+                }))
         }))
         .into_any_element()
 }

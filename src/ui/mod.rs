@@ -336,7 +336,7 @@ impl FileBuddy {
             results: Vec::new(),
             listing: false,
             selected: 0,
-            kinds: vec![Kind::Video, Kind::Animated, Kind::Still],
+            kinds: KINDS.to_vec(),
             columns: 1,
             player: Player::default(),
             seek_bar: SeekBar::new(Clip::Pane, cx),
@@ -615,15 +615,9 @@ impl FileBuddy {
         }
     }
 
-    fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
-        if let Some(at) = self.kinds.iter().position(|k| *k == kind) {
-            // The last chip stays on. No chips would mean no results at all.
-            if self.kinds.len() > 1 {
-                self.kinds.remove(at);
-            }
-        } else {
-            self.kinds.push(kind);
-        }
+    /// A click on a chip. With `only`, a ctrl-click.
+    fn toggle_kind(&mut self, kind: Kind, only: bool, cx: &mut Context<Self>) {
+        self.kinds = toggled(&self.kinds, kind, only);
         self.run_search(cx);
         self.reload_review(cx);
     }
@@ -1094,10 +1088,55 @@ fn toggle(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) ->
         .cursor_pointer()
 }
 
+const KINDS: [Kind; 3] = [Kind::Video, Kind::Animated, Kind::Still];
+
+/// The kinds after a click on the chip of `kind`. A click turns it on or off,
+/// but the last chip stays on, as no chips would mean no results at all. A
+/// ctrl-click turns only that kind on, or every kind when it is the only one.
+fn toggled(kinds: &[Kind], kind: Kind, only: bool) -> Vec<Kind> {
+    let on = kinds.contains(&kind);
+    if only {
+        return if on && kinds.len() == 1 {
+            KINDS.to_vec()
+        } else {
+            vec![kind]
+        };
+    }
+    match (on, kinds.len()) {
+        (true, 1) => kinds.to_vec(),
+        (true, _) => kinds.iter().copied().filter(|k| *k != kind).collect(),
+        (false, _) => [kinds, &[kind]].concat(),
+    }
+}
+
 /// `1 file` or `3 files`, for a line that says what it touched.
 fn counted(files: usize) -> String {
     match files {
         1 => "1 file".to_string(),
         n => format!("{n} files"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Kind::{Animated, Still, Video};
+
+    #[test]
+    fn a_click_turns_a_chip_on_or_off_but_not_the_last() {
+        assert_eq!(toggled(&KINDS, Video, false), [Animated, Still]);
+        assert_eq!(toggled(&[Animated], Video, false), [Animated, Video]);
+        assert_eq!(toggled(&[Animated], Animated, false), [Animated]);
+    }
+
+    #[test]
+    fn a_ctrl_click_turns_only_that_chip_on() {
+        assert_eq!(toggled(&KINDS, Video, true), [Video]);
+        assert_eq!(toggled(&[Animated, Still], Video, true), [Video]);
+    }
+
+    #[test]
+    fn a_ctrl_click_on_the_only_chip_turns_every_chip_on() {
+        assert_eq!(toggled(&[Still], Still, true), KINDS);
     }
 }
