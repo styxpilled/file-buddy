@@ -155,8 +155,8 @@ with its delay, sits over the range.
 - `s` skips the selected frames, or plays them again. A skipped frame stays
   on the strip, faint, but has no time: it does not play and does not export.
   One frame always plays.
-- `g` shows a grid of every frame, each with a Skip and a Copy button. Copy
-  puts the frame on the clipboard as `p` does, with the crop and the texts.
+- `g` shows a grid of every frame. Copy in the frame menu puts the frame on
+  the clipboard as `p` does, with the crop and the texts.
   A drag in the grid moves the selected frames, as on the strip.
   The grid takes the room the letterbox leaves: above the stage for a frame
   wider than the stage, beside it for a narrower one, and from 30% to 60% of
@@ -185,7 +185,8 @@ the place of each frame below apply to an animated file too.
 - Each frame then has its own offset and scale on top of that. While the
   frames do not play, a drag on the preview moves the selected frame, and an
   edge near an edge of the canvas snaps to it. Ctrl and the wheel scale it.
-  Reset puts it back to the fit or fill. The frames do not play during a drag.
+  Reset in the frame menu puts it back to the fit or fill. The frames do not
+  play during a drag.
 - While a frame is selected, the frame before it shows faint over it, so the
   two can line up.
 - Each frame starts with a delay of 100 ms.
@@ -310,8 +311,16 @@ A right click on a tile or a table row opens a menu of file actions.
 - Copy, Reveal, Rename, Open, Open in Studio, More like this, Tag, then Trash,
   Delete and Forget. Each item shows its key.
 - An item that needs one file is disabled when the menu acts on several.
+- If the file is not marked, the right click clears the marks.
 - The side pane's file menu is identical. It gains Open in Studio, More like
   this and Tag. One list builds both menus.
+- A right click on a frame in the strip or the grid of the Studio opens a menu
+  of frame actions: Copy, Skip, Duplicate, Reset and Delete. It acts on the
+  selected frames, and a frame that is not selected is selected alone first.
+  The stage stays on the frame it shows.
+  Reset has no default key. The action is `reset_frames`.
+- The menu of a right click fades in. The arrow keys, enter and escape work
+  in the menu. Any other key closes it and then does what it does.
 
 ## Kind chips
 
@@ -350,6 +359,7 @@ New default keys, all of which can change through `[keys]`:
 | `ctrl-enter` | export |
 | `ctrl-d` | duplicate frames |
 | `s` | skip frames |
+| none | reset the place of frames, `reset_frames` |
 | `g` | frame grid |
 | none | forget, `forget_file` |
 

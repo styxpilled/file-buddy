@@ -1,13 +1,13 @@
-//! The frame grid: every frame of the strip at once, each with a button that
-//! skips it and one that copies it. It takes the room the letterbox leaves: it
+//! The frame grid: every frame of the strip at once, with the frame menu of the
+//! strip. It takes the room the letterbox leaves: it
 //! goes above the stage for a frame wider than the stage, and beside it for a
 //! narrower one. `g` shows and hides it. A drag moves the selected frames, as
 //! on the strip.
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, Div, DragMoveEvent, ElementId, Hsla, MouseButton,
-    MouseDownEvent, Render, Stateful, Window, div, px, rgb, uniform_list,
+    AnyElement, ClickEvent, Context, DragMoveEvent, Hsla, MouseButton, MouseDownEvent, Render,
+    Window, div, px, rgb, uniform_list,
 };
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
@@ -25,9 +25,8 @@ const CELL_MIN_WIDTH: f32 = 88.;
 const CELL_GAP: f32 = 4.;
 /// The room for the scrollbar beside the cells.
 const SCROLLBAR: f32 = 12.;
-/// The line under each frame, and the buttons under that.
+/// The line under each frame.
 const LABEL_LINE: f32 = 18.;
-const BUTTON_LINE: f32 = 22.;
 
 /// Where the stage and the grid go in the room of the stage.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -125,7 +124,7 @@ struct Layout {
 
 impl Layout {
     fn row_height(&self) -> f32 {
-        self.thumb_height + LABEL_LINE + BUTTON_LINE + CELL_GAP
+        self.thumb_height + LABEL_LINE + CELL_GAP
     }
 
     /// The gap between frames nearest a point of the grid, from 0 to `len`.
@@ -188,13 +187,6 @@ fn cell(
     let theme = cx.theme();
     let accent = Hsla::from(rgb(seek_bar::RANGE_COLOR));
     let (muted, secondary) = (theme.muted_foreground, theme.secondary);
-    let colors = ButtonColors {
-        idle: theme.secondary,
-        hover: theme.secondary_hover,
-        on: theme.background,
-        on_text: theme.muted_foreground,
-        text: theme.secondary_foreground,
-    };
     let room = (layout.cell_width - 4., layout.thumb_height - 4.);
     let (first, last) = edit.frame_range;
     let outside = index < first || index > last;
@@ -210,7 +202,7 @@ fn cell(
         .when(strip.drop_gap == Some(len) && index + 1 == len, |cell| {
             cell.child(marker(layout.cell_width + CELL_GAP / 2. - 1.))
         })
-        .child(
+        .child(strip::frame_menu(
             div()
                 .id(("grid-frame", index))
                 .h(px(layout.thumb_height))
@@ -243,7 +235,9 @@ fn cell(
                     this.click_frame(index, event, window, cx)
                 }))
                 .on_drag(GridDrag, |drag, _, _, cx| cx.new(|_| *drag)),
-        )
+            index,
+            cx,
+        ))
         .child(
             h_flex()
                 .h(px(LABEL_LINE))
@@ -258,54 +252,7 @@ fn cell(
                     },
                 )),
         )
-        .child(
-            h_flex()
-                .h(px(BUTTON_LINE))
-                .gap_1()
-                .child(
-                    button(("grid-skip", index), "Skip", frame.skipped, colors).on_click(
-                        cx.listener(move |this, _, _, cx| this.skip_frames(Some(index), cx)),
-                    ),
-                )
-                .child(
-                    button(("grid-copy", index), "Copy", false, colors)
-                        .on_click(cx.listener(move |this, _, _, cx| this.copy_frame(index, cx))),
-                ),
-        )
         .into_any_element()
-}
-
-#[derive(Clone, Copy)]
-struct ButtonColors {
-    idle: Hsla,
-    hover: Hsla,
-    on: Hsla,
-    on_text: Hsla,
-    text: Hsla,
-}
-
-/// A small button of two elements. The grid draws again on every frame while
-/// the frames play, and a kit button is many elements.
-fn button(
-    id: impl Into<ElementId>,
-    label: &'static str,
-    on: bool,
-    colors: ButtonColors,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex_1()
-        .h(px(BUTTON_LINE - 2.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(4.))
-        .text_xs()
-        .cursor_pointer()
-        .bg(if on { colors.on } else { colors.idle })
-        .text_color(if on { colors.on_text } else { colors.text })
-        .when(!on, |button| button.hover(|style| style.bg(colors.hover)))
-        .child(label)
 }
 
 #[cfg(test)]

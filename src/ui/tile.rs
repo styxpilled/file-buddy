@@ -9,7 +9,7 @@ use gpui_video::video as video_element;
 
 use super::folders::DROPPED;
 use super::grid::{TILE_HEIGHT, TILE_WIDTH};
-use super::preview;
+use super::{menu, preview};
 use crate::db::files::{FileRow, State};
 use crate::paths;
 use crate::search::folder::{Entry, Stray};
@@ -73,7 +73,7 @@ pub fn tile(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyE
         }
     };
 
-    v_flex()
+    let tile = v_flex()
         .id(("tile", index))
         .w(px(TILE_WIDTH))
         .gap_1()
@@ -146,8 +146,8 @@ pub fn tile(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyE
                 .truncate()
                 .child(name),
         )
-        .child(line)
-        .into_any_element()
+        .child(line);
+    menu::on_entry(tile, index, cx).into_any_element()
 }
 
 /// A click on a tile or a table row. Ctrl marks instead of selecting, the way a

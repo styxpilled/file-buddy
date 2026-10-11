@@ -20,10 +20,12 @@ use gpui::{
     MouseDownEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollHandle, Subscription,
     Task, UniformListScrollHandle, Window, black, div, img, px, rgb,
 };
+use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable, h_flex, v_flex};
 use image::RgbaImage;
 
 use super::frame_in;
@@ -33,7 +35,7 @@ use crate::studio::frames::{self, Frame, MIN_DELAY_MS};
 use crate::studio::sequence::{self, Place};
 use crate::studio::{Edit, Fit, MIN_CROP};
 use crate::ui::seek_bar::{self, Clip};
-use crate::ui::{FileBuddy, toggle};
+use crate::ui::{DeleteText, DuplicateFrames, FileBuddy, ResetFrames, SkipFrames, menu, toggle};
 
 const CELL_WIDTH: f32 = 64.;
 const CELL_GAP: f32 = 4.;
@@ -582,6 +584,25 @@ impl FileBuddy {
         cx.notify();
     }
 
+    /// A right click on a frame that is not selected selects it alone, as a
+    /// click does, but the stage stays on the frame it shows.
+    fn right_click_frame(
+        &mut self,
+        index: usize,
+        at: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let strip = &mut self.studio.strip;
+        if !strip.selected.contains(&index) {
+            frames::click(&mut strip.selected, &mut strip.anchor, index, false, false);
+            self.select_text(None, window, cx);
+            self.sync_delay_input(window, cx);
+        }
+        let items = frame_items(self, index, cx);
+        self.open_context_menu(at, items, window, cx);
+    }
+
     /// The selection changes, so the delay shows what the selected frames
     /// share.
     pub(super) fn sync_delay_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -794,7 +815,7 @@ impl FileBuddy {
         }
     }
 
-    fn reset_place(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn reset_place(&mut self, cx: &mut Context<Self>) {
         let targets = self.placed_targets();
         if let Some(edit) = &mut self.studio.edit {
             edit.reset_placed(&targets);
@@ -950,72 +971,75 @@ pub(super) fn strip(
     let room = (CELL_WIDTH - 4., THUMB_HEIGHT - 4.);
     let len = edit.frames.len();
     let step = CELL_WIDTH + CELL_GAP;
-    let cells = cells_in_sight(&strip.scroll, len, width).map(|index| {
-        let frame = &edit.frames[index];
-        let selected = strip.selected.contains(&index);
-        let gap_before = strip.drop_gap == Some(index);
-        div()
-            .id(("strip-frame", index))
-            .absolute()
-            .top_0()
-            .left(px(index as f32 * step))
-            .w(px(CELL_WIDTH))
-            .flex()
-            .flex_col()
-            .cursor_pointer()
-            .child(
-                div()
-                    .h(px(THUMB_HEIGHT))
-                    .w_full()
-                    .rounded(px(3.))
-                    .overflow_hidden()
-                    .bg(secondary)
-                    .border_2()
-                    .border_color(if selected {
-                        accent
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .child(
-                        div()
-                            .size_full()
-                            .when(frame.skipped, |thumb| thumb.opacity(SKIPPED_OPACITY))
-                            .child(thumb(this, edit, frame, room)),
-                    ),
-            )
-            .child(
-                div()
-                    .h(px(DELAY_LINE))
-                    .text_xs()
-                    .text_center()
-                    .text_color(if index == current && !frame.skipped {
-                        accent
-                    } else {
-                        muted
-                    })
-                    .child(if frame.skipped {
-                        "skip".to_string()
-                    } else {
-                        format!("{} ms", frame.delay_ms)
+    let cells = cells_in_sight(&strip.scroll, len, width)
+        .map(|index| {
+            let frame = &edit.frames[index];
+            let selected = strip.selected.contains(&index);
+            let gap_before = strip.drop_gap == Some(index);
+            let cell = div()
+                .id(("strip-frame", index))
+                .absolute()
+                .top_0()
+                .left(px(index as f32 * step))
+                .w(px(CELL_WIDTH))
+                .flex()
+                .flex_col()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .h(px(THUMB_HEIGHT))
+                        .w_full()
+                        .rounded(px(3.))
+                        .overflow_hidden()
+                        .bg(secondary)
+                        .border_2()
+                        .border_color(if selected {
+                            accent
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .child(
+                            div()
+                                .size_full()
+                                .when(frame.skipped, |thumb| thumb.opacity(SKIPPED_OPACITY))
+                                .child(thumb(this, edit, frame, room)),
+                        ),
+                )
+                .child(
+                    div()
+                        .h(px(DELAY_LINE))
+                        .text_xs()
+                        .text_center()
+                        .text_color(if index == current && !frame.skipped {
+                            accent
+                        } else {
+                            muted
+                        })
+                        .child(if frame.skipped {
+                            "skip".to_string()
+                        } else {
+                            format!("{} ms", frame.delay_ms)
+                        }),
+                )
+                .when(gap_before, |cell| {
+                    cell.child(gap_marker(accent, -CELL_GAP / 2. - 1.))
+                })
+                .when(strip.drop_gap == Some(len) && index + 1 == len, |cell| {
+                    cell.child(gap_marker(accent, CELL_WIDTH + CELL_GAP / 2. - 1.))
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                        this.press_frame(index, event.modifiers, window, cx)
                     }),
-            )
-            .when(gap_before, |cell| {
-                cell.child(gap_marker(accent, -CELL_GAP / 2. - 1.))
-            })
-            .when(strip.drop_gap == Some(len) && index + 1 == len, |cell| {
-                cell.child(gap_marker(accent, CELL_WIDTH + CELL_GAP / 2. - 1.))
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.press_frame(index, event.modifiers, window, cx)
-                }),
-            )
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                this.click_frame(index, event, window, cx)
-            }))
-            .on_drag(FrameDrag, |drag, _, _, cx| cx.new(|_| *drag))
-    });
+                )
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    this.click_frame(index, event, window, cx)
+                }))
+                .on_drag(FrameDrag, |drag, _, _, cx| cx.new(|_| *drag));
+            frame_menu(cell, index, cx)
+        })
+        .collect::<Vec<_>>();
     v_flex()
         .relative()
         .w(px(width))
@@ -1054,6 +1078,53 @@ pub(super) fn strip(
         )
         .horizontal_scrollbar(&strip.scroll)
         .into_any_element()
+}
+
+/// The menu of a frame on the strip or in the grid. It acts on the selected
+/// frames, as the keys do.
+pub(super) fn frame_menu<E>(element: E, index: usize, cx: &mut Context<FileBuddy>) -> AnyElement
+where
+    E: InteractiveElement + IntoElement,
+{
+    element
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.right_click_frame(index, event.position, window, cx)
+            }),
+        )
+        .into_any_element()
+}
+
+/// Copy, Skip, Duplicate, Reset and Delete.
+fn frame_items(
+    this: &FileBuddy,
+    index: usize,
+    cx: &mut Context<FileBuddy>,
+) -> impl FnOnce(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    let focus = this.studio.focus.clone();
+    let several = this.studio.strip.selected.len() > 1;
+    let copy = cx.entity().downgrade();
+    move |menu, _, _| {
+        menu.action_context(focus)
+            .item(
+                PopupMenuItem::new("Copy")
+                    .icon(menu::icon(IconName::Copy))
+                    .disabled(several)
+                    .on_click(move |_, _, cx| {
+                        copy.update(cx, |this, cx| this.copy_frame(index, cx)).ok();
+                    }),
+            )
+            .menu_with_icon("Skip", menu::icon(IconName::EyeOff), Box::new(SkipFrames))
+            .menu_with_icon(
+                "Duplicate",
+                menu::icon(Lucide::CopyPlus),
+                Box::new(DuplicateFrames),
+            )
+            .menu_with_icon("Reset", menu::icon(IconName::Undo2), Box::new(ResetFrames))
+            .separator()
+            .menu_with_icon("Delete", menu::icon(Lucide::Trash), Box::new(DeleteText))
+    }
 }
 
 fn gap_marker(color: Hsla, left: f32) -> impl IntoElement {
@@ -1148,8 +1219,7 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
         .into_any_element()
 }
 
-/// The canvas of a sequence, the fit or fill of its images, and Reset for the
-/// place of the selected frames.
+/// The canvas of a sequence, and the fit or fill of its images.
 fn canvas_controls(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let muted = cx.theme().muted_foreground;
     let [width, height] = &this.studio.strip.canvas_inputs;
@@ -1169,13 +1239,5 @@ fn canvas_controls(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -
         .child(div().flex_1())
         .child(fit_toggle(Fit::Fit, "Fit"))
         .child(fit_toggle(Fit::Fill, "Fill"))
-        .child(
-            Button::new("place-reset")
-                .xsmall()
-                .label("Reset")
-                .tooltip("Reset the place of the frame")
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.reset_place(cx))),
-        )
         .into_any_element()
 }

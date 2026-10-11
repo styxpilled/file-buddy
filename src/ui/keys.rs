@@ -77,6 +77,7 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("delete_text", Studio, DeleteText, ["delete"]),
     action!("duplicate_frames", Studio, DuplicateFrames, ["ctrl-d"]),
     action!("skip_frames", Studio, SkipFrames, ["s"]),
+    action!("reset_frames", Studio, ResetFrames, []),
     action!("toggle_frame_grid", Studio, ToggleFrameGrid, ["g"]),
 ];
 

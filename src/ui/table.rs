@@ -9,7 +9,7 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex, v_virtual_list};
 
 use super::folders::DROPPED;
-use super::{autoscroll, tile, when};
+use super::{autoscroll, menu, tile, when};
 use crate::db::files::{FileRow, State};
 use crate::media;
 use crate::search::folder::{Entry, Stray};
@@ -123,7 +123,7 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
         None => div(),
     };
 
-    line(
+    let row = line(
         name,
         [
             kind,
@@ -141,8 +141,8 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
     .cursor_pointer()
     .on_click(
         cx.listener(move |this, event, window, cx| tile::click(this, index, event, window, cx)),
-    )
-    .into_any_element()
+    );
+    menu::on_entry(row, index, cx).into_any_element()
 }
 
 /// One line of the table, the header included, so the columns line up.

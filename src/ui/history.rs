@@ -241,7 +241,9 @@ pub(super) fn mouse_buttons(cx: &mut Context<FileBuddy>) -> impl IntoElement {
                 if phase == DispatchPhase::Capture
                     && let MouseButton::Navigate(direction) = event.button
                 {
+                    // The menu never sees this button, as it stops here.
                     view.update(cx, |this, cx| {
+                        this.close_context_menu(window, cx);
                         this.go_history(direction == NavigationDirection::Forward, window, cx);
                     });
                     cx.stop_propagation();

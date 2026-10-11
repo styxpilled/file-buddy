@@ -104,6 +104,9 @@ Two things follow from that:
                       text matches, and the search by the look of files
       ui/             the window. The only directory that knows about GPUI
         mod.rs        the view, its actions, the results and the selection
+        menu.rs       the file actions as a menu: the side pane's and the right
+                      click on a tile or a row. The window draws the menu of a
+                      right click, so it fades in
         keys.rs       the default keys, the fixed keys, the `[keys]` changes
                       and the rules that join them
         header.rs     the page tabs, the search box, the notices and the window
@@ -142,10 +145,10 @@ Two things follow from that:
           strip.rs    frame mode: the frames as they decode, the strip, the
                       frame on the stage, playback by the delays, and the
                       delay in the panel, the canvas, the frame before at
-                      half opacity, and a drag and ctrl and the wheel on the
+                      half opacity, a drag and ctrl and the wheel on the
+                      stage, and the menu of a frame
+          grid.rs     frame mode: every frame at once, beside or above the
                       stage
-          grid.rs     frame mode: every frame at once, with Skip and Copy,
-                      beside or above the stage
         visual.rs     the visual half of a search, which merges in after the
                       text matches, and `a` with its escape steps
         sim.rs        simulated input for the dev window, behind the `sim`

@@ -7,12 +7,11 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Div, MouseButton, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, Stateful, Window, div, img, px, relative,
 };
-use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::DropdownMenu;
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
 use crate::db::edits::{self, Row, Table};
@@ -24,12 +23,13 @@ use crate::media::{self, Kind};
 use crate::paths;
 use crate::search::Hit;
 use crate::search::folder::Entry;
+use crate::ui::menu;
 use crate::ui::player::PressFrom;
 use crate::ui::rows::{RowInput, Target};
 use crate::ui::seek_bar::Clip;
 use crate::ui::{
-    CopyFile, DeleteFiles, Detail, FileBuddy, ForgetFile, OpenFile, RenameFile, RevealFile,
-    SIDE_PANE_WIDTH, TrashFiles, renamer, seek_bar, toggle, when,
+    CopyFile, Detail, FileBuddy, OpenFile, RevealFile, SIDE_PANE_WIDTH, renamer, seek_bar, toggle,
+    when,
 };
 
 /// What the pane keeps for the controls above the stage, and the seek bar, the
@@ -623,48 +623,36 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
     .into_any_element()
 }
 
-/// Copy, reveal, rename, open, trash, delete and forget. Each item dispatches the same
-/// action as its key, to the window, so the menu shows the key beside it. In
-/// the Studio the menu acts on the source, and the Studio has no name to
-/// rename and does not trash the file it edits.
+/// The file actions in the pane. In the Studio the menu acts on the source,
+/// and the Studio has no name to rename and does not trash the file it edits.
 fn file_menu(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyElement {
     let focus = match clip {
         Clip::Pane => this.focus.clone(),
         Clip::Studio => this.studio.focus.clone(),
     };
     let view = cx.entity().downgrade();
+    let several = view.clone();
     Button::new("file-menu")
         .small()
         .icon(IconName::Ellipsis)
         .tooltip("File actions")
         .cursor_pointer()
-        .dropdown_menu(move |menu, _, _| {
-            let pane = clip == Clip::Pane;
-            let menu = menu
-                .action_context(focus.clone())
-                .menu_with_icon("Copy", menu_icon(IconName::Copy), Box::new(CopyFile))
-                .menu_with_icon(
-                    "Reveal",
-                    menu_icon(IconName::FolderOpen),
-                    Box::new(RevealFile),
-                );
-            let menu = if pane {
-                menu.menu_with_icon("Rename", menu_icon(IconName::Replace), Box::new(RenameFile))
-            } else {
-                menu
-            };
-            let menu = menu.menu_with_icon(
-                "Open",
-                menu_icon(IconName::ExternalLink),
-                Box::new(OpenFile),
-            );
-            if pane {
-                menu.separator()
-                    .menu_with_icon("Trash", menu_icon(Lucide::Trash), Box::new(TrashFiles))
-                    .menu_with_icon("Delete", menu_icon(Lucide::Shredder), Box::new(DeleteFiles))
-                    .menu_with_icon("Forget", menu_icon(Lucide::DatabaseX), Box::new(ForgetFile))
-            } else {
-                menu
+        .dropdown_menu(move |menu, _, cx| {
+            let menu = menu.action_context(focus.clone());
+            match clip {
+                Clip::Pane => menu::file_items(menu, menu::several(&several, cx)),
+                Clip::Studio => menu
+                    .menu_with_icon("Copy", menu::icon(IconName::Copy), Box::new(CopyFile))
+                    .menu_with_icon(
+                        "Reveal",
+                        menu::icon(IconName::FolderOpen),
+                        Box::new(RevealFile),
+                    )
+                    .menu_with_icon(
+                        "Open",
+                        menu::icon(IconName::ExternalLink),
+                        Box::new(OpenFile),
+                    ),
             }
         })
         // The window takes focus back on every frame, which would close the
@@ -673,12 +661,6 @@ fn file_menu(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyEl
             view.update(cx, |this, _| this.menu_open = *open).ok();
         })
         .into_any_element()
-}
-
-/// The menu puts 4 px between an icon and its label, and cannot be told
-/// otherwise, so the icon carries one more.
-fn menu_icon(name: impl Into<Icon>) -> Icon {
-    name.into().mr(px(1.))
 }
 
 /// The kind, the length, the size, how long ago the file changed, and the

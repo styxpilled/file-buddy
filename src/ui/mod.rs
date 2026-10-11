@@ -11,6 +11,7 @@ mod header;
 mod history;
 mod indexing;
 mod keys;
+mod menu;
 mod player;
 mod preview;
 mod renamer;
@@ -137,6 +138,7 @@ gpui_kit::actions!(
         DeleteText,
         DuplicateFrames,
         SkipFrames,
+        ResetFrames,
         ToggleFrameGrid
     ]
 );
@@ -198,8 +200,10 @@ pub struct FileBuddy {
     key_problems: Vec<String>,
     /// Takes the next key while the Keys section of Settings captures one.
     _key_capture: Subscription,
+    _menu_keys: Subscription,
     /// The file menu in the side pane is open and holds focus.
     menu_open: bool,
+    context_menu: Option<menu::OpenMenu>,
     /// The folder the Folders page shows, or `None` for the list of roots. It
     /// stays when the page closes, so the page opens where the user left it.
     folder: Option<PathBuf>,
@@ -352,7 +356,9 @@ impl FileBuddy {
             rows: None,
             key_problems: keys::resolve(&config.keys).problems(),
             _key_capture: settings::capture_keys(cx),
+            _menu_keys: menu::close_on_keys(cx),
             menu_open: false,
+            context_menu: None,
             folder: None,
             dropped: false,
             folder_sort: Sort::Name,
@@ -732,6 +738,7 @@ impl FileBuddy {
             && self.rows.is_none()
             && self.settings().is_none()
             && !self.menu_open
+            && self.context_menu.is_none()
         {
             window.focus(&held.clone(), cx);
         }
@@ -1074,6 +1081,7 @@ impl Render for FileBuddy {
             })
             .child(tagger::panel(self, cx))
             .child(history::mouse_buttons(cx))
+            .children(menu::open_menu(self))
     }
 }
 

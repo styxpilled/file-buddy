@@ -38,8 +38,8 @@ use crate::studio::{
 use crate::ui::player::{Transport, open_video};
 use crate::ui::seek_bar::{self, Clip, SeekBar};
 use crate::ui::{
-    AddText, DeleteText, DuplicateFrames, ExportEdit, FileBuddy, Page, SetIn, SetOut, SkipFrames,
-    ToggleFrameGrid, header, preview, toggle,
+    AddText, DeleteText, DuplicateFrames, ExportEdit, FileBuddy, Page, ResetFrames, SetIn, SetOut,
+    SkipFrames, ToggleFrameGrid, header, preview, toggle,
 };
 
 const PANEL_WIDTH: f32 = 320.;
@@ -711,6 +711,7 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
             cx.listener(|this, _: &DuplicateFrames, window, cx| this.duplicate_frames(window, cx)),
         )
         .on_action(cx.listener(|this, _: &SkipFrames, _, cx| this.skip_frames(None, cx)))
+        .on_action(cx.listener(|this, _: &ResetFrames, _, cx| this.reset_place(cx)))
         .on_action(cx.listener(|this, _: &ToggleFrameGrid, _, cx| this.toggle_frame_grid(cx)))
         .child(
             v_flex()
