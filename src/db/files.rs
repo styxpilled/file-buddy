@@ -83,6 +83,8 @@ pub struct Scanned<'a> {
     pub kind: Kind,
     pub size: u64,
     pub mtime: i64,
+    /// Outside every root. See `index::dropped`.
+    pub dropped: bool,
 }
 
 /// Insert the file, or update the row that holds this path. A rename is a new
@@ -103,9 +105,16 @@ pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
         Some((id, hash)) if hash == file.hash => {
             conn.execute(
                 "UPDATE files SET filename = ?2, size = ?3, mtime = ?4, seen_at = ?5,
-                        missing_at = NULL
+                        missing_at = NULL, dropped = ?6
                  WHERE id = ?1",
-                params![id, filename, file.size as i64, file.mtime, now()],
+                params![
+                    id,
+                    filename,
+                    file.size as i64,
+                    file.mtime,
+                    now(),
+                    file.dropped
+                ],
             )?;
             Ok((id, Upsert::Unchanged))
         }
@@ -114,7 +123,7 @@ pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
                 "UPDATE files SET hash = ?2, filename = ?3, kind = ?4, size = ?5, mtime = ?6,
                         duration = NULL, width = NULL, height = NULL, video_codec = NULL,
                         audio_codec = NULL, state = 'pending', error = NULL, seen_at = ?7,
-                        missing_at = NULL
+                        missing_at = NULL, dropped = ?8
                  WHERE id = ?1",
                 params![
                     id,
@@ -123,15 +132,16 @@ pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
                     file.kind.as_str(),
                     file.size as i64,
                     file.mtime,
-                    now()
+                    now(),
+                    file.dropped
                 ],
             )?;
             Ok((id, Upsert::Changed))
         }
         None => {
             conn.execute(
-                "INSERT INTO files (path, hash, filename, kind, size, mtime, seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO files (path, hash, filename, kind, size, mtime, seen_at, dropped)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     path,
                     file.hash,
@@ -139,7 +149,8 @@ pub fn upsert(conn: &Connection, file: &Scanned<'_>) -> Result<(i64, Upsert)> {
                     file.kind.as_str(),
                     file.size as i64,
                     file.mtime,
-                    now()
+                    now(),
+                    file.dropped
                 ],
             )?;
             let id = conn.last_insert_rowid();
@@ -275,6 +286,73 @@ pub fn mark_gone(conn: &Connection, id: i64) -> Result<()> {
     // Deleted, so the index row goes with it. Missing, so it is out of the way
     // until the file comes back.
     fts::refresh(conn, id)
+}
+
+/// Every dropped path, present or missing, so a scan can find one that came
+/// back.
+pub fn dropped_paths(conn: &Connection) -> Result<Vec<PathBuf>> {
+    let mut statement = conn.prepare("SELECT path FROM files WHERE dropped")?;
+    let rows = statement.query_map([], |row| Ok(PathBuf::from(row.get::<_, String>(0)?)))?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The dropped files on disk, for the Dropped entry of the Folders page.
+pub fn dropped(conn: &Connection) -> Result<Vec<FileRow>> {
+    let mut statement = conn.prepare(&format!("{PRESENT} AND dropped"))?;
+    let rows = statement.query_map([], read_row)?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Whether a file on disk has this path in the index.
+pub fn is_present(conn: &Connection, path: &Path) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM files WHERE path = ?1 AND missing_at IS NULL)",
+        [path.to_string_lossy()],
+        |row| row.get(0),
+    )?)
+}
+
+pub fn any_dropped(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM files WHERE dropped AND missing_at IS NULL)",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+pub fn is_dropped(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row("SELECT dropped FROM files WHERE id = ?1", [id], |row| {
+            row.get(0)
+        })
+        .optional()?
+        .unwrap_or(false))
+}
+
+/// Take the path out of the index as `mark_gone` does, then drop its row. The
+/// tags stay with the hash.
+pub fn forget(conn: &Connection, id: i64) -> Result<()> {
+    mark_gone(conn, id)?;
+    conn.execute("DELETE FROM files WHERE id = ?1", [id])?;
+    fts::refresh(conn, id)
+}
+
+/// Drop what the stages made from these bytes, so they run again. Rows the
+/// user edited stay, with the rest of their table.
+pub fn clear_results(conn: &Connection, hash: &str) -> Result<()> {
+    for table in ["jobs", "vectors"] {
+        conn.execute(&format!("DELETE FROM {table} WHERE hash = ?1"), [hash])?;
+    }
+    for table in ["segments", "ocr"] {
+        conn.execute(
+            &format!(
+                "DELETE FROM {table} WHERE hash = ?1
+                   AND NOT EXISTS (SELECT 1 FROM {table} WHERE hash = ?1 AND edited)"
+            ),
+            [hash],
+        )?;
+    }
+    Ok(())
 }
 
 /// Mark every path that the walk did not see. Returns how many are now missing.

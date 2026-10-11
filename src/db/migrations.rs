@@ -19,8 +19,15 @@ pub fn migrations() -> Migrations<'static> {
         M::up(OCR_LINES_WITH_TIMES),
         M::up(EDITED_ROWS),
         M::up(READ_ANIMATED_WEBP),
+        M::up(RECORD_DROPPED_FILES),
     ])
 }
+
+/// Issue 45. A file dropped on the window from outside every root. The scan
+/// does not mark it missing for being outside the roots.
+const RECORD_DROPPED_FILES: &str = r#"
+ALTER TABLE files ADD COLUMN dropped INTEGER NOT NULL DEFAULT 0;
+"#;
 
 /// Issue 35. FFmpeg cannot decode an animated WebP, so each one failed every
 /// stage after a probe that took it for an empty still. Every WebP is probed

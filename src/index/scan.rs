@@ -11,6 +11,7 @@ use walkdir::WalkDir;
 use crate::db::{Db, files, fts};
 use crate::ffmpeg::thumbnail;
 use crate::index::jobs::{self, Stage};
+use crate::index::watch;
 use crate::media::{Kind, hash};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -46,7 +47,7 @@ pub fn scan(db: &mut Db, roots: &[PathBuf], ignore: &GlobSet, cache: &Path) -> R
             let Some(kind) = Kind::from_path(path) else {
                 continue;
             };
-            match visit(db.conn(), path, kind, cache) {
+            match visit(db.conn(), path, kind, false, cache) {
                 Ok((id, outcome)) => {
                     seen_ids.push(id);
                     match outcome {
@@ -63,6 +64,21 @@ pub fn scan(db: &mut Db, roots: &[PathBuf], ignore: &GlobSet, cache: &Path) -> R
         }
     }
 
+    // A dropped file stays while it is on disk. One under a root is a root file
+    // now, and the walk has seen it.
+    for path in files::dropped_paths(db.conn())? {
+        let Some(kind) = Kind::from_path(&path) else {
+            continue;
+        };
+        if !path.is_file() || watch::under_root(&path, roots).is_some() {
+            continue;
+        }
+        match visit(db.conn(), &path, kind, true, cache) {
+            Ok((id, _)) => seen_ids.push(id),
+            Err(e) => log::warn!("skipped {}: {e:#}", path.display()),
+        }
+    }
+
     stats.missing = files::mark_missing(db.conn_mut(), &seen_ids)?;
     Ok(stats)
 }
@@ -73,6 +89,7 @@ pub(crate) fn visit(
     conn: &Connection,
     path: &Path,
     kind: Kind,
+    dropped: bool,
     cache: &Path,
 ) -> Result<(i64, files::Upsert)> {
     let metadata = std::fs::metadata(path)?;
@@ -93,6 +110,7 @@ pub(crate) fn visit(
             kind,
             size,
             mtime,
+            dropped,
         },
     )?;
 

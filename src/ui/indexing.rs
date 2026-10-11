@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use globset::GlobSet;
-use gpui::Context;
 use gpui::prelude::*;
+use gpui::{Context, Task};
 
 use crate::config::Paused;
 use crate::db::Db;
@@ -173,39 +173,55 @@ impl FileBuddy {
     }
 
     /// Run `walk` over the database in the background, then the cheap stages
-    /// for what it queued, then `done` on the window. Two at once would walk
-    /// the same files twice, so a scan asked for meanwhile waits for this one.
-    fn update_index<T: Send + 'static>(
+    /// for what it queued, then `done` on the window.
+    pub(super) fn update_index<T: Send + 'static>(
         &mut self,
         walk: impl FnOnce(&mut Db, &GlobSet, &Path) -> Result<T> + Send + 'static,
         done: impl FnOnce(&mut Self, Result<T>, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
-        let Ok(ignore) = self.config.ignore_set() else {
-            self.status = "the ignore globs are not valid".into();
+        let Some(work) = self.index_work(walk, cx) else {
             return;
         };
-        let db_path = self.db_path.clone();
-        let cache = self.cache.clone();
-        self.indexer.scanning = true;
         cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_spawn(async move {
-                    let value = walk(&mut Db::open(&db_path)?, &ignore, &cache)?;
-                    index::run(&db_path, &cache)?;
-                    Ok(value)
-                })
-                .await;
+            let result = work.await;
             this.update(cx, |this, cx| {
-                this.indexer.scanning = false;
                 done(this, result, cx);
-                if std::mem::take(&mut this.indexer.rescan_after) {
-                    this.rescan(cx);
-                }
+                this.index_done(cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// The background half of `update_index`, for a caller that needs the
+    /// window when it ends. It calls `index_done` after.
+    pub(super) fn index_work<T: Send + 'static>(
+        &mut self,
+        walk: impl FnOnce(&mut Db, &GlobSet, &Path) -> Result<T> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) -> Option<Task<Result<T>>> {
+        let Ok(ignore) = self.config.ignore_set() else {
+            self.status = "the ignore globs are not valid".into();
+            return None;
+        };
+        let db_path = self.db_path.clone();
+        let cache = self.cache.clone();
+        self.indexer.scanning = true;
+        Some(cx.background_spawn(async move {
+            let value = walk(&mut Db::open(&db_path)?, &ignore, &cache)?;
+            index::run(&db_path, &cache)?;
+            Ok(value)
+        }))
+    }
+
+    /// Two walks at once would visit the same files twice, so a scan asked for
+    /// meanwhile waits for this one.
+    pub(super) fn index_done(&mut self, cx: &mut Context<Self>) {
+        self.indexer.scanning = false;
+        if std::mem::take(&mut self.indexer.rescan_after) {
+            self.rescan(cx);
+        }
     }
 
     /// A path that was still being written comes back once. Unreadable twice
@@ -227,7 +243,7 @@ impl FileBuddy {
     /// minutes of work where speech is hours. The queue is durable, so a
     /// restart continues it, and a run that is already going picks up the jobs
     /// a later scan queues.
-    fn index_text(&mut self, stage: Stage, cx: &mut Context<Self>) {
+    pub(super) fn index_text(&mut self, stage: Stage, cx: &mut Context<Self>) {
         if let Some(running) = self.indexer.stage {
             self.indexer.restart_after |= stage == Stage::Ocr && running != Stage::Ocr;
             return;

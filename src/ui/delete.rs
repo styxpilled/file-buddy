@@ -14,7 +14,7 @@ use crate::ui::{FileBuddy, counted};
 impl FileBuddy {
     /// The files a delete acts on: every marked result, as the grid shows them,
     /// or the selection.
-    fn delete_targets(&self) -> Vec<FileRow> {
+    pub(super) fn delete_targets(&self) -> Vec<FileRow> {
         if self.marked.is_empty() {
             return self
                 .selected_hit()

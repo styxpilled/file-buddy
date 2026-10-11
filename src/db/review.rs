@@ -183,6 +183,7 @@ mod tests {
                 kind: Kind::Video,
                 size: 1,
                 mtime: 0,
+                dropped: false,
             },
         )
         .unwrap()

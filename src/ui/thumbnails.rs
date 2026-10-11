@@ -89,6 +89,17 @@ impl Thumbnails {
         None
     }
 
+    /// Let go of the pictures of these bytes, so new ones are read again.
+    pub(super) fn forget(&mut self, hash: &str, cache: &Path) {
+        for path in [
+            paths::thumbnail_path(cache, hash),
+            paths::tile_path(cache, hash),
+        ] {
+            self.items.remove(&gpui::hash(&Resource::Path(path.into())));
+        }
+        self.failed.remove(hash);
+    }
+
     fn evict(&mut self, window: &mut Window, cx: &mut App) {
         let Some(oldest) = self
             .items

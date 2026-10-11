@@ -67,6 +67,7 @@ impl<T> History<T> {
 pub(super) struct Step {
     page: Page,
     folder: Option<PathBuf>,
+    dropped: bool,
     query: String,
     likes: Vec<Like>,
     group: Option<Group>,
@@ -102,6 +103,7 @@ impl FileBuddy {
         Step {
             page: self.page(),
             folder: self.folder.clone(),
+            dropped: self.dropped,
             query: self.input.read(cx).value().to_string(),
             likes: self.visual.likes_without_results(),
             group: self.review().map(|review| review.group),
@@ -137,6 +139,7 @@ impl FileBuddy {
         };
         self.end_autoscroll(cx);
         self.folder = step.folder;
+        self.dropped = step.dropped;
         self.visual.set_likes(step.likes);
         self.input
             .update(cx, |input, cx| input.set_value(step.query, window, cx));
@@ -324,6 +327,7 @@ mod tests {
         let step = |page, folder: Option<PathBuf>| Step {
             page,
             folder,
+            dropped: false,
             query: String::new(),
             likes: Vec::new(),
             group: None,

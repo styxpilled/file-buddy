@@ -34,7 +34,7 @@ pub fn grid(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
             .child(match this.page() {
                 Page::Review => "Nothing to review in this group.",
                 Page::Folders if !this.listing => "Nothing in this folder matches.",
-                Page::Folders if this.folder.is_some() => "This folder is empty.",
+                Page::Folders if this.folder.is_some() || this.dropped => "This folder is empty.",
                 _ => "Nothing here. Check the roots in file-buddy.toml.",
             })
             .into_any_element();

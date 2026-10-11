@@ -7,15 +7,17 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::os::windows::io::FromRawHandle;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
-    AnyWindowHandle, App, AsyncApp, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase, Window, point, px,
+    AnyWindowHandle, App, AsyncApp, ExternalPaths, FileDropEvent, KeyDownEvent, KeyUpEvent,
+    Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase, Window, point,
+    px,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -231,6 +233,35 @@ impl Sim {
                         .timer(Duration::from_millis(10))
                         .await;
                 }
+                "ok".to_string()
+            }
+            // `drop:x,y,path|path`: files dropped from Explorer at x, y.
+            "drop" => {
+                let mut parts = value.splitn(3, ',');
+                let at = coordinates::<2>(&format!(
+                    "{},{}",
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default()
+                ))?;
+                let paths = ExternalPaths(
+                    parts
+                        .next()
+                        .context("no paths")?
+                        .split('|')
+                        .map(PathBuf::from)
+                        .collect(),
+                );
+                let position =
+                    handle.update(cx, |_, window, _| to_logical(window, (at[0], at[1])))??;
+                let entered = FileDropEvent::Entered { position, paths };
+                dispatch(handle, cx, PlatformInput::FileDrop(entered))?;
+                // A frame between the two, so the drop lands on what is drawn
+                // under the pointer.
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let submit = FileDropEvent::Submit { position };
+                dispatch(handle, cx, PlatformInput::FileDrop(submit))?;
                 "ok".to_string()
             }
             "scroll" => {

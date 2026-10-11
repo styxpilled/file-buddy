@@ -84,6 +84,8 @@ Two things follow from that:
         mod.rs
         jobs.rs       the durable queue
         scan.rs       the walk over the roots
+        dropped.rs    files dropped on the window from outside the roots, and
+                      forget, which scans a root file again from the start
         watch.rs      the watcher over the roots and the incremental scan
         pipeline.rs   the thread pool. When a stage runs, and what a failure means
         stages/       what a stage produces
@@ -128,7 +130,9 @@ Two things follow from that:
         renamer.rs    the rename input in the side pane
         delete.rs     `delete` and `shift-delete` on the marked files or the
                       selection
-        folders.rs    the Folders page: the folder, the breadcrumb, the sort
+        dropped.rs    a drop from Explorer, and `forget_file`
+        folders.rs    the Folders page: the folder or the dropped files, the
+                      breadcrumb, the sort
         review.rs     the Review page, its groups and the rename walk
         settings.rs   the Settings page
         studio/       the Studio page

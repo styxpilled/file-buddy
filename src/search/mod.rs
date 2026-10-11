@@ -80,6 +80,8 @@ pub struct Request {
     pub kinds: Vec<Kind>,
     /// Only files under this folder, at any depth.
     pub within: Option<PathBuf>,
+    /// Only files dropped on the window from outside the roots.
+    pub dropped: bool,
     /// The most results of a query. Browse lists every file.
     pub limit: usize,
     /// The order of Browse. A query keeps its ranking.
@@ -92,6 +94,7 @@ impl Request {
             text: text.into(),
             kinds: Vec::new(),
             within: None,
+            dropped: false,
             limit: 500,
             sort: Sort::Recent,
         }
@@ -104,6 +107,11 @@ impl Request {
 
     pub fn within(mut self, folder: Option<PathBuf>) -> Self {
         self.within = folder;
+        self
+    }
+
+    pub fn dropped(mut self, dropped: bool) -> Self {
+        self.dropped = dropped;
         self
     }
 
@@ -274,6 +282,9 @@ fn filters(request: &Request, values: &mut Vec<Value>, table: &str) -> String {
         let at = values.len();
         clauses += &format!(" AND substr({table}path, 1, length(?{at})) = ?{at}");
     }
+    if request.dropped {
+        clauses += &format!(" AND {table}dropped");
+    }
     clauses
 }
 
@@ -346,6 +357,7 @@ mod tests {
             kind: Kind::Video,
             size: 1,
             mtime: 1,
+            dropped: false,
         };
         files::upsert(db.conn(), &scanned).unwrap();
         crate::db::fts::rebuild(db.conn()).unwrap();
@@ -365,6 +377,7 @@ mod tests {
                 kind: Kind::Video,
                 size,
                 mtime,
+                dropped: false,
             };
             files::upsert(db.conn(), &scanned).unwrap();
         }

@@ -7,6 +7,7 @@ use gpui::{AnyElement, App, ClickEvent, Context, Hsla, Window, div, img, px};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex};
 use gpui_video::video as video_element;
 
+use super::folders::DROPPED;
 use super::grid::{TILE_HEIGHT, TILE_WIDTH};
 use super::preview;
 use crate::db::files::{FileRow, State};
@@ -43,6 +44,15 @@ pub fn tile(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyE
                 .text_color(cx.theme().muted_foreground)
                 .into_any_element(),
             this.folder_name(path),
+            cx.theme().foreground,
+            div().into_any_element(),
+        ),
+        Entry::Dropped => (
+            Icon::new(IconName::Inbox)
+                .large()
+                .text_color(cx.theme().muted_foreground)
+                .into_any_element(),
+            DROPPED.to_string(),
             cx.theme().foreground,
             div().into_any_element(),
         ),
@@ -156,7 +166,7 @@ pub(super) fn click(
         this.renamer_follows(window, cx);
         if event.click_count() == 2 {
             match this.results.get(index) {
-                Some(Entry::Folder(_)) => this.activate(window, cx),
+                Some(Entry::Folder(_) | Entry::Dropped) => this.activate(window, cx),
                 Some(Entry::File(_)) => this.open_in_studio(window, cx),
                 _ => {}
             }

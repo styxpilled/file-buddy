@@ -47,8 +47,9 @@ Things to know:
 
 ### What sim cannot do
 
-- Native Windows UI: the shell's delete dialogs, a drop from Explorer, the
-  title bar buttons, and a paste into another application.
+- Native Windows UI: the shell's delete dialogs, the title bar buttons, and a
+  paste into another application. A drop from Explorer has its own step in
+  sim only: `drop:x,y,path|path`.
 - Anything that depends on the active window. The window never becomes active.
 - `hover` cannot read the cursor. It moves the pointer, so a picture shows the
   hover state, but the reply says `unknown`.

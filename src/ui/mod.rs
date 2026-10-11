@@ -4,6 +4,7 @@
 
 mod autoscroll;
 mod delete;
+mod dropped;
 mod folders;
 mod grid;
 mod header;
@@ -33,8 +34,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, ElementId, Entity, FocusHandle, Focusable, KeyUpEvent, ScrollStrategy,
-    SharedString, Subscription, Task, Window, div, px,
+    App, Context, ElementId, Entity, ExternalPaths, FocusHandle, Focusable, KeyUpEvent,
+    ScrollStrategy, SharedString, Subscription, Task, Window, div, px,
 };
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
@@ -125,6 +126,7 @@ gpui_kit::actions!(
         HistoryForward,
         TrashFiles,
         DeleteFiles,
+        ForgetFile,
         ShowStudio,
         OpenInStudio,
         Screenshot,
@@ -201,6 +203,8 @@ pub struct FileBuddy {
     /// The folder the Folders page shows, or `None` for the list of roots. It
     /// stays when the page closes, so the page opens where the user left it.
     folder: Option<PathBuf>,
+    /// The Folders page shows the dropped files. `folder` is `None` then.
+    dropped: bool,
     /// The order of a folder on the Folders page, and of Browse with nothing
     /// typed. A query keeps its ranking.
     folder_sort: Sort,
@@ -350,6 +354,7 @@ impl FileBuddy {
             _key_capture: settings::capture_keys(cx),
             menu_open: false,
             folder: None,
+            dropped: false,
             folder_sort: Sort::Name,
             browse_sort: Sort::Recent,
             table: false,
@@ -463,6 +468,7 @@ impl FileBuddy {
         let request = search::Request::new(text)
             .kinds(self.kinds.clone())
             .within(within)
+            .dropped(self.page() == Page::Folders && self.dropped)
             .sort(self.sort());
         match search::search(self.db.conn(), &request, &self.config.weights) {
             Ok(hits) => {
@@ -604,6 +610,7 @@ impl FileBuddy {
                 let path = path.clone();
                 self.open_folder(Some(path), window, cx);
             }
+            Some(Entry::Dropped) => self.open_dropped(window, cx),
             _ => self.copy_selected(cx),
         }
     }
@@ -943,6 +950,10 @@ impl Render for FileBuddy {
             }))
             .on_action(cx.listener(|this, _: &DeleteFiles, window, cx| {
                 this.delete_files(DeleteMode::Delete, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ForgetFile, _, cx| this.forget_files(cx)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                this.add_dropped(paths.paths().to_vec(), window, cx)
             }))
             .on_action(cx.listener(|this, _: &Activate, window, cx| this.activate(window, cx)))
             .on_action(cx.listener(|this, _: &GoUp, window, cx| this.go_up(window, cx)))

@@ -147,7 +147,7 @@ fn interesting(event: &Event, roots: &[PathBuf], ignore: &GlobSet) -> Vec<PathBu
 /// The path under the root that holds it, joined to the root as the
 /// configuration writes it. The watcher reports `D:\clips\a.mp4` where a root
 /// of `D:/clips` puts `D:/clips\a.mp4` in the database.
-fn under_root(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
+pub(crate) fn under_root(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
     let parts = comparable(path);
     let rest_of = |root: &Path, from: usize| -> PathBuf {
         let rest: PathBuf = path
@@ -209,7 +209,7 @@ pub fn apply(
             files::set_path(db.conn(), row.id, &path)?;
             stats.moved += 1;
         }
-        match scan::visit(db.conn(), &path, kind, cache) {
+        match scan::visit(db.conn(), &path, kind, false, cache) {
             Ok((_, files::Upsert::Added)) => stats.added += 1,
             Ok((_, files::Upsert::Changed)) => stats.changed += 1,
             Ok((_, files::Upsert::Unchanged)) => {}

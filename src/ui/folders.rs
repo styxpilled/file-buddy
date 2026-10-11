@@ -9,11 +9,13 @@ use gpui::{AnyElement, Context, SharedString, Window};
 use gpui_kit::component::breadcrumb::{Breadcrumb, BreadcrumbItem};
 use gpui_kit::component::{Sizable, h_flex};
 
-use crate::db::files::FileRow;
+use crate::db::files::{self, FileRow};
 use crate::search::folder::{self as listing, Entry, Sort};
 use crate::ui::{FileBuddy, Page, counted, toggle};
 
 pub(super) const BROWSE_PLACEHOLDER: &str = "search database";
+/// The entry after the roots that lists the dropped files.
+pub(super) const DROPPED: &str = "Dropped";
 
 impl FileBuddy {
     /// The contents of the folder the Folders page shows, or the roots.
@@ -25,15 +27,29 @@ impl FileBuddy {
         {
             self.folder = self.parent_folder(dir);
         }
+        let any_dropped = files::any_dropped(self.db.conn()).unwrap_or_else(|e| {
+            log::error!("reading the dropped files failed: {e:#}");
+            false
+        });
+        // The last dropped file can leave while the page shows them.
+        self.dropped &= any_dropped;
+        if self.dropped {
+            return match listing::dropped(self.db.conn(), &self.kinds, self.folder_sort) {
+                Ok(entries) => {
+                    self.status = counted(entries.len()).into();
+                    entries
+                }
+                Err(e) => {
+                    log::error!("listing the dropped files failed: {e:#}");
+                    self.status = format!("cannot list the dropped files: {e:#}").into();
+                    Vec::new()
+                }
+            };
+        }
         let Some(dir) = &self.folder else {
             self.status = folders_counted(self.config.roots.len()).into();
-            return self
-                .config
-                .roots
-                .iter()
-                .cloned()
-                .map(Entry::Folder)
-                .collect();
+            let roots = self.config.roots.iter().cloned().map(Entry::Folder);
+            return roots.chain(any_dropped.then_some(Entry::Dropped)).collect();
         };
         let listed = self.config.ignore_set().and_then(|ignore| {
             listing::list(self.db.conn(), dir, &ignore, &self.kinds, self.folder_sort)
@@ -78,9 +94,25 @@ impl FileBuddy {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if folder != self.folder {
+        self.open_place(folder, false, window, cx);
+    }
+
+    /// The Dropped entry of the roots list.
+    pub(super) fn open_dropped(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_place(None, true, window, cx);
+    }
+
+    fn open_place(
+        &mut self,
+        folder: Option<PathBuf>,
+        dropped: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if folder != self.folder || dropped != self.dropped {
             self.record_step(cx);
         }
+        let left_dropped = std::mem::replace(&mut self.dropped, dropped);
         let left = std::mem::replace(&mut self.folder, folder);
         self.end_likes();
         if !self.input.read(cx).value().is_empty() {
@@ -89,12 +121,12 @@ impl FileBuddy {
         }
         self.run_search(cx);
         // Up a level, the folder the user came out of stays selected.
-        if let Some(left) = left
-            && let Some(at) = self
-                .results
-                .iter()
-                .position(|entry| matches!(entry, Entry::Folder(path) if *path == left))
-        {
+        let came_from = |entry: &Entry| match entry {
+            Entry::Folder(path) => left.as_ref() == Some(path),
+            Entry::Dropped => left_dropped,
+            _ => false,
+        };
+        if let Some(at) = self.results.iter().position(came_from) {
             self.select(at, cx);
         }
     }
@@ -104,7 +136,9 @@ impl FileBuddy {
         if self.page() != Page::Folders {
             return;
         }
-        if let Some(dir) = &self.folder {
+        if self.dropped {
+            self.open_folder(None, window, cx);
+        } else if let Some(dir) = &self.folder {
             let parent = self.parent_folder(dir);
             self.open_folder(parent, window, cx);
         }
@@ -136,6 +170,7 @@ impl FileBuddy {
     /// On the Folders page the search box says where it searches.
     pub(super) fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let wanted: SharedString = match (self.page(), &self.folder) {
+            (Page::Folders, None) if self.dropped => "search in dropped files".into(),
             (Page::Folders, None) => "search in directories".into(),
             (Page::Folders, Some(dir)) => display(dir).into(),
             _ => BROWSE_PLACEHOLDER.into(),
@@ -176,6 +211,12 @@ pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
     }
 
     let view = cx.entity();
+    let dropped = this.dropped.then(|| {
+        let view = view.clone();
+        BreadcrumbItem::new(DROPPED).on_click(move |_, window, cx| {
+            view.update(cx, |this, cx| this.open_dropped(window, cx));
+        })
+    });
     Breadcrumb::new()
         .children(stops.into_iter().map(|(label, folder)| {
             let view = view.clone();
@@ -184,6 +225,7 @@ pub fn breadcrumb(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 view.update(cx, |this, cx| this.open_folder(folder, window, cx));
             })
         }))
+        .children(dropped)
         .into_any_element()
 }
 

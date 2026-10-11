@@ -57,6 +57,7 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("rename_file", Window, RenameFile, ["r", "ctrl-r", "f2"]),
     action!("trash_files", Window, TrashFiles, ["delete"]),
     action!("delete_files", Window, DeleteFiles, ["shift-delete"]),
+    action!("forget_file", Window, ForgetFile, []),
     action!("review_duplicates", Window, ReviewDuplicates, ["alt-1"]),
     action!("review_same_names", Window, ReviewSameNames, ["alt-2"]),
     action!("review_long", Window, ReviewLong, ["alt-3"]),

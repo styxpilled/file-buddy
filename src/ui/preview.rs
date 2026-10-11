@@ -28,8 +28,8 @@ use crate::ui::player::PressFrom;
 use crate::ui::rows::{RowInput, Target};
 use crate::ui::seek_bar::Clip;
 use crate::ui::{
-    CopyFile, DeleteFiles, Detail, FileBuddy, OpenFile, RenameFile, RevealFile, SIDE_PANE_WIDTH,
-    TrashFiles, renamer, seek_bar, toggle, when,
+    CopyFile, DeleteFiles, Detail, FileBuddy, ForgetFile, OpenFile, RenameFile, RevealFile,
+    SIDE_PANE_WIDTH, TrashFiles, renamer, seek_bar, toggle, when,
 };
 
 /// What the pane keeps for the controls above the stage, and the seek bar, the
@@ -62,6 +62,9 @@ pub fn pane(this: &FileBuddy, window: &mut Window, cx: &mut Context<FileBuddy>) 
     let Some(hit) = this.selected_hit() else {
         let text = match this.results.get(this.selected) {
             Some(Entry::Folder(_)) => "A folder. Enter opens it.".to_string(),
+            Some(Entry::Dropped) => {
+                "The files dropped on the window. Enter opens them.".to_string()
+            }
             Some(Entry::Stray { path, why, .. }) => {
                 format!("{}: {}", FileRow::name_of(path), why.as_str())
             }
@@ -620,7 +623,7 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
     .into_any_element()
 }
 
-/// Copy, reveal, rename, open, trash and delete. Each item dispatches the same
+/// Copy, reveal, rename, open, trash, delete and forget. Each item dispatches the same
 /// action as its key, to the window, so the menu shows the key beside it. In
 /// the Studio the menu acts on the source, and the Studio has no name to
 /// rename and does not trash the file it edits.
@@ -659,6 +662,7 @@ fn file_menu(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyEl
                 menu.separator()
                     .menu_with_icon("Trash", menu_icon(Lucide::Trash), Box::new(TrashFiles))
                     .menu_with_icon("Delete", menu_icon(Lucide::Shredder), Box::new(DeleteFiles))
+                    .menu_with_icon("Forget", menu_icon(Lucide::DatabaseX), Box::new(ForgetFile))
             } else {
                 menu
             }

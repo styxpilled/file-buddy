@@ -699,7 +699,7 @@ fn a_folder_lists_its_folders_then_its_files_then_what_the_search_cannot_find() 
         .map(|entry| {
             let name = files::FileRow::name_of(entry.path());
             let what = match entry {
-                Entry::Folder(_) => "folder",
+                Entry::Folder(_) | Entry::Dropped => "folder",
                 Entry::File(_) => "file",
                 Entry::Stray { why, .. } => why.as_str(),
             };

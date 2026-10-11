@@ -115,6 +115,7 @@ mod tests {
                 kind: Kind::Video,
                 size: 5,
                 mtime: 0,
+                dropped: false,
             },
         )
         .unwrap();

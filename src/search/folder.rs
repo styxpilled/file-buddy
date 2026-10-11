@@ -17,6 +17,8 @@ use crate::search::{Hit, Signal};
 #[derive(Debug, Clone)]
 pub enum Entry {
     Folder(PathBuf),
+    /// The files dropped on the window from outside the roots, after the roots.
+    Dropped,
     File(Hit),
     /// On disk, but no search finds it.
     Stray {
@@ -97,12 +99,13 @@ impl Entry {
         match self {
             Entry::Folder(path) | Entry::Stray { path, .. } => path,
             Entry::File(hit) => &hit.file.path,
+            Entry::Dropped => Path::new(""),
         }
     }
 
     pub fn size(&self) -> Option<u64> {
         match self {
-            Entry::Folder(_) => None,
+            Entry::Folder(_) | Entry::Dropped => None,
             Entry::File(hit) => Some(hit.file.size),
             Entry::Stray { size, .. } => Some(*size),
         }
@@ -111,7 +114,7 @@ impl Entry {
     /// Seconds since the Unix epoch.
     pub fn mtime(&self) -> Option<i64> {
         match self {
-            Entry::Folder(_) => None,
+            Entry::Folder(_) | Entry::Dropped => None,
             Entry::File(hit) => Some(hit.file.mtime),
             Entry::Stray { mtime, .. } => Some(*mtime),
         }
@@ -136,6 +139,7 @@ impl Entry {
     pub fn key(&self) -> String {
         match self {
             Entry::File(hit) => hit.file.hash.clone(),
+            Entry::Dropped => "dropped".into(),
             other => other.path().to_string_lossy().into_owned(),
         }
     }
@@ -209,20 +213,11 @@ pub fn list(
     pending.sort_by_cached_key(by_file);
     strays.sort_by_cached_key(|(why, path, size, mtime)| (*why, sort.key(path, *mtime, *size)));
 
-    let file = |file: FileRow| {
-        Entry::File(Hit {
-            file,
-            score: 0.0,
-            signal: Signal::Filename,
-            matched: String::new(),
-            at_ms: None,
-        })
-    };
     Ok(folders
         .into_iter()
         .map(Entry::Folder)
-        .chain(ready.into_iter().map(file))
-        .chain(pending.into_iter().map(file))
+        .chain(ready.into_iter().map(file_entry))
+        .chain(pending.into_iter().map(file_entry))
         .chain(
             strays
                 .into_iter()
@@ -234,6 +229,26 @@ pub fn list(
                 }),
         )
         .collect())
+}
+
+/// The dropped files, sorted as a folder sorts its files.
+pub fn dropped(conn: &Connection, kinds: &[Kind], sort: Sort) -> Result<Vec<Entry>> {
+    let mut rows: Vec<FileRow> = files::dropped(conn)?
+        .into_iter()
+        .filter(|file| kinds.is_empty() || kinds.contains(&file.kind))
+        .collect();
+    rows.sort_by_cached_key(|file| sort.key(&file.path, file.mtime, file.size));
+    Ok(rows.into_iter().map(file_entry).collect())
+}
+
+fn file_entry(file: FileRow) -> Entry {
+    Entry::File(Hit {
+        file,
+        score: 0.0,
+        signal: Signal::Filename,
+        matched: String::new(),
+        at_ms: None,
+    })
 }
 
 fn seconds(metadata: &std::fs::Metadata) -> i64 {

@@ -8,6 +8,7 @@ use gpui::{AnyElement, Context, Div, Hsla, div, px, transparent_black};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex, v_flex, v_virtual_list};
 
+use super::folders::DROPPED;
 use super::{autoscroll, tile, when};
 use crate::db::files::{FileRow, State};
 use crate::media;
@@ -78,6 +79,15 @@ fn row(this: &FileBuddy, index: usize, cx: &mut Context<FileBuddy>) -> AnyElemen
                 .child(text(&this.folder_name(path), theme.foreground))
                 .into_any_element(),
             text("folder", muted),
+        ),
+        Entry::Dropped => (
+            h_flex()
+                .gap_1()
+                .min_w_0()
+                .child(Icon::new(IconName::Inbox).xsmall().text_color(muted))
+                .child(text(DROPPED, theme.foreground))
+                .into_any_element(),
+            text("dropped", muted),
         ),
         Entry::File(hit) if hit.file.state == State::Pending => (
             text(&hit.file.filename, theme.warning).into_any_element(),

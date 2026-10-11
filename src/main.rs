@@ -26,7 +26,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 static PROFILER: std::sync::Mutex<Option<dhat::Profiler>> = std::sync::Mutex::new(None);
 
 // The icons beyond the ones gpui-kit embeds for its components.
-icon_assets!(ExtraIcons, [Trash, Shredder]);
+icon_assets!(ExtraIcons, [Trash, Shredder, DatabaseX]);
 
 struct AppAssets;
 

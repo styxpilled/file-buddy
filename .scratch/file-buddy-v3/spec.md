@@ -267,7 +267,8 @@ already takes the drop on Windows, as `ExternalPaths`.
 - A scan does not mark a dropped file missing because no root holds it. The
   scan checks that the file is still on disk.
 - The roots list of the Folders page has a Dropped entry after the roots,
-  while any dropped file exists. It lists the dropped files.
+  while any dropped file exists. It lists the dropped files, and a query typed
+  there searches only them.
 - After a drop, the window opens the Dropped entry and selects the first
   dropped file. The header says how many files joined. A file that is
   already in the index does not join again.
@@ -285,17 +286,20 @@ already takes the drop on Windows, as `ExternalPaths`.
 - `ctrl-v` in a text input pastes text as before. This is the one key with
   `ctrl` that does not work everywhere.
 
-### Delete from database
+### Forget
 
-This removes a dropped file from the index and leaves it on disk.
+This takes the marked files, or the selection, out of the index and leaves
+them on disk. It is the way out when an error leaves a file in a bad state.
 
-- It works only on dropped files. A root file would come back on the next scan.
-  With files marked, it skips the root files among them, and the header says
-  how many it skipped.
 - The file leaves the index as a file the watcher finds gone does, and then
   its row goes. Its tags stay with its bytes, as for a deleted file.
+- A dropped file stays out of the index.
+- A root file is scanned again at once. The stage results and the thumbnail of
+  its bytes go first, so every stage runs again from the start. A row of speech
+  or text that the user edited stays, with the rest of its table.
+- The header says how many files it forgot and how many it scans again.
 - It has no default key. The action is `forget_file`, so a key can be given in
-  `[keys]`.
+  `[keys]`. The side pane's file menu has it as Forget.
 
 ## Context menu
 
@@ -304,11 +308,10 @@ A right click on a tile or a table row opens a menu of file actions.
 - If the file is marked, the menu acts on all the marked files. If not, the
   click selects the file first, and the menu acts on it.
 - Copy, Reveal, Rename, Open, Open in Studio, More like this, Tag, then Trash,
-  Delete and Delete from database. Each item shows its key.
+  Delete and Forget. Each item shows its key.
 - An item that needs one file is disabled when the menu acts on several.
-  Delete from database is disabled when none of the files is dropped.
 - The side pane's file menu is identical. It gains Open in Studio, More like
-  this, Tag and Delete from database. One list builds both menus.
+  this and Tag. One list builds both menus.
 
 ## Kind chips
 
@@ -348,7 +351,7 @@ New default keys, all of which can change through `[keys]`:
 | `ctrl-d` | duplicate frames |
 | `s` | skip frames |
 | `g` | frame grid |
-| none | delete from database, `forget_file` |
+| none | forget, `forget_file` |
 
 In the Studio, `delete` removes the selected text or frames. The Studio is a
 context inside the window, as the rows of the Speech and Text tabs are, so its
@@ -388,8 +391,8 @@ from an edit, for each format; the text position and size math after a crop
 and a scale; even output dimensions; the export name and its collision suffix;
 the RIFF check for animated WebP; the frame durations to a constant rate; frame
 delete, duplicate and move with their delays; the fit and fill math with an
-offset and a scale; root or dropped for a path; the skip rule of delete from
-database; the chip ctrl-click; the escape order; captions from segments, with
+offset and a scale; root or dropped for a path; forget of a dropped file and of
+a root file; the chip ctrl-click; the escape order; captions from segments, with
 the cut at the range ends and the line wrap; and the tags an export gets.
 
 One integration test exports a fixture in each format and probes the results.
@@ -411,8 +414,8 @@ Issues continue from v2, in `issues/`:
 | 42 | Screenshot. It can be built at any time |
 | 43 | Frame mode for GIF and animated WebP |
 | 44 | Image sequence. Needs 43 |
-| 45 | Dropped files, and delete from database |
-| 46 | Context menu. Needs 36 for Open in Studio and 45 for Delete from database |
+| 45 | Dropped files, and forget |
+| 46 | Context menu. Needs 36 for Open in Studio and 45 for Forget |
 | 47 | Ctrl-click on a kind chip. It can be built at any time |
 | 48 | Escape clears the query. It can be built at any time |
 | 49 | Side pane minimum width. It can be built at any time |
