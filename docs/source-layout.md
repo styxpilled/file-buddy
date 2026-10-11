@@ -36,6 +36,8 @@ Two things follow from that:
         frames.rs     frame mode: the frames of a GIF or a WebP in memory, and
                       the range of whole frames, and delete, duplicate,
                       move, skip and delay on the strip
+        sequence.rs   an image sequence: stills on a canvas with fit or fill,
+                      each frame's offset and scale, and the composed frame
       clip/           visual, as vectors, through ONNX Runtime
         mod.rs        the runtime DLLs, the model config, the vector math
         image.rs      the image encoder, which the `clip` worker loads once
@@ -132,10 +134,12 @@ Two things follow from that:
         studio/       the Studio page
           mod.rs      the preview that loops the range, the crop box, the
                       panel, and the export while it runs
-          text.rs     the texts on the preview and the Text tab of the panel
+          text.rs     the texts on the preview and their list in the panel
           strip.rs    frame mode: the frames as they decode, the strip, the
                       frame on the stage, playback by the delays, and the
-                      delay in the panel
+                      delay in the panel, the canvas, the frame before at
+                      half opacity, and a drag and ctrl and the wheel on the
+                      stage
           grid.rs     frame mode: every frame at once, with Skip and Copy,
                       beside or above the stage
         visual.rs     the visual half of a search, which merges in after the

@@ -2,9 +2,13 @@
 //! its delay, the frame the stage shows, and playback by the delays. A click
 //! selects a frame, shift-click a run and ctrl-click one more, and a drag
 //! moves the selected frames. The frames decode on a background thread and
-//! join the strip as they come, so the edit opens on the first one.
+//! join the strip as they come, so the edit opens on the first one. While the
+//! frames do not play, a drag on the stage moves the selected frames on the
+//! canvas and ctrl and the wheel scale them, with the frame before it faint
+//! over it.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,8 +17,8 @@ use futures::channel::mpsc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, ClickEvent, Context, DragMoveEvent, Entity, Hsla, Modifiers, MouseButton,
-    MouseDownEvent, Render, RenderImage, ScrollHandle, Subscription, Task, UniformListScrollHandle,
-    Window, div, img, px, rgb,
+    MouseDownEvent, Pixels, Point, Render, RenderImage, ScrollDelta, ScrollHandle, Subscription,
+    Task, UniformListScrollHandle, Window, black, div, img, px, rgb,
 };
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -25,8 +29,9 @@ use image::RgbaImage;
 use super::frame_in;
 use crate::actions::clipboard;
 use crate::ffmpeg::export;
-use crate::studio::Edit;
 use crate::studio::frames::{self, Frame, MIN_DELAY_MS};
+use crate::studio::sequence::{self, Place};
+use crate::studio::{Edit, Fit, MIN_CROP};
 use crate::ui::seek_bar::{self, Clip};
 use crate::ui::{FileBuddy, toggle};
 
@@ -45,6 +50,17 @@ pub(super) const HEIGHT: f32 = THUMB_HEIGHT + DELAY_LINE + SCROLLBAR + 4.;
 const DELAY_INPUT: f32 = 64.;
 /// A skipped frame, on the strip and in the grid.
 pub(super) const SKIPPED_OPACITY: f32 = 0.35;
+/// The frame before the selected one.
+const UNDER_OPACITY: f32 = 0.3;
+/// The canvas of a sequence where no image covers it.
+const CANVAS_SHADE: f32 = 0.35;
+/// How near an edge of the canvas, in screen pixels, a moved frame snaps to it.
+const PLACE_SNAP: f32 = 8.;
+/// The scale of one wheel line on a frame or a text. Windows turns a notch
+/// into three lines.
+const WHEEL_STEP: f64 = 1.04;
+/// The input of a canvas side.
+const CANVAS_INPUT: f32 = 52.;
 
 pub(in crate::ui) struct Strip {
     pub(super) selected: BTreeSet<usize>,
@@ -63,6 +79,12 @@ pub(in crate::ui) struct Strip {
     pub(super) thumbs: HashMap<usize, Arc<RenderImage>>,
     /// The frame on the stage, at full size, by image.
     shown: Option<(usize, Arc<RenderImage>)>,
+    shown_index: usize,
+    /// In a sequence, the frame before the selected one: its index, its image
+    /// key and its image.
+    under: Option<(usize, usize, Arc<RenderImage>)>,
+    /// A drag on the stage of a sequence.
+    place_grab: Option<PlaceGrab>,
     /// The gap the drag would put the selected frames in.
     pub(super) drop_gap: Option<usize>,
     /// A drag just moved the frames, so its release is no click.
@@ -73,6 +95,16 @@ pub(in crate::ui) struct Strip {
     pub(super) grid_scroll: UniformListScrollHandle,
     pub(in crate::ui) delay_input: Entity<InputState>,
     _delay_events: Subscription,
+    /// The width and the height of the canvas of a sequence.
+    pub(in crate::ui) canvas_inputs: [Entity<InputState>; 2],
+    _canvas_events: [Subscription; 2],
+}
+
+/// The frames a drag on the stage moves, each with its place when it started.
+struct PlaceGrab {
+    from: Point<Pixels>,
+    starts: Vec<(usize, Place)>,
+    dragging: bool,
 }
 
 /// The selected frames, while a drag holds them.
@@ -144,7 +176,40 @@ impl Strip {
                 }
             },
         );
+        let canvas_inputs = ["width", "height"]
+            .map(|side| cx.new(|cx| InputState::new(window, cx).placeholder(side)));
+        let canvas_events = [0, 1].map(|side| {
+            cx.subscribe_in(
+                &canvas_inputs[side],
+                window,
+                move |this, input, event: &InputEvent, window, cx| {
+                    let typed = input.read(cx).value().trim().parse::<u32>().ok();
+                    match event {
+                        // A side under the smallest crop may be on the way to a
+                        // larger one.
+                        InputEvent::Change => {
+                            if let Some(pixels @ MIN_CROP..) = typed {
+                                this.set_canvas_side(side, pixels, cx);
+                            }
+                        }
+                        InputEvent::PressEnter { .. } => {
+                            if let Some(pixels) = typed {
+                                this.set_canvas_side(side, pixels, cx);
+                            }
+                            this.sync_canvas_inputs(window, cx);
+                            window.focus(&this.studio.focus, cx);
+                        }
+                        _ => {}
+                    }
+                },
+            )
+        });
         Self {
+            shown_index: 0,
+            under: None,
+            place_grab: None,
+            canvas_inputs,
+            _canvas_events: canvas_events,
             selected: BTreeSet::new(),
             anchor: 0,
             at_ms: 0.,
@@ -186,11 +251,55 @@ impl Strip {
             .set_offset(gpui::point(px(-to.clamp(0., most)), px(0.)));
     }
 
+    /// The full-size images of the stage: the frame on it, and the frame
+    /// under it. An image already made is kept. Returns whether the frame on
+    /// the stage changed.
+    fn sync_images(
+        &mut self,
+        edit: &Edit,
+        index: usize,
+        under: Option<usize>,
+        window: &mut Window,
+        cx: &mut gpui::App,
+    ) -> bool {
+        let shown_key = key(&edit.frames[index]);
+        let under = under.map(|at| (at, key(&edit.frames[at])));
+        let had_under = self.under.as_ref().map(|(at, key, _)| (*at, *key));
+        let same_shown = self
+            .shown
+            .as_ref()
+            .is_some_and(|(key, _)| *key == shown_key);
+        if same_shown && had_under == under {
+            return false;
+        }
+        let mut old: Vec<(usize, Arc<RenderImage>)> = self
+            .shown
+            .take()
+            .into_iter()
+            .chain(self.under.take().map(|(_, key, image)| (key, image)))
+            .collect();
+        let made = |old: &[(usize, Arc<RenderImage>)], key: usize, frame: &Frame| {
+            old.iter()
+                .find(|(had, _)| *had == key)
+                .map(|(_, image)| image.clone())
+                .unwrap_or_else(|| render_image(&frame.image))
+        };
+        let shown = made(&old, shown_key, &edit.frames[index]);
+        self.under = under.map(|(at, key)| (at, key, made(&old, key, &edit.frames[at])));
+        self.shown = Some((shown_key, shown));
+        old.retain(|(key, _)| *key != shown_key && under.is_none_or(|(_, under)| under != *key));
+        for (_, image) in old {
+            cx.drop_image(image, Some(window));
+        }
+        !same_shown
+    }
+
     /// The page closed. The clock starts again when the frames play.
     pub(super) fn stop(&mut self) {
         self.clock = None;
         self.tick = None;
         self.drop_gap = None;
+        self.place_grab = None;
     }
 }
 
@@ -201,6 +310,7 @@ impl FileBuddy {
         let old: Vec<_> = std::mem::take(&mut strip.thumbs)
             .into_values()
             .chain(strip.shown.take().map(|(_, image)| image))
+            .chain(strip.under.take().map(|(_, _, image)| image))
             .collect();
         for image in old {
             cx.drop_image(image, Some(window));
@@ -213,24 +323,48 @@ impl FileBuddy {
         strip.stop();
         strip.moved = false;
         self.sync_delay_input(window, cx);
+        self.sync_canvas_inputs(window, cx);
     }
 
-    /// Opens a GIF or an animated WebP in frame mode. The frames decode away
-    /// from the window, and the edit opens with the first of them.
-    pub(super) fn open_frames(
+    /// Stills as a sequence, in the order given. The first of them names it.
+    pub(super) fn open_sequence(
         &mut self,
-        path: std::path::PathBuf,
+        paths: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.flash("opening the frames", false, cx);
+        let first = paths[0].clone();
+        self.open_frames(first, Some(paths), window, cx);
+    }
+
+    /// Opens a GIF or an animated WebP in frame mode, or with `stills` a
+    /// sequence. The frames decode away from the window, and the edit opens
+    /// with the first of them.
+    pub(super) fn open_frames(
+        &mut self,
+        path: PathBuf,
+        stills: Option<Vec<PathBuf>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.studio.opening = None;
+        let is_sequence = stills.is_some();
+        let message = match &stills {
+            Some(stills) => format!("opening {} images", stills.len()),
+            None => "opening the frames".to_string(),
+        };
+        self.flash(message, false, cx);
         let (sender, mut decoded) = mpsc::unbounded();
         let source = path.clone();
         let decoding = cx.background_executor().spawn(async move {
-            frames::decode_each(&source, |frame| {
+            let send = |frame: Frame| {
                 let thumb = thumbnail(&frame);
                 sender.unbounded_send((frame, thumb)).is_ok()
-            })
+            };
+            match stills {
+                Some(stills) => sequence::decode_each(&stills, send),
+                None => frames::decode_each(&source, send),
+            }
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let mut opened = false;
@@ -241,7 +375,7 @@ impl FileBuddy {
                 }
                 let path = path.clone();
                 let added = this.update_in(cx, |this, window, cx| {
-                    this.add_frames(path, batch, opened, window, cx)
+                    this.add_frames(path, batch, opened, is_sequence, window, cx)
                 });
                 if added.is_err() {
                     return;
@@ -270,9 +404,10 @@ impl FileBuddy {
     /// Frames that just decoded. The first of them open the edit.
     fn add_frames(
         &mut self,
-        path: std::path::PathBuf,
+        path: PathBuf,
         batch: Vec<(Frame, Arc<RenderImage>)>,
         opened: bool,
+        is_sequence: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -284,7 +419,12 @@ impl FileBuddy {
             }
         } else {
             self.notice = None;
-            self.start_edit(Edit::with_frames(path, frames), None, window, cx);
+            let edit = if is_sequence {
+                Edit::sequence(path, frames)
+            } else {
+                Edit::with_frames(path, frames)
+            };
+            self.start_edit(edit, None, window, cx);
             self.reset_strip(window, cx);
         }
         self.studio
@@ -336,8 +476,16 @@ impl FileBuddy {
             return;
         };
         let (start, end) = (edit.range.start_ms as f64, edit.range.end_ms as f64);
+        // The frames do not play while a drag moves one.
+        let placing = self
+            .studio
+            .strip
+            .place_grab
+            .as_ref()
+            .is_some_and(|grab| grab.dragging);
         let playing = self.studio.transport.playing()
             && self.studio.seek_bar.dragging.is_none()
+            && !placing
             && end > start;
         let speed = self.clip_speed(Clip::Studio);
         let strip = &mut self.studio.strip;
@@ -368,19 +516,11 @@ impl FileBuddy {
                 .unwrap_or_else(|| edit.frame_at(strip.at_ms as u64))
         };
 
-        let frame = &edit.frames[index];
-        if strip
-            .shown
-            .as_ref()
-            .is_some_and(|(shown, _)| *shown == key(frame))
-        {
-            return;
-        }
-        let image = render_image(&frame.image);
-        if let Some((_, old)) = strip.shown.replace((key(frame), image)) {
-            cx.drop_image(old, Some(window));
-        }
-        if playing {
+        strip.shown_index = index;
+        let under = (!playing && !strip.selected.is_empty())
+            .then(|| edit.frame_before(index))
+            .flatten();
+        if strip.sync_images(edit, index, under, window, cx) && playing {
             strip.reveal(index, edit.frames.len());
         }
     }
@@ -588,37 +728,197 @@ impl FileBuddy {
         strip.moved = true;
         self.show_frame(first, window, cx);
     }
+
+    /// The frames a drag, the wheel or Reset acts on in a sequence: the
+    /// selected ones, or the frame on the stage.
+    fn placed_targets(&self) -> BTreeSet<usize> {
+        let strip = &self.studio.strip;
+        if strip.selected.is_empty() {
+            BTreeSet::from([strip.shown_index])
+        } else {
+            strip.selected.clone()
+        }
+    }
+
+    /// A press on the stage of a sequence.
+    /// The frames do not move while they play.
+    pub(super) fn grab_place(&mut self, from: Point<Pixels>) {
+        let Some(edit) = &self.studio.edit else {
+            return;
+        };
+        if self.studio.transport.playing() {
+            return;
+        }
+        let starts = self
+            .placed_targets()
+            .into_iter()
+            .filter_map(|index| Some((index, edit.frames.get(index)?.place)))
+            .collect();
+        self.studio.strip.place_grab = Some(PlaceGrab {
+            from,
+            starts,
+            dragging: false,
+        });
+    }
+
+    /// The pointer moves with the stage held. Returns false when no frame is
+    /// held. The first move ends the press on the clip, as a crop drag does.
+    pub(super) fn drag_place(&mut self, to: Point<Pixels>, stage_size: (f32, f32)) -> bool {
+        let (Some(edit), Some(grab)) = (&mut self.studio.edit, &mut self.studio.strip.place_grab)
+        else {
+            return false;
+        };
+        let Some(frame) = frame_in(edit.size, stage_size) else {
+            return true;
+        };
+        let dx = f32::from(to.x - grab.from.x) / frame.scale;
+        let dy = f32::from(to.y - grab.from.y) / frame.scale;
+        let snap = PLACE_SNAP / frame.scale;
+        edit.move_placed(&grab.starts, f64::from(dx), f64::from(dy), f64::from(snap));
+        if !std::mem::replace(&mut grab.dragging, true) {
+            self.cancel_press(Clip::Studio);
+        }
+        true
+    }
+
+    pub(super) fn release_place(&mut self) {
+        self.studio.strip.place_grab = None;
+    }
+
+    /// The wheel over the stage of a sequence scales the frames.
+    pub(in crate::ui) fn wheel_place(&mut self, delta: ScrollDelta, cx: &mut Context<Self>) {
+        let targets = self.placed_targets();
+        if let Some(edit) = &mut self.studio.edit {
+            edit.scale_placed(&targets, wheel_factor(delta));
+            cx.notify();
+        }
+    }
+
+    fn reset_place(&mut self, cx: &mut Context<Self>) {
+        let targets = self.placed_targets();
+        if let Some(edit) = &mut self.studio.edit {
+            edit.reset_placed(&targets);
+            cx.notify();
+        }
+    }
+
+    fn set_fit(&mut self, fit: Fit, cx: &mut Context<Self>) {
+        if let Some(edit) = self.studio.edit.as_mut().filter(|edit| edit.framed()) {
+            edit.fit = fit;
+            cx.notify();
+        }
+    }
+
+    /// A side of the canvas, 0 for the width and 1 for the height.
+    fn set_canvas_side(&mut self, side: usize, pixels: u32, cx: &mut Context<Self>) {
+        if let Some(edit) = self.studio.edit.as_mut().filter(|edit| edit.framed()) {
+            let mut size = edit.size;
+            if side == 0 {
+                size.0 = pixels;
+            } else {
+                size.1 = pixels;
+            }
+            edit.set_canvas(size);
+            cx.notify();
+        }
+    }
+
+    fn sync_canvas_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let size = self
+            .studio
+            .edit
+            .as_ref()
+            .filter(|edit| edit.framed())
+            .map(|edit| edit.size);
+        for (side, input) in self
+            .studio
+            .strip
+            .canvas_inputs
+            .clone()
+            .into_iter()
+            .enumerate()
+        {
+            let value = size.map_or_else(String::new, |size| {
+                if side == 0 { size.0 } else { size.1 }.to_string()
+            });
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+    }
 }
 
-/// The frame under the playhead, letterboxed as a video is.
+/// The scale of a wheel turn on a frame or a text.
+pub(super) fn wheel_factor(delta: ScrollDelta) -> f64 {
+    let notches = match delta {
+        ScrollDelta::Lines(delta) => delta.y,
+        ScrollDelta::Pixels(delta) => f32::from(delta.y) / 50.,
+    };
+    WHEEL_STEP.powf(f64::from(notches))
+}
+
+/// The frame under the playhead on its canvas, letterboxed as a video is,
+/// with the frame before it faint over it: an opaque frame on top would hide
+/// a frame under it.
 pub(super) fn stage_frame(this: &FileBuddy, width: f32, height: f32) -> Option<AnyElement> {
     let edit = this.studio.edit.as_ref().filter(|edit| edit.framed())?;
-    let (_, image) = this.studio.strip.shown.as_ref()?;
+    let strip = &this.studio.strip;
+    let (_, image) = strip.shown.as_ref()?;
     let frame = frame_in(edit.size, (width, height))?;
-    Some(
-        img(image.clone())
-            .w(px(edit.size.0 as f32 * frame.scale))
-            .h(px(edit.size.1 as f32 * frame.scale))
-            .into_any_element(),
-    )
+    let size = (
+        edit.size.0 as f32 * frame.scale,
+        edit.size.1 as f32 * frame.scale,
+    );
+    let shown = edit
+        .frames
+        .get(strip.shown_index)
+        .map(|frame| (frame, image.clone(), 1.));
+    let under = strip
+        .under
+        .as_ref()
+        .and_then(|(at, _, image)| Some((edit.frames.get(*at)?, image.clone(), UNDER_OPACITY)));
+    Some(on_canvas(edit, size, shown.into_iter().chain(under)).into_any_element())
+}
+
+/// Frames on the canvas, `size` pixels on screen, each with its
+/// image and opacity. The canvas cuts what lies outside it.
+fn on_canvas<'a>(
+    edit: &Edit,
+    (width, height): (f32, f32),
+    layers: impl IntoIterator<Item = (&'a Frame, Arc<RenderImage>, f32)>,
+) -> gpui::Div {
+    let scale = width / edit.size.0.max(1) as f32;
+    div()
+        .relative()
+        .flex_shrink_0()
+        .w(px(width))
+        .h(px(height))
+        .overflow_hidden()
+        .bg(black().opacity(CANVAS_SHADE))
+        .children(layers.into_iter().filter_map(|(frame, image, opacity)| {
+            let rect = edit.placed(frame)?;
+            Some(
+                img(image)
+                    .absolute()
+                    .left(px(rect.x as f32 * scale))
+                    .top(px(rect.y as f32 * scale))
+                    .w(px(rect.width as f32 * scale))
+                    .h(px(rect.height as f32 * scale))
+                    .opacity(opacity),
+            )
+        }))
 }
 
 /// The small copy of a frame, whole inside `room`. GPUI keeps an image at its
 /// own aspect, so a box of another aspect would cut it.
 pub(super) fn thumb(this: &FileBuddy, edit: &Edit, frame: &Frame, room: (f32, f32)) -> AnyElement {
     let (width, height) = fitted(edit.size, room);
+    let thumb = this.studio.strip.thumbs.get(&key(frame)).cloned();
+    let picture = on_canvas(edit, (width, height), thumb.map(|thumb| (frame, thumb, 1.)));
     div()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
-        .children(
-            this.studio
-                .strip
-                .thumbs
-                .get(&key(frame))
-                .map(|thumb| img(thumb.clone()).w(px(width)).h(px(height))),
-        )
+        .child(picture)
         .into_any_element()
 }
 
@@ -779,13 +1079,14 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let length = |ms: u64| crate::media::duration(ms as f64 / 1000.);
-    let skipped = edit.frames.iter().filter(|frame| frame.skipped).count();
     let (first, last) = edit.frame_range;
-    let count = match (loading, skipped) {
-        (true, _) => format!("{} frames, loading", edit.frames.len()),
-        (false, 0) => format!("{} frames", edit.frames.len()),
-        (false, n) => format!("{} frames, {n} skipped", edit.frames.len()),
-    };
+    // The range of frames out of all, then the selection or the loading.
+    let mut frames = format!("{}-{} / {}", first + 1, last + 1, edit.frames.len());
+    if loading {
+        frames.push_str(", loading");
+    } else if selected > 0 {
+        frames.push_str(&format!(", {selected} selected"));
+    }
     let action = |id: &'static str, label: &'static str, key: &'static str| {
         Button::new(id)
             .xsmall()
@@ -800,29 +1101,19 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
             h_flex()
                 .gap_1()
                 .items_center()
-                .child(div().flex_1().child(count))
+                .child(div().flex_1().min_w_0().truncate().child(frames))
+                .child(length(edit.output_ms()))
+                .child(
+                    div()
+                        .text_color(muted)
+                        .child(format!("/ {}", length(edit.duration_ms))),
+                )
                 .child(
                     toggle("frames-grid", "Grid", this.studio.strip.grid)
                         .xsmall()
                         .tooltip("G")
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_frame_grid(cx))),
                 ),
-        )
-        .child(
-            h_flex()
-                .gap_1()
-                .text_color(muted)
-                .child(
-                    div()
-                        .flex_1()
-                        .child(format!("Frames {} - {}", first + 1, last + 1)),
-                )
-                .child(
-                    div()
-                        .text_color(theme.foreground)
-                        .child(length(edit.output_ms())),
-                )
-                .child(format!("/ {}", length(edit.duration_ms))),
         )
         .child(
             h_flex()
@@ -853,10 +1144,38 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
                     ),
                 ),
         )
-        .child(div().text_xs().text_color(muted).child(match selected {
-            0 => "Select frames in the strip.".to_string(),
-            1 => "1 frame selected".to_string(),
-            n => format!("{n} frames selected"),
-        }))
+        .child(canvas_controls(this, edit, cx))
+        .into_any_element()
+}
+
+/// The canvas of a sequence, the fit or fill of its images, and Reset for the
+/// place of the selected frames.
+fn canvas_controls(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
+    let muted = cx.theme().muted_foreground;
+    let [width, height] = &this.studio.strip.canvas_inputs;
+    let fit_toggle = |fit: Fit, label: &'static str| {
+        toggle(("canvas-fit", fit as usize), label, edit.fit == fit)
+            .xsmall()
+            .on_click(cx.listener(move |this, _, _, cx| this.set_fit(fit, cx)))
+    };
+    h_flex()
+        .gap_1()
+        .pt_2()
+        .items_center()
+        .child(div().text_color(muted).child("Canvas"))
+        .child(div().w(px(CANVAS_INPUT)).child(Input::new(width).xsmall()))
+        .child(div().text_color(muted).child("x"))
+        .child(div().w(px(CANVAS_INPUT)).child(Input::new(height).xsmall()))
+        .child(div().flex_1())
+        .child(fit_toggle(Fit::Fit, "Fit"))
+        .child(fit_toggle(Fit::Fill, "Fill"))
+        .child(
+            Button::new("place-reset")
+                .xsmall()
+                .label("Reset")
+                .tooltip("Reset the place of the frame")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| this.reset_place(cx))),
+        )
         .into_any_element()
 }

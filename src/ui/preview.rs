@@ -505,8 +505,9 @@ fn stage(
 }
 
 /// The stage of a clip, in the pane or in the Studio. The wheel over it sets
-/// the sound level. A click pauses or plays it, and a press held longer plays
-/// it fast until the release.
+/// the sound level, and with ctrl it scales the frames in frame mode. A click
+/// pauses or plays it, and a press held longer plays it fast until the
+/// release.
 pub(super) fn clip_input(
     frame: Stateful<Div>,
     clip: Clip,
@@ -529,7 +530,10 @@ pub(super) fn clip_input(
             MouseButton::Left,
             cx.listener(|this, _, _, cx| this.release_play(PressFrom::Mouse, cx)),
         )
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+        .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+            if clip == Clip::Studio && event.modifiers.control && this.framed() {
+                return this.wheel_place(event.delta, cx);
+            }
             let up = match event.delta {
                 ScrollDelta::Lines(delta) => delta.y,
                 ScrollDelta::Pixels(delta) => f32::from(delta.y),

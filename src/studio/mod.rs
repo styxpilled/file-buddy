@@ -3,10 +3,12 @@
 //! database. `ffmpeg::export` makes a file from it.
 
 pub mod frames;
+pub mod sequence;
 
 use std::path::{Path, PathBuf};
 
 pub use frames::Frame;
+pub use sequence::Fit;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Edit {
@@ -32,6 +34,12 @@ pub struct Edit {
     /// In frame mode, the first and the last frame of the range. `range` is
     /// their time on the strip.
     pub frame_range: (usize, usize),
+    /// In frame mode, how each frame takes the canvas, which is `size`.
+    pub fit: Fit,
+    /// Frame mode from stills. The export takes its name from the first.
+    pub sequence: bool,
+    /// The stem the user gave the export, in place of the one from the source.
+    pub name: Option<String>,
 }
 
 impl Edit {
@@ -54,6 +62,9 @@ impl Edit {
             still: false,
             frames: Vec::new(),
             frame_range: (0, 0),
+            fit: Fit::Fit,
+            sequence: false,
+            name: None,
         }
     }
 
@@ -78,8 +89,27 @@ impl Edit {
         self.texts.len() - 1
     }
 
-    /// A drag on the end of a text's bar. It stops at the other end.
+    /// A drag on the end of a text's bar. It stops at the other end. In frame
+    /// mode it steps from gap to gap between frames, and keeps one frame.
     pub fn drag_text_edge(&mut self, index: usize, edge: Edge, at_ms: u64) {
+        if self.framed() {
+            let Some(text) = self.texts.get(index) else {
+                return;
+            };
+            let other = match edge {
+                Edge::Start => text.end_ms,
+                Edge::End => text.start_ms,
+            };
+            let Some(at_ms) = self.text_edge_gap(edge, at_ms, other) else {
+                return;
+            };
+            let text = &mut self.texts[index];
+            match edge {
+                Edge::Start => text.start_ms = at_ms,
+                Edge::End => text.end_ms = at_ms,
+            }
+            return;
+        }
         let duration_ms = self.duration_ms;
         if let Some(text) = self.texts.get_mut(index) {
             match edge {
@@ -91,12 +121,17 @@ impl Edit {
 
     /// A drag on the middle of a text's bar, `delta_ms` from where it was when
     /// the drag started. The length stays, and the text stays in the source.
+    /// In frame mode it starts at the gap between frames nearest the drag.
     pub fn move_text(&mut self, index: usize, (start_ms, end_ms): (u64, u64), delta_ms: i64) {
         let length = end_ms - start_ms;
         let latest = self.duration_ms.saturating_sub(length);
+        let mut at = (start_ms as i64 + delta_ms).clamp(0, latest as i64) as u64;
+        if self.framed() {
+            at = self.text_start_gap(at, latest);
+        }
         if let Some(text) = self.texts.get_mut(index) {
-            text.start_ms = (start_ms as i64 + delta_ms).clamp(0, latest as i64) as u64;
-            text.end_ms = text.start_ms + length;
+            text.start_ms = at;
+            text.end_ms = at + length;
         }
     }
 
@@ -217,14 +252,10 @@ pub const LINE_HEIGHT: f64 = 1.15;
 const ASCENT_DESCENT: f64 = 2288. / 2048.;
 /// The padding of the box, in ems.
 const BOX_PADDING: f64 = 0.25;
-/// The text sizes the panel offers, as fractions of the frame height.
-pub const TEXT_SIZES: [(&str, f64); 4] = [
-    ("Small", 0.05),
-    ("Medium", 0.08),
-    ("Large", 0.12),
-    ("Huge", 0.18),
-];
+/// Text sizes, as fractions of the frame height.
 const DEFAULT_TEXT_SIZE: f64 = 0.08;
+const MIN_TEXT_SIZE: f64 = 0.01;
+const MAX_TEXT_SIZE: f64 = 1.;
 
 /// Words burnt into the frame. The position and the size are fractions of the
 /// output frame, so a change of crop or scale keeps the text in place.
@@ -284,6 +315,11 @@ impl Text {
     /// center stays inside the frame.
     pub fn moved(&self, start: (f64, f64), dx: f64, dy: f64) -> (f64, f64) {
         ((start.0 + dx).clamp(0., 1.), (start.1 + dy).clamp(0., 1.))
+    }
+
+    /// The wheel. The size grows or shrinks by `factor`, within bounds.
+    pub fn scale(&mut self, factor: f64) {
+        self.size = (self.size * factor).clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE);
     }
 }
 
@@ -726,12 +762,21 @@ impl Controls {
 }
 
 /// `<source stem> <in>-<out>.<ext>`, for example `cat jump 0m03-0m07.mp4`. A
-/// still has no range: `<source stem>.<ext>`.
-pub fn export_name(source: &Path, range: Range, format: Format) -> String {
-    let stem = source
+/// still has no range: `<source stem>.<ext>`. A sequence is `<first stem>
+/// sequence.<ext>`. A name the user gave is `<name>.<ext>`.
+pub fn export_name(edit: &Edit, format: Format) -> String {
+    if let Some(name) = &edit.name {
+        return format!("{name}.{}", format.extension());
+    }
+    let stem = edit
+        .source
         .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let range = edit.range;
+    if edit.is_sequence() {
+        return format!("{stem} sequence.{}", format.extension());
+    }
     if format.is_still() {
         return format!("{stem}.{}", format.extension());
     }
@@ -741,6 +786,19 @@ pub fn export_name(source: &Path, range: Range, format: Format) -> String {
         stamp(range.end_ms),
         format.extension()
     )
+}
+
+/// A stem typed for the export, with no character Windows refuses in a file
+/// name and no space or dot at the end. `None` when nothing is left.
+pub fn clean_name(typed: &str) -> Option<String> {
+    let kept: String = typed
+        .chars()
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+        })
+        .collect();
+    let kept = kept.trim_start().trim_end_matches([' ', '.']);
+    (!kept.is_empty()).then(|| kept.to_string())
 }
 
 /// `0m03`, or `1h02m03` from an hour.
@@ -938,18 +996,15 @@ mod tests {
             start_ms: 3_400,
             end_ms: 7_900,
         };
-        assert_eq!(
-            export_name(Path::new("D:/clips/cat jump.mp4"), range, Format::Mp4),
-            "cat jump 0m03-0m07.mp4"
-        );
-        let range = Range {
+        let mut edit = Edit::new("D:/clips/cat jump.mp4".into(), PathBuf::new(), 0, (0, 0));
+        edit.range = range;
+        assert_eq!(export_name(&edit, Format::Mp4), "cat jump 0m03-0m07.mp4");
+        edit.source = "a.b.webm".into();
+        edit.range = Range {
             start_ms: 62_000,
             end_ms: 3_723_000,
         };
-        assert_eq!(
-            export_name(Path::new("a.b.webm"), range, Format::Mp4),
-            "a.b 1m02-1h02m03.mp4"
-        );
+        assert_eq!(export_name(&edit, Format::Mp4), "a.b 1m02-1h02m03.mp4");
     }
 
     #[test]
@@ -958,14 +1013,50 @@ mod tests {
         let source = dir.path().join("cat.png");
         std::fs::write(&source, b"").unwrap();
         let edit = Edit::still(source.clone(), (640, 480));
-        let name = export_name(&edit.source, edit.range, Format::Jpg);
+        let name = export_name(&edit, Format::Jpg);
         assert_eq!(name, "cat.jpg");
         assert_eq!(unique_path(dir.path(), &name), dir.path().join("cat.jpg"));
-        let name = export_name(&edit.source, edit.range, Format::Png);
+        let name = export_name(&edit, Format::Png);
         assert_eq!(
             unique_path(dir.path(), &name),
             dir.path().join("cat (2).png")
         );
+    }
+
+    #[test]
+    fn a_given_name_replaces_the_stem_and_still_gets_a_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut edit = Edit::new("D:/clips/cat.mp4".into(), PathBuf::new(), 9_000, (0, 0));
+        edit.name = clean_name(" my: cat?. ");
+        assert_eq!(edit.name.as_deref(), Some("my cat"));
+        let name = export_name(&edit, Format::Gif);
+        assert_eq!(name, "my cat.gif");
+        std::fs::write(dir.path().join(&name), b"").unwrap();
+        assert_eq!(
+            unique_path(dir.path(), &name),
+            dir.path().join("my cat (2).gif")
+        );
+        assert_eq!(clean_name(" ?* . "), None);
+    }
+
+    #[test]
+    fn a_text_scales_within_bounds() {
+        let mut edit = Edit::still("a.png".into(), (640, 480));
+        let index = edit.add_text();
+        let text = &mut edit.texts[index];
+        text.scale(1.5);
+        assert!((text.size - DEFAULT_TEXT_SIZE * 1.5).abs() < 1e-12);
+        text.scale(1e6);
+        assert_eq!(text.size, MAX_TEXT_SIZE);
+        text.scale(1e-6);
+        assert_eq!(text.size, MIN_TEXT_SIZE);
+    }
+
+    #[test]
+    fn a_sequence_name_has_the_first_stem() {
+        let frame = Frame::new(image::RgbaImage::new(2, 2), 100);
+        let edit = Edit::sequence("D:/pics/cat 01.png".into(), vec![frame]);
+        assert_eq!(export_name(&edit, Format::Gif), "cat 01 sequence.gif");
     }
 
     #[test]

@@ -20,3 +20,10 @@ Context menu section of the v3 spec first.
   menu.
 
 ## Comments
+
+### 2026-10-11
+
+From the work on 44. The frames on the strip and in the grid of the Studio need
+a context menu of their own. It holds Reset, which puts the selected frames of
+an image sequence back to the fit or fill, in place of the Reset button in the
+panel. It can take more later, such as Skip, Duplicate, Delete and Copy.

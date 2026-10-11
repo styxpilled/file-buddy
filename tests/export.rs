@@ -8,6 +8,7 @@ use file_buddy::ffmpeg::probe::{Probe, probe};
 use file_buddy::ffmpeg::{self, Tool, export, webp};
 use file_buddy::media::Kind;
 use file_buddy::studio::frames;
+use file_buddy::studio::sequence::{self, Place};
 use file_buddy::studio::{Controls, Crop, Edit, Format, MaxWidth, Range};
 
 fn fixture(path: &Path) {
@@ -313,4 +314,71 @@ fn frames_cut_from_a_gif_keep_their_delays_in_each_format() {
     let probe = probe(&destination, Kind::Video).unwrap();
     let duration = probe.duration.expect("a duration");
     assert!((duration - 0.7).abs() < 0.02, "{duration} s");
+}
+
+#[test]
+fn a_sequence_has_transparent_bars_in_gif_and_webp_and_black_in_mp4() {
+    use image::{Rgba, RgbaImage};
+    use std::collections::BTreeSet;
+
+    let dir = tempfile::tempdir().unwrap();
+    let wide = dir.path().join("a wide.png");
+    let tall = dir.path().join("b tall.png");
+    RgbaImage::from_pixel(320, 120, Rgba([255, 0, 0, 255]))
+        .save(&wide)
+        .unwrap();
+    RgbaImage::from_pixel(120, 320, Rgba([0, 0, 255, 255]))
+        .save(&tall)
+        .unwrap();
+    let mut stills = Vec::new();
+    sequence::decode_each(&[wide.clone(), tall], |frame| {
+        stills.push(frame);
+        true
+    })
+    .unwrap();
+    let mut edit = Edit::sequence(wide, stills);
+    assert_eq!(edit.size, (320, 120));
+    assert_eq!(edit.duration_ms, 200);
+    edit.set_canvas((320, 240));
+    // The tall frame moves a quarter of the canvas right.
+    edit.move_placed(&[(1, Place::default())], 80., 0., 0.);
+    edit.scale_placed(&BTreeSet::from([0]), 1.);
+
+    let alpha = |image: &RgbaImage, x, y| image.get_pixel(x, y)[3];
+    for format in [Format::Gif, Format::Webp] {
+        let destination = dir.path().join(format!("out.{}", format.extension()));
+        let controls = Controls {
+            format,
+            ..Controls::default()
+        };
+        export::run(&edit, &controls, &destination, |_| {}).expect("export");
+        let exported = frames::decode(&destination).unwrap();
+        assert_eq!(exported.len(), 2, "{format:?}");
+        let (first, second) = (&exported[0].image, &exported[1].image);
+        assert_eq!(first.dimensions(), (320, 240), "{format:?}");
+        assert_eq!(alpha(first, 160, 20), 0, "{format:?}");
+        assert!(first.get_pixel(160, 120)[0] > 200, "{format:?}");
+        // The tall image fits at 90 x 240, from 115, and moves 80 right.
+        assert_eq!(alpha(second, 190, 120), 0, "{format:?}");
+        assert!(second.get_pixel(240, 120)[2] > 200, "{format:?}");
+        assert_eq!(alpha(second, 290, 120), 0, "{format:?}");
+    }
+
+    // NVENC takes no frame this small.
+    edit.set_canvas((320, 240));
+    let large = Edit {
+        max_width: MaxWidth::Source,
+        ..edit.clone()
+    };
+    let destination = dir.path().join("out.mp4");
+    let controls = Controls {
+        format: Format::Mp4,
+        ..Controls::default()
+    };
+    export::run(&large, &controls, &destination, |_| {}).expect("export");
+    let first = sequence::decode(&destination).unwrap();
+    assert_eq!(first.dimensions(), (320, 240));
+    let bar = first.get_pixel(160, 20).0;
+    assert!(bar[..3].iter().all(|&c| c < 20), "{bar:?}");
+    assert!(first.get_pixel(160, 120)[0] > 200);
 }

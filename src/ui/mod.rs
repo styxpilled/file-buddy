@@ -685,7 +685,17 @@ impl FileBuddy {
                     .delay_input
                     .read(cx)
                     .focus_handle(cx)
-                    .is_focused(window))
+                    .is_focused(window)
+                || studio
+                    .name_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+                || studio
+                    .strip
+                    .canvas_inputs
+                    .iter()
+                    .any(|input| input.read(cx).focus_handle(cx).is_focused(window)))
     }
 
     fn focus_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -743,6 +753,8 @@ impl FileBuddy {
         } else if self.settings().is_some() && !self.focus.is_focused(window) {
             // A field of the form has focus. Leaving would drop what was typed.
             window.focus(&self.focus, cx);
+        } else if self.studio.editing_name {
+            self.cancel_name(window, cx);
         } else if self.studio_input_focused(window, cx) {
             window.focus(&self.studio.focus, cx);
         } else if self.page() == Page::Studio {

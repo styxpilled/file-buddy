@@ -252,7 +252,7 @@ fn cell(
                 .child(div().flex_1().child(format!("{}", index + 1)))
                 .child(div().when(current, |label| label.text_color(accent)).child(
                     if frame.skipped {
-                        "skipped".to_string()
+                        "skip".to_string()
                     } else {
                         format!("{} ms", frame.delay_ms)
                     },

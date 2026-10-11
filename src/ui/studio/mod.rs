@@ -31,7 +31,10 @@ use crate::actions::clipboard;
 use crate::ffmpeg::{export, probe};
 use crate::media::{self, Kind};
 use crate::paths;
-use crate::studio::{self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxWidth, Quality};
+use crate::search::folder::Entry;
+use crate::studio::{
+    self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxWidth, Quality, sequence,
+};
 use crate::ui::player::{Transport, open_video};
 use crate::ui::seek_bar::{self, Clip, SeekBar};
 use crate::ui::{
@@ -70,7 +73,6 @@ pub(super) struct Studio {
     /// A maximum width that is not a preset.
     pub(super) width_input: Entity<InputState>,
     _width_events: Subscription,
-    pub(super) tab: Tab,
     /// The words of the selected text are an input in its row.
     pub(super) editing_text: bool,
     pub(super) text_scroll: ScrollHandle,
@@ -82,20 +84,13 @@ pub(super) struct Studio {
     pub(super) text_move: Option<(usize, Pixels, (u64, u64))>,
     pub(super) words_input: Entity<TextareaState>,
     _words_events: Subscription,
+    /// A double click on the name opens this input for the name of the export.
+    pub(super) name_input: Entity<InputState>,
+    pub(super) editing_name: bool,
+    _name_events: Subscription,
     pub(in crate::ui) strip: strip::Strip,
     /// The frames of a GIF or a WebP, while they decode.
     opening: Option<Task<()>>,
-}
-
-/// The tabs of the panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Tab {
-    Edit,
-    Text,
-}
-
-impl Tab {
-    const ALL: [(Tab, &str); 2] = [(Tab::Edit, "Edit"), (Tab::Text, "Text")];
 }
 
 struct CropGrab {
@@ -135,10 +130,23 @@ impl Studio {
             },
         );
         let (words_input, words_events) = text::words_input(window, cx);
+        let name_input = cx.new(|cx| InputState::new(window, cx));
+        let name_events = cx.subscribe_in(
+            &name_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { .. }) {
+                    this.save_name(cx);
+                    window.focus(&this.studio.focus, cx);
+                }
+            },
+        );
         Self {
+            name_input,
+            editing_name: false,
+            _name_events: name_events,
             strip: strip::Strip::new(window, cx),
             opening: None,
-            tab: Tab::Edit,
             editing_text: false,
             text_scroll: ScrollHandle::new(),
             selected_text: None,
@@ -170,6 +178,31 @@ enum Progress {
 impl FileBuddy {
     /// `c`. The selection replaces the edit, as a new history step.
     pub(super) fn open_in_studio(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let marked: Vec<_> = self
+            .results
+            .iter()
+            .filter_map(Entry::hit)
+            .filter(|hit| self.is_marked(hit))
+            .map(|hit| (hit.file.path.clone(), hit.file.kind))
+            .collect();
+        if marked.len() >= 2 {
+            if marked.iter().any(|(_, kind)| *kind != Kind::Still) {
+                self.flash("a sequence takes only stills", true, cx);
+                return;
+            }
+            let mut paths: Vec<_> = marked
+                .into_iter()
+                .filter_map(|(path, _)| dunce::canonicalize(path).ok())
+                .collect();
+            sequence::name_order(&mut paths);
+            paths.dedup();
+            if paths.len() < 2 {
+                self.flash("the files are gone", true, cx);
+                return;
+            }
+            self.open_sequence(paths, window, cx);
+            return;
+        }
         let Some(hit) = self.selected_hit() else {
             return;
         };
@@ -187,7 +220,7 @@ impl FileBuddy {
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("gif") || e.eq_ignore_ascii_case("webp"));
         if framed {
-            self.open_frames(path, window, cx);
+            self.open_frames(path, None, window, cx);
             return;
         }
         let (edit, video) = if still {
@@ -235,6 +268,7 @@ impl FileBuddy {
         self.studio.crop_grab = None;
         self.studio.text_grab = None;
         self.studio.text_move = None;
+        self.studio.editing_name = false;
         self.select_text(None, window, cx);
         self.studio
             .width_input
@@ -283,6 +317,7 @@ impl FileBuddy {
     fn release_grabs(&mut self) {
         self.studio.crop_grab = None;
         self.studio.text_grab = None;
+        self.release_place();
     }
 
     /// A press on the crop box or on one of its grips.
@@ -300,10 +335,14 @@ impl FileBuddy {
     /// The pointer moves with a grip held. The first move ends the press on
     /// the clip, so a drag of the box does not also pause it.
     fn drag_crop(&mut self, to: Point<Pixels>, stage: Bounds<Pixels>, cx: &mut Context<Self>) {
+        let size = (f32::from(stage.size.width), f32::from(stage.size.height));
+        if self.drag_place(to, size) {
+            cx.notify();
+            return;
+        }
         let (Some(edit), Some(grab)) = (&mut self.studio.edit, &mut self.studio.crop_grab) else {
             return;
         };
-        let size = (f32::from(stage.size.width), f32::from(stage.size.height));
         let Some(frame) = frame_in(edit.size, size) else {
             return;
         };
@@ -396,6 +435,17 @@ impl FileBuddy {
             self.studio.editing_text = false;
             cx.notify();
         }
+        // A click elsewhere keeps what was typed.
+        if self.studio.editing_name
+            && !self
+                .studio
+                .name_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            self.save_name(cx);
+        }
         self.step_strip(window, cx);
         let Some(video) = &self.studio.video else {
             return;
@@ -452,10 +502,8 @@ impl FileBuddy {
             return;
         }
         let controls = self.studio.controls;
-        let destination = studio::unique_path(
-            &folder,
-            &studio::export_name(&edit.source, edit.range, controls.format),
-        );
+        let destination =
+            studio::unique_path(&folder, &studio::export_name(&edit, controls.format));
 
         let (sender, mut events) = mpsc::unbounded();
         let target = destination.clone();
@@ -533,6 +581,46 @@ impl FileBuddy {
         .detach();
     }
 
+    /// A double click on the name. The input holds the name the export takes
+    /// now, with no extension.
+    fn edit_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &self.studio.edit else {
+            return;
+        };
+        let stem = export_stem(edit, self.studio.controls.format);
+        let input = self.studio.name_input.clone();
+        input.update(cx, |input, cx| {
+            input.set_value(stem, window, cx);
+            input.select_all(window, cx);
+        });
+        window.focus(&input.read(cx).focus_handle(cx), cx);
+        self.studio.editing_name = true;
+        cx.notify();
+    }
+
+    /// The typed name. With nothing left, or the name the export would take
+    /// anyway, the export takes its name from the source again.
+    pub(super) fn save_name(&mut self, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.studio.editing_name) {
+            return;
+        }
+        let typed = studio::clean_name(self.studio.name_input.read(cx).value().as_ref());
+        let format = self.studio.controls.format;
+        if let Some(edit) = &mut self.studio.edit {
+            edit.name = None;
+            let own = export_stem(edit, format);
+            edit.name = typed.filter(|typed| *typed != own);
+        }
+        cx.notify();
+    }
+
+    /// Escape in the name input drops what was typed.
+    pub(super) fn cancel_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.studio.editing_name = false;
+        window.focus(&self.studio.focus, cx);
+        cx.notify();
+    }
+
     /// The file goes on the clipboard, as Enter puts a result there.
     fn finish_export(&mut self, path: &Path, result: anyhow::Result<()>, cx: &mut Context<Self>) {
         self.studio.export = None;
@@ -558,6 +646,15 @@ impl FileBuddy {
             }
         }
     }
+}
+
+/// The name of the export with no extension.
+fn export_stem(edit: &Edit, format: Format) -> String {
+    let name = studio::export_name(edit, format);
+    Path::new(&name)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or(name)
 }
 
 /// A point in the range, rounded to the tenth of a second as the length is:
@@ -829,7 +926,11 @@ fn crop_box(
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, event: &MouseDownEvent, _, _| {
-                            this.grab_crop(Grip::Move, event.position)
+                            if this.framed() {
+                                this.grab_place(event.position)
+                            } else {
+                                this.grab_crop(Grip::Move, event.position)
+                            }
                         }),
                     )
                     .on_drag(CropDrag, |drag, _, _, cx| cx.new(|_| *drag)),
@@ -855,11 +956,32 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
     let texts = text::panel(this, edit, cx);
     let frames = edit.framed().then(|| strip::panel(this, edit, cx));
     let theme = cx.theme();
-    let name = edit
-        .source
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    // The name the export takes once the user gives one, and the source's
+    // until then.
+    let name = if edit.name.is_some() {
+        studio::export_name(edit, this.studio.controls.format)
+    } else {
+        edit.source
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let name = if this.studio.editing_name {
+        div()
+            .child(Input::new(&this.studio.name_input).xsmall())
+            .into_any_element()
+    } else {
+        div()
+            .id("studio-name")
+            .truncate()
+            .child(name)
+            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                if event.click_count() == 2 {
+                    this.edit_name(window, cx);
+                }
+            }))
+            .into_any_element()
+    };
     let range = edit.range;
     let muted = |text: String| div().text_color(theme.muted_foreground).child(text);
     // A click sets the point at the playhead, as its key does.
@@ -915,8 +1037,10 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
     });
 
     let main = v_flex()
+        .flex_1()
+        .min_h_0()
         .gap_4()
-        .child(div().child(name))
+        .child(name)
         .children(range_row)
         .children(frames)
         .child(
@@ -1002,6 +1126,7 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                 ),
         )
         .children(speed)
+        .child(texts)
         .child(
             v_flex()
                 .gap_1()
@@ -1053,7 +1178,7 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
             )
         })
         .child(
-            h_flex().child(
+            h_flex().child(div().flex_1()).child(
                 Button::new("export")
                     .small()
                     .primary()
@@ -1097,18 +1222,6 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
                     .child("No export folder. Set one in Settings."),
             )
         });
-    let tab = this.studio.tab;
-    let tabs = h_flex().gap_1().children(Tab::ALL.map(|(shown, label)| {
-        toggle(("studio-tab", shown as usize), label, tab == shown)
-            .xsmall()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                // An input of the other tab must not keep the keys.
-                window.focus(&this.studio.focus, cx);
-                this.studio.tab = shown;
-                cx.notify();
-            }))
-    }));
-
     v_flex()
         .w(px(PANEL_WIDTH))
         .h_full()
@@ -1119,10 +1232,6 @@ fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyEleme
         .border_color(theme.border)
         .text_sm()
         .child(playback)
-        .child(tabs)
-        .child(match tab {
-            Tab::Edit => main.into_any_element(),
-            Tab::Text => texts,
-        })
+        .child(main)
         .into_any_element()
 }

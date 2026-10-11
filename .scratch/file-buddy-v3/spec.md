@@ -101,9 +101,10 @@ Each edit holds any number of texts. A text has its words, a position, a size,
 a time range and an optional black box behind it.
 
 - `n` adds a text at the center of the frame, for the whole range.
-- A click on a text in the preview selects it, and a drag moves it.
-- The panel edits the words, the size and the box toggle. `shift-enter` adds a
-  line.
+- A click on a text in the preview selects it, and a drag moves it. Ctrl and
+  the wheel over it change its size.
+- Each text has a row in the panel, with its size in px, a Box toggle and
+  Delete. A double click edits its words. `shift-enter` adds a line.
 - Each text has a row on the timeline under the range. The row shows a bar
   from its start to its end, and a drag on either end changes it.
 - `delete` removes the selected text, when the text is selected and no input
@@ -173,18 +174,20 @@ with its delay, sits over the range.
 ### Image sequence
 
 With two or more stills marked, `c` opens them as a sequence of frames, in name
-order. The frame strip works as it does for an animated file.
+order. The frame strip works as it does for an animated file. The canvas and
+the place of each frame below apply to an animated file too.
 
 - The canvas size starts at the size of the first image, and the panel
   changes it.
 - Fit or fill applies to every frame: fit scales each image to show all of
   it, with transparent bars, and fill scales it to cover the canvas, centered.
   MP4 and WebM make the bars black.
-- Each frame then has its own offset and scale on top of that. A drag on the
-  preview moves the selected frame and the wheel scales it. Reset puts it back
-  to the fit or fill.
-- While a frame is selected, the frame before it shows under it at half
-  opacity, so the two can line up.
+- Each frame then has its own offset and scale on top of that. While the
+  frames do not play, a drag on the preview moves the selected frame, and an
+  edge near an edge of the canvas snaps to it. Ctrl and the wheel scale it.
+  Reset puts it back to the fit or fill. The frames do not play during a drag.
+- While a frame is selected, the frame before it shows faint over it, so the
+  two can line up.
 - Each frame starts with a delay of 100 ms.
 
 ## Export

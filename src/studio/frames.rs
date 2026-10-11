@@ -12,8 +12,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, RgbaImage};
-use image_webp::WebPDecoder;
 
+use super::sequence::Place;
 use super::{Edge, Edit, Range};
 
 /// Browsers play a delay this short or shorter at `SHORT_DELAY_PLAYS_AT`.
@@ -30,6 +30,8 @@ pub struct Frame {
     pub delay_ms: u32,
     /// It does not play and does not export.
     pub skipped: bool,
+    /// Its move and scale on the canvas of a sequence.
+    pub place: Place,
 }
 
 impl Frame {
@@ -38,6 +40,7 @@ impl Frame {
             image: Arc::new(image),
             delay_ms,
             skipped: false,
+            place: Place::default(),
         }
     }
 
@@ -56,6 +59,7 @@ impl PartialEq for Frame {
         Arc::ptr_eq(&self.image, &other.image)
             && self.delay_ms == other.delay_ms
             && self.skipped == other.skipped
+            && self.place == other.place
     }
 }
 
@@ -128,8 +132,7 @@ fn gif(path: &Path, each: &mut impl FnMut(Frame) -> bool) -> Result<()> {
 }
 
 fn webp(path: &Path, each: &mut impl FnMut(Frame) -> bool) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let mut decoder = WebPDecoder::new(BufReader::new(file)).context("decode the WebP")?;
+    let mut decoder = crate::ffmpeg::webp::open(path)?;
     let (width, height) = decoder.dimensions();
     let alpha = decoder.has_alpha();
     let len = decoder
@@ -253,6 +256,42 @@ impl Edit {
         self.frames
             .iter()
             .rposition(|frame| !frame.skipped)
+            .unwrap_or(0)
+    }
+
+    /// The times of the gaps between frames, from 0 to the length of the
+    /// strip, once each.
+    fn gap_times(&self) -> Vec<u64> {
+        let mut times = vec![0];
+        let mut at = 0;
+        for frame in &self.frames {
+            at += frame.length_ms();
+            if times.last() != Some(&at) {
+                times.push(at);
+            }
+        }
+        times
+    }
+
+    /// Where an end of a text goes in frame mode: the gap nearest `at_ms` on
+    /// its side of the other end, `other_ms`. `None` when no gap is there.
+    pub(super) fn text_edge_gap(&self, edge: Edge, at_ms: u64, other_ms: u64) -> Option<u64> {
+        self.gap_times()
+            .into_iter()
+            .filter(|&gap| match edge {
+                Edge::Start => gap < other_ms,
+                Edge::End => gap > other_ms,
+            })
+            .min_by_key(|gap| gap.abs_diff(at_ms))
+    }
+
+    /// Where a moved text starts in frame mode: the gap nearest `at_ms`, no
+    /// later than `latest_ms`.
+    pub(super) fn text_start_gap(&self, at_ms: u64, latest_ms: u64) -> u64 {
+        self.gap_times()
+            .into_iter()
+            .filter(|&gap| gap <= latest_ms)
+            .min_by_key(|gap| gap.abs_diff(at_ms))
             .unwrap_or(0)
     }
 
@@ -670,6 +709,43 @@ mod tests {
         edit.push_frames(more);
         assert_eq!(edit.frame_range, (0, 1));
         assert_eq!(edit.duration_ms, 170);
+    }
+
+    #[test]
+    fn a_text_end_steps_from_gap_to_gap_and_keeps_one_frame() {
+        let mut edit = strip(&[100, 50, 250, 30]);
+        let index = edit.add_text();
+        edit.drag_text_edge(index, Edge::Start, 130);
+        assert_eq!(edit.texts[index].start_ms, 150);
+        edit.drag_text_edge(index, Edge::End, 160);
+        assert_eq!(edit.texts[index].end_ms, 400);
+        edit.drag_text_edge(index, Edge::End, 0);
+        assert_eq!(edit.texts[index].end_ms, 400);
+        edit.drag_text_edge(index, Edge::End, 390);
+        assert_eq!(edit.texts[index].end_ms, 400);
+        edit.drag_text_edge(index, Edge::Start, 9_000);
+        assert_eq!(edit.texts[index].start_ms, 150);
+        // A skipped frame has no time, so its gaps are one.
+        edit.toggle_skip(&BTreeSet::from([1]));
+        edit.drag_text_edge(index, Edge::Start, 90);
+        assert_eq!(edit.texts[index].start_ms, 100);
+    }
+
+    #[test]
+    fn a_moved_text_starts_at_a_gap_and_keeps_its_length() {
+        let mut edit = strip(&[100, 50, 250, 30]);
+        let index = edit.add_text();
+        edit.drag_text_edge(index, Edge::End, 150);
+        edit.move_text(index, (0, 150), 130);
+        assert_eq!(
+            (edit.texts[index].start_ms, edit.texts[index].end_ms),
+            (150, 300)
+        );
+        edit.move_text(index, (0, 150), 9_000);
+        assert_eq!(
+            (edit.texts[index].start_ms, edit.texts[index].end_ms),
+            (150, 300)
+        );
     }
 
     #[test]

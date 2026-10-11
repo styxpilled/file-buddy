@@ -298,7 +298,8 @@ fn end_webp_at(bytes: &mut [u8], total_ms: u64) -> Result<()> {
 }
 
 /// The frames of an edit as PNG files and the concat list, in a directory of
-/// their own that goes with them. A copy of a frame shares its file.
+/// their own that goes with them. A copy of a frame in the same place shares
+/// its file.
 struct FrameFiles {
     dir: PathBuf,
 }
@@ -321,13 +322,19 @@ impl FrameFiles {
 
     /// Returns the path of the list.
     fn write(&self, edit: &Edit, format: Format) -> Result<PathBuf> {
-        let mut files: HashMap<*const RgbaImage, usize> = HashMap::new();
+        let mut files: HashMap<(*const RgbaImage, [u64; 3]), usize> = HashMap::new();
         let mut images = Vec::with_capacity(edit.frames.len());
         for (_, frame) in edit.kept_frames() {
             let next = files.len();
-            let image = *files.entry(Arc::as_ptr(&frame.image)).or_insert(next);
+            let place = [frame.place.x, frame.place.y, frame.place.scale].map(f64::to_bits);
+            let image = *files
+                .entry((Arc::as_ptr(&frame.image), place))
+                .or_insert(next);
             if image == next {
-                write_png(&frame.image, &self.dir.join(format!("{image}.png")))?;
+                write_png(
+                    &edit.frame_pixels(frame),
+                    &self.dir.join(format!("{image}.png")),
+                )?;
             }
             images.push(image);
         }
@@ -530,12 +537,13 @@ pub fn frame_screenshot(edit: &Edit, index: usize) -> Result<Vec<u8>> {
     let frame = edit.frames.get(index).context("no such frame")?;
     let files = FrameFiles::new()?;
     let input = files.dir.join("frame.png");
-    write_png(&frame.image, &input)?;
+    write_png(&edit.frame_pixels(frame), &input)?;
     let at_ms = edit.frame_start_ms(index);
     let mut still = Edit {
         input,
         still: true,
         frames: Vec::new(),
+        sequence: false,
         ..edit.clone()
     };
     still.texts.retain(|text| edit.shows(text, at_ms));

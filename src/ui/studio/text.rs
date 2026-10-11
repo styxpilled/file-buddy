@@ -1,11 +1,11 @@
 //! The texts of the Studio edit: drawn over the preview, where a press selects
-//! one and a drag moves it, and edited in the panel. The rows that time them
-//! are in `seek_bar`.
+//! one, a drag moves it and ctrl and the wheel size it, and edited in the
+//! panel. The rows that time them are in `seek_bar`.
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Bounds, ClickEvent, Context, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, Window, black, div, px, rgb, white,
+    Point, Render, ScrollWheelEvent, Window, black, div, px, rgb, white,
 };
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -14,7 +14,7 @@ use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 
 use std::time::Duration;
 
-use super::{Tab, frame_in};
+use super::{frame_in, strip};
 use crate::studio::{self, Edit, Text};
 use crate::ui::seek_bar::{self, Clip};
 use crate::ui::{FileBuddy, preview, toggle};
@@ -94,7 +94,6 @@ impl FileBuddy {
         }
         self.studio.selected_text = index;
         if let Some(index) = index {
-            self.studio.tab = Tab::Text;
             self.studio.text_scroll.scroll_to_item(index);
             // A frame and a text are never selected together, so `delete`
             // has one target.
@@ -138,12 +137,55 @@ impl FileBuddy {
 
     /// `delete`, while no input has the keys.
     pub(super) fn delete_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(edit), Some(index)) = (&mut self.studio.edit, self.studio.selected_text) else {
+        if let Some(index) = self.studio.selected_text {
+            self.delete_text_at(index, window, cx);
+        }
+    }
+
+    /// The Delete button of a row. The selection stays on its text, or goes
+    /// to the next when its text goes.
+    fn delete_text_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = &mut self.studio.edit else {
             return;
         };
         let next = edit.remove_text(index);
         self.studio.text_grab = None;
-        self.select_text(next, window, cx);
+        let selected = match self.studio.selected_text {
+            Some(at) if at == index => next,
+            Some(at) if at > index => Some(at - 1),
+            other => other,
+        };
+        self.studio.selected_text = None;
+        self.select_text(selected, window, cx);
+    }
+
+    fn toggle_text_box(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .studio
+            .edit
+            .as_mut()
+            .and_then(|edit| edit.texts.get_mut(index))
+        {
+            text.boxed = !text.boxed;
+            cx.notify();
+        }
+    }
+
+    /// Ctrl and the wheel over a text. It becomes the selected text.
+    fn scale_text(
+        &mut self,
+        index: usize,
+        factor: f64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.studio.selected_text != Some(index) {
+            self.select_text(Some(index), window, cx);
+        }
+        if let Some(text) = self.selected_text_mut() {
+            text.scale(factor);
+            cx.notify();
+        }
     }
 
     fn grab_text(
@@ -272,7 +314,15 @@ pub(super) fn layer(
                     this.grab_text(index, event.position, window, cx);
                 }),
             )
-            .on_drag(TextDrag, |drag, _, _, cx| cx.new(|_| *drag));
+            .on_drag(TextDrag, |drag, _, _, cx| cx.new(|_| *drag))
+            .on_scroll_wheel(
+                cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
+                    if event.modifiers.control {
+                        cx.stop_propagation();
+                        this.scale_text(index, strip::wheel_factor(event.delta), window, cx);
+                    }
+                }),
+            );
         let (x, y) = (text.x as f32 * width, text.y as f32 * height);
         Some(
             div()
@@ -298,10 +348,10 @@ pub(super) fn layer(
         .into_any_element()
 }
 
-/// The Text tab: one row for each text, as the Speech tab has for each
-/// segment, with its time on the first line and its words under it. A click
-/// selects a row, and a double click edits its words in place. Under the list,
-/// the size and the box of the selected text.
+/// The texts in the panel: one row for each, as the Speech tab has for each
+/// segment, with its time, size, box and Delete on the first line and its
+/// words under it. A click selects a row, and a double click edits its words
+/// in place.
 pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let theme = cx.theme();
     let (muted, foreground, current) = (
@@ -312,6 +362,7 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
     let (input_border, input_bg, radius) = (theme.ring, theme.background, theme.radius);
     let selected = this.studio.selected_text;
     let editing = this.studio.editing_text;
+    let output_height = edit.output_size().1;
 
     // A click on a time seeks there.
     let time = |id: (&'static str, usize), ms: u64| {
@@ -372,16 +423,37 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
                     this.select_text(Some(index), window, cx);
                 }
             }))
-            .when(!edit.still, |row| {
-                row.child(
-                    h_flex()
-                        .gap_1()
-                        .text_color(muted)
-                        .child(time(("text-start", index), text.start_ms))
-                        .child("-")
-                        .child(time(("text-end", index), text.end_ms)),
-                )
-            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .text_color(muted)
+                    .when(!edit.still, |line| {
+                        line.child(time(("text-start", index), text.start_ms))
+                            .child("-")
+                            .child(time(("text-end", index), text.end_ms))
+                    })
+                    .child(div().flex_1())
+                    .child(format!("{}px", text.font_px(output_height)))
+                    .child(
+                        toggle(("text-box", index), "Box", text.boxed)
+                            .xsmall()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.toggle_text_box(index, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(("text-delete", index))
+                            .xsmall()
+                            .label("Delete")
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.delete_text_at(index, window, cx);
+                            })),
+                    ),
+            )
             .child(words)
     });
     let list = div()
@@ -394,92 +466,30 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
         // for the scrollbar, which lies over the rows. As the Speech tab has.
         .pl(px(preview::ROW_INSET))
         .pr(px(12. + preview::ROW_INSET))
-        .children(rows)
-        .when(edit.texts.is_empty(), |list| {
-            list.child(
-                div()
-                    .text_color(muted)
-                    .child("N adds a text at the center of the frame."),
-            )
-        });
-    let add = h_flex().child(div().flex_1()).child(
-        Button::new("text-add")
-            .xsmall()
-            .label("Add")
-            .tooltip("N")
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, window, cx| this.add_text(window, cx))),
-    );
-    let tab = v_flex().flex_1().min_h_0().gap_2().child(add).child(
-        v_flex()
-            .relative()
-            .mx(px(-preview::ROW_INSET))
-            .flex_initial()
-            .min_h_0()
-            .child(list)
-            .vertical_scrollbar(&this.studio.text_scroll),
-    );
-    let Some(text) = selected.and_then(|index| edit.texts.get(index)) else {
-        return tab.into_any_element();
-    };
-    let (size, boxed) = (text.size, text.boxed);
-    let font_px = text.font_px(edit.output_size().1);
-
-    tab.child(
-        v_flex()
-            .flex_shrink_0()
-            .gap_1()
-            .child(
-                h_flex()
-                    .child(div().flex_1().text_color(muted).child("Size"))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted)
-                            .child(format!("{font_px} px")),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .children(studio::TEXT_SIZES.into_iter().enumerate().map(
-                        |(at, (label, preset))| {
-                            toggle(("text-size", at), label, size == preset)
-                                .xsmall()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(text) = this.selected_text_mut() {
-                                        text.size = preset;
-                                        cx.notify();
-                                    }
-                                }))
-                        },
-                    )),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        toggle("text-box", "Box", boxed)
-                            .xsmall()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(text) = this.selected_text_mut() {
-                                    text.boxed = !text.boxed;
-                                    cx.notify();
-                                }
-                            })),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("text-delete")
-                            .xsmall()
-                            .label("Delete")
-                            .tooltip("Delete")
-                            .cursor_pointer()
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.delete_text(window, cx)),
-                            ),
-                    ),
-            ),
-    )
-    .into_any_element()
+        .children(rows);
+    let add = h_flex()
+        .child(div().flex_1().text_color(muted).child("Text"))
+        .child(
+            Button::new("text-add")
+                .xsmall()
+                .label("(N)ew")
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, window, cx| this.add_text(window, cx))),
+        );
+    // It shrinks and scrolls when the panel has no room for every text.
+    v_flex()
+        .flex_initial()
+        .min_h_0()
+        .gap_1()
+        .child(add)
+        .child(
+            v_flex()
+                .relative()
+                .mx(px(-preview::ROW_INSET))
+                .flex_initial()
+                .min_h_0()
+                .child(list)
+                .vertical_scrollbar(&this.studio.text_scroll),
+        )
+        .into_any_element()
 }

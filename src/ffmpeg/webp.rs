@@ -89,9 +89,14 @@ pub fn write_proxy(path: &Path, hash: &str, cache: &Path) -> Result<Probe> {
     })
 }
 
-fn open(path: &Path) -> Result<WebPDecoder<BufReader<File>>> {
+/// A frame that disposes of itself leaves its area transparent, as a browser
+/// shows it. With no background color, `image-webp` leaves the frame there.
+pub(crate) fn open(path: &Path) -> Result<WebPDecoder<BufReader<File>>> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    WebPDecoder::new(BufReader::new(file)).context("decode the WebP")
+    let mut decoder = WebPDecoder::new(BufReader::new(file)).context("decode the WebP")?;
+    // It fails only for a WebP that is not animated.
+    decoder.set_background_color([0; 4]).ok();
+    Ok(decoder)
 }
 
 /// The delay of every frame, as a browser plays it. A frame is decoded to learn
