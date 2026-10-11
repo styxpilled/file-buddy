@@ -75,6 +75,8 @@ pub(super) const ACTIONS: &[Action] = &[
     action!("add_text", Studio, AddText, ["n"]),
     action!("delete_text", Studio, DeleteText, ["delete"]),
     action!("duplicate_frames", Studio, DuplicateFrames, ["ctrl-d"]),
+    action!("skip_frames", Studio, SkipFrames, ["s"]),
+    action!("toggle_frame_grid", Studio, ToggleFrameGrid, ["g"]),
 ];
 
 /// The keys that cannot change, with the action that holds each.

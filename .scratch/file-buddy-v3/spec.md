@@ -139,7 +139,7 @@ apply. Text has no time range. The export is PNG or JPG.
 ### Frames
 
 A GIF or an animated WebP opens in frame mode. A strip of every frame, each
-with its delay, takes the place of the range.
+with its delay, sits over the range.
 
 - A click selects a frame and the preview shows it. Shift-click selects a
   run, and ctrl-click adds or removes one frame.
@@ -147,12 +147,28 @@ with its delay, takes the place of the range.
   last of them.
 - A drag moves the selected frames to a new place in the strip.
 - The panel edits the delay of the selected frames, in milliseconds.
-- Space plays the frames with their delays.
+- Space plays the frames with their delays, over the range in a loop.
+- The range is whole frames. `[` and `]` take the frame on the stage, and a
+  drag on a handle snaps to the nearest gap between frames. The export keeps
+  the frames in the range.
+- `s` skips the selected frames, or plays them again. A skipped frame stays
+  on the strip, faint, but has no time: it does not play and does not export.
+  One frame always plays.
+- `g` shows a grid of every frame, each with a Skip and a Copy button. Copy
+  puts the frame on the clipboard as `p` does, with the crop and the texts.
+  A drag in the grid moves the selected frames, as on the strip.
+  The grid takes the room the letterbox leaves: above the stage for a frame
+  wider than the stage, beside it for a narrower one, and from 30% to 60% of
+  the room.
 - Crop, scale, speed and text still apply. Text times are in output time.
-- `image` decodes a GIF and `image-webp` decodes a WebP, into memory. The
-  frames are full RGBA images, with each delay as the file gives it. Every
-  frame stays in memory while the edit is open, with no limit and no cache.
-  This machine has the memory for it.
+- `image` decodes a GIF and `image-webp` decodes a WebP, into memory, on a
+  background thread. The edit opens with the first frame, and the others join
+  the strip as they decode. The export waits for the last. The frames are
+  full RGBA images, with each delay as the file gives it. Every frame stays in
+  memory while the edit is open, with no limit and no cache. This machine has
+  the memory for it.
+- While the frames play, the window draws when the next frame is due, not at
+  the rate of the display.
 
 ### Image sequence
 
@@ -327,6 +343,8 @@ New default keys, all of which can change through `[keys]`:
 | `n` | add text |
 | `ctrl-enter` | export |
 | `ctrl-d` | duplicate frames |
+| `s` | skip frames |
+| `g` | frame grid |
 | none | delete from database, `forget_file` |
 
 In the Studio, `delete` removes the selected text or frames. The Studio is a

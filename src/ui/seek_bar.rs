@@ -3,8 +3,8 @@
 //! shows the time under it. `shift-left` and `shift-right` skip, and a time in
 //! the Speech tab seeks. In the Studio the bar also holds the range, with a
 //! handle at each end, and a row under it for each text, from its start to its
-//! end. In frame mode the bar runs on the playhead of the strip, with no
-//! range.
+//! end. In frame mode the bar runs on the playhead of the strip, and the
+//! handles snap to the gaps between frames.
 
 use std::time::Duration;
 
@@ -175,14 +175,18 @@ impl FileBuddy {
     }
 
     /// Where the clip is, and how long it is. In frame mode the Studio has no
-    /// video, and the playhead runs on the strip.
+    /// video, and the playhead runs on the strip. It reads as the start of
+    /// the frame under it, so the bar moves only when the frame changes, and
+    /// a draw between frames does not ask for another.
     pub(super) fn clip_times(&self, clip: Clip) -> Option<(Duration, Duration)> {
         if let Some(video) = self.clip_video(clip) {
             return Some((video.position(), video.duration()));
         }
         match (clip, &self.studio.edit) {
             (Clip::Studio, Some(edit)) if edit.framed() => Some((
-                Duration::from_millis(self.studio.strip.at_ms()),
+                Duration::from_millis(
+                    edit.frame_start_ms(edit.frame_at(self.studio.strip.at_ms())),
+                ),
                 Duration::from_millis(edit.duration_ms),
             )),
             _ => None,
@@ -229,7 +233,7 @@ impl FileBuddy {
         };
         let at = (edit.duration_ms as f32 * share.clamp(0., 1.)) as u64;
         edit.drag(edge, at);
-        let at = edit.range.at(edge);
+        let at = edit.handle_ms(edge);
         self.studio.handle = Some(edge);
         self.scrub_to(Clip::Studio, Duration::from_millis(at));
         cx.notify();
@@ -243,7 +247,7 @@ impl FileBuddy {
         let Some(edge) = self.studio.handle.take() else {
             return;
         };
-        self.let_go(Clip::Studio, Duration::from_millis(edit.range.at(edge)));
+        self.let_go(Clip::Studio, Duration::from_millis(edit.handle_ms(edge)));
         cx.notify();
     }
 
@@ -375,9 +379,7 @@ pub(super) fn bar(
         .unwrap_or_else(|| state.read(cx).value().end());
     // In the Studio, the bar fills from the in point.
     let filled_from = match (clip, &this.studio.edit) {
-        (Clip::Studio, Some(edit)) if !edit.framed() => {
-            edit.range.start_ms as f32 / edit.duration_ms.max(1) as f32
-        }
+        (Clip::Studio, Some(edit)) => edit.range.start_ms as f32 / edit.duration_ms.max(1) as f32,
         _ => 0.,
     };
     let theme = cx.theme();
@@ -534,9 +536,9 @@ fn range(this: &FileBuddy, bar: Stateful<Div>, cx: &mut Context<FileBuddy>) -> S
         MouseButton::Left,
         cx.listener(|this, _, _, cx| this.release_handle(cx)),
     )
-    .when(!edit.framed(), |bar| {
-        bar.child(band).child(start_handle).child(end_handle)
-    })
+    .child(band)
+    .child(start_handle)
+    .child(end_handle)
     .child(text_rows(this, edit, cx))
 }
 

@@ -133,7 +133,9 @@ gpui_kit::actions!(
         ExportEdit,
         AddText,
         DeleteText,
-        DuplicateFrames
+        DuplicateFrames,
+        SkipFrames,
+        ToggleFrameGrid
     ]
 );
 

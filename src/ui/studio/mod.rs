@@ -7,6 +7,7 @@
 //! another source replaces it. The clip closes while the page is not shown, so
 //! it holds no file open.
 
+mod grid;
 mod strip;
 mod text;
 
@@ -34,8 +35,8 @@ use crate::studio::{self, Aspect, Controls, Crop, Edge, Edit, Format, Grip, MaxW
 use crate::ui::player::{Transport, open_video};
 use crate::ui::seek_bar::{self, Clip, SeekBar};
 use crate::ui::{
-    AddText, DeleteText, DuplicateFrames, ExportEdit, FileBuddy, Page, SetIn, SetOut, header,
-    preview, toggle,
+    AddText, DeleteText, DuplicateFrames, ExportEdit, FileBuddy, Page, SetIn, SetOut, SkipFrames,
+    ToggleFrameGrid, header, preview, toggle,
 };
 
 const PANEL_WIDTH: f32 = 320.;
@@ -217,7 +218,7 @@ impl FileBuddy {
             (Edit::new(path, input, duration_ms, size), Some(video))
         };
         self.start_edit(edit, video, window, cx);
-        self.reset_strip(Default::default(), window, cx);
+        self.reset_strip(window, cx);
     }
 
     /// The new edit replaces the old one, as a new history step.
@@ -359,12 +360,17 @@ impl FileBuddy {
         }
     }
 
-    /// `[` and `]`: a point of the range at the playhead.
+    /// `[` and `]`: a point of the range at the playhead. In frame mode it is
+    /// the frame on the stage.
     fn set_point(&mut self, edge: Edge, cx: &mut Context<Self>) {
-        let (Some(edit), Some(video)) = (&mut self.studio.edit, &self.studio.video) else {
+        let at = match &self.studio.video {
+            Some(video) => video.position().as_millis() as u64,
+            None if self.framed() => self.studio.strip.at_ms(),
+            None => return,
+        };
+        let Some(edit) = &mut self.studio.edit else {
             return;
         };
-        let at = video.position().as_millis() as u64;
         match edge {
             Edge::Start => edit.set_start(at),
             Edge::End => edit.set_end(at),
@@ -418,6 +424,10 @@ impl FileBuddy {
             self.flash("set an export folder in Settings", true, cx);
             return;
         };
+        if self.frames_loading() {
+            self.flash("the frames are still loading", true, cx);
+            return;
+        }
         if !edit.still && edit.range.len_ms() == 0 {
             self.flash("the range is empty", true, cx);
             return;
@@ -603,13 +613,15 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
         .on_action(
             cx.listener(|this, _: &DuplicateFrames, window, cx| this.duplicate_frames(window, cx)),
         )
+        .on_action(cx.listener(|this, _: &SkipFrames, _, cx| this.skip_frames(None, cx)))
+        .on_action(cx.listener(|this, _: &ToggleFrameGrid, _, cx| this.toggle_frame_grid(cx)))
         .child(
             v_flex()
                 .flex_1()
                 .min_w_0()
                 .gap_2()
                 .p(px(PADDING))
-                .child(stage(this, width, height, cx))
+                .child(viewer(this, edit, width, height, cx))
                 .when(edit.framed(), |column| {
                     column.child(strip::strip(this, edit, width, cx))
                 })
@@ -620,6 +632,34 @@ pub(super) fn page(this: &FileBuddy, window: &Window, cx: &mut Context<FileBuddy
                 }),
         )
         .child(panel(this, edit, cx))
+        .into_any_element()
+}
+
+/// The stage, and in frame mode the grid when it shows, in the room the
+/// timeline leaves.
+fn viewer(
+    this: &FileBuddy,
+    edit: &Edit,
+    width: f32,
+    height: f32,
+    cx: &mut Context<FileBuddy>,
+) -> AnyElement {
+    if !(edit.framed() && this.studio.strip.grid) {
+        return stage(this, width, height, cx);
+    }
+    let place = grid::place(edit.size, width, height);
+    let (stage_width, stage_height) = place.stage;
+    let stage = stage(this, stage_width, stage_height, cx);
+    let grid = grid::grid(this, edit, place.grid, cx);
+    let row = if place.beside {
+        h_flex().child(stage).child(grid)
+    } else {
+        v_flex().child(grid).child(stage)
+    };
+    row.gap(px(grid::GAP))
+        .w(px(width))
+        .h(px(height))
+        .flex_shrink_0()
         .into_any_element()
 }
 

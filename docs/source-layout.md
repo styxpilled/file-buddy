@@ -34,7 +34,8 @@ Two things follow from that:
         mod.rs        the source, the range, the crop, the speed, the texts,
                       the export name
         frames.rs     frame mode: the frames of a GIF or a WebP in memory, and
-                      delete, duplicate, move and delay on the strip
+                      the range of whole frames, and delete, duplicate,
+                      move, skip and delay on the strip
       clip/           visual, as vectors, through ONNX Runtime
         mod.rs        the runtime DLLs, the model config, the vector math
         image.rs      the image encoder, which the `clip` worker loads once
@@ -132,8 +133,11 @@ Two things follow from that:
           mod.rs      the preview that loops the range, the crop box, the
                       panel, and the export while it runs
           text.rs     the texts on the preview and the Text tab of the panel
-          strip.rs    frame mode: the strip of frames, the frame on the stage,
-                      playback by the delays, and the delay in the panel
+          strip.rs    frame mode: the frames as they decode, the strip, the
+                      frame on the stage, playback by the delays, and the
+                      delay in the panel
+          grid.rs     frame mode: every frame at once, with Skip and Copy,
+                      beside or above the stage
         visual.rs     the visual half of a search, which merges in after the
                       text matches, and `a` with its escape steps
         sim.rs        simulated input for the dev window, behind the `sim`

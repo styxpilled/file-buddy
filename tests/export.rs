@@ -282,6 +282,19 @@ fn frames_cut_from_a_gif_keep_their_delays_in_each_format() {
         assert_eq!(colors_and_delays(&exported), expected, "{format:?}");
     }
 
+    // The range and a skip leave frames out, and the rest keep their delays.
+    let mut cut = edit.clone();
+    cut.set_start(40);
+    cut.toggle_skip(&one(2));
+    let destination = dir.path().join("cut.gif");
+    let controls = Controls {
+        format: Format::Gif,
+        ..Controls::default()
+    };
+    export::run(&cut, &controls, &destination, |_| {}).expect("export");
+    let exported = frames::decode(&destination).unwrap();
+    assert_eq!(colors_and_delays(&exported), [('b', 120), ('y', 500)]);
+
     let destination = dir.path().join("out.mp4");
     let controls = Controls {
         format: Format::Mp4,

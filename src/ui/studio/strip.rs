@@ -1,17 +1,20 @@
 //! Frame mode in the Studio: the strip of frames over the timeline, each with
 //! its delay, the frame the stage shows, and playback by the delays. A click
 //! selects a frame, shift-click a run and ctrl-click one more, and a drag
-//! moves the selected frames.
+//! moves the selected frames. The frames decode on a background thread and
+//! join the strip as they come, so the edit opens on the first one.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
+use futures::channel::mpsc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, ClickEvent, Context, DragMoveEvent, Entity, Hsla, Modifiers, MouseButton,
-    MouseDownEvent, ObjectFit, Render, RenderImage, ScrollHandle, Subscription, Window, div, img,
-    px, rgb,
+    MouseDownEvent, Render, RenderImage, ScrollHandle, Subscription, Task, UniformListScrollHandle,
+    Window, div, img, px, rgb,
 };
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -20,16 +23,19 @@ use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use image::RgbaImage;
 
 use super::frame_in;
+use crate::actions::clipboard;
+use crate::ffmpeg::export;
 use crate::studio::Edit;
 use crate::studio::frames::{self, Frame, MIN_DELAY_MS};
-use crate::ui::FileBuddy;
 use crate::ui::seek_bar::{self, Clip};
+use crate::ui::{FileBuddy, toggle};
 
 const CELL_WIDTH: f32 = 64.;
 const CELL_GAP: f32 = 4.;
 const THUMB_HEIGHT: f32 = 40.;
-/// The small copies are this many pixels high, so they stay sharp at 200%.
-const THUMB_PIXELS: u32 = 80;
+/// The small copies are this many pixels high, so they stay sharp in the grid
+/// at 200%.
+const THUMB_PIXELS: u32 = 192;
 const DELAY_LINE: f32 = 16.;
 /// The room for the scrollbar under the cells.
 const SCROLLBAR: f32 = 10.;
@@ -37,6 +43,8 @@ const SCROLLBAR: f32 = 10.;
 pub(super) const HEIGHT: f32 = THUMB_HEIGHT + DELAY_LINE + SCROLLBAR + 4.;
 /// The input of the delay.
 const DELAY_INPUT: f32 = 64.;
+/// A skipped frame, on the strip and in the grid.
+pub(super) const SKIPPED_OPACITY: f32 = 0.35;
 
 pub(in crate::ui) struct Strip {
     pub(super) selected: BTreeSet<usize>,
@@ -46,15 +54,23 @@ pub(in crate::ui) struct Strip {
     at_ms: f64,
     /// When the playhead last moved, while the frames play.
     clock: Option<Instant>,
+    /// Draws the window again when the next frame is due.
+    tick: Option<Task<()>>,
+    /// The frame a click put on the stage. A skipped frame has no time, so
+    /// the playhead alone cannot show it.
+    held: Option<usize>,
     /// The small copies of the strip, by image. A copy of a frame shares one.
-    thumbs: HashMap<usize, Arc<RenderImage>>,
+    pub(super) thumbs: HashMap<usize, Arc<RenderImage>>,
     /// The frame on the stage, at full size, by image.
     shown: Option<(usize, Arc<RenderImage>)>,
     /// The gap the drag would put the selected frames in.
-    drop_gap: Option<usize>,
+    pub(super) drop_gap: Option<usize>,
     /// A drag just moved the frames, so its release is no click.
     moved: bool,
     scroll: ScrollHandle,
+    /// Every frame at once, beside or above the stage.
+    pub(super) grid: bool,
+    pub(super) grid_scroll: UniformListScrollHandle,
     pub(in crate::ui) delay_input: Entity<InputState>,
     _delay_events: Subscription,
 }
@@ -69,27 +85,7 @@ impl Render for FrameDrag {
     }
 }
 
-/// The frames of a file and their small copies, made away from the window.
-pub(super) struct Decoded {
-    pub(super) frames: Vec<Frame>,
-    thumbs: HashMap<usize, Arc<RenderImage>>,
-}
-
-pub(super) fn decode(path: &std::path::Path) -> anyhow::Result<Decoded> {
-    let frames = frames::decode(path)?;
-    let mut thumbs = HashMap::new();
-    for frame in &frames {
-        thumbs.entry(key(frame)).or_insert_with(|| {
-            let (width, height) = frame.image.dimensions();
-            let thumb_width = (width * THUMB_PIXELS / height.max(1)).max(1);
-            let small = image::imageops::thumbnail(frame.image.as_ref(), thumb_width, THUMB_PIXELS);
-            render_image(&small)
-        });
-    }
-    Ok(Decoded { frames, thumbs })
-}
-
-fn key(frame: &Frame) -> usize {
+pub(super) fn key(frame: &Frame) -> usize {
     Arc::as_ptr(&frame.image) as usize
 }
 
@@ -100,6 +96,25 @@ fn render_image(rgba: &RgbaImage) -> Arc<RenderImage> {
         pixel.0.swap(0, 2);
     }
     Arc::new(RenderImage::new(vec![image::Frame::new(bgra)]))
+}
+
+fn thumbnail(frame: &Frame) -> Arc<RenderImage> {
+    let (width, height) = frame.image.dimensions();
+    let width = (width * THUMB_PIXELS / height.max(1)).max(1);
+    render_image(&image::imageops::thumbnail(
+        frame.image.as_ref(),
+        width,
+        THUMB_PIXELS,
+    ))
+}
+
+/// The size of a frame of `size` that fits in `room`, whole.
+pub(super) fn fitted(size: (u32, u32), (width, height): (f32, f32)) -> (f32, f32) {
+    if size.0 == 0 || size.1 == 0 {
+        return (width, height);
+    }
+    let scale = (width / size.0 as f32).min(height / size.1 as f32);
+    (size.0 as f32 * scale, size.1 as f32 * scale)
 }
 
 impl Strip {
@@ -134,11 +149,15 @@ impl Strip {
             anchor: 0,
             at_ms: 0.,
             clock: None,
+            tick: None,
+            held: None,
             thumbs: HashMap::new(),
             shown: None,
             drop_gap: None,
             moved: false,
             scroll: ScrollHandle::new(),
+            grid: false,
+            grid_scroll: UniformListScrollHandle::new(),
             delay_input,
             _delay_events: delay_events,
         }
@@ -148,23 +167,38 @@ impl Strip {
         self.at_ms as u64
     }
 
+    /// Scrolls the strip so the cell shows. The cell may not be built, so this
+    /// goes by its place and not by its element.
+    fn reveal(&mut self, index: usize, len: usize) {
+        let width = f32::from(self.scroll.bounds().size.width);
+        let step = CELL_WIDTH + CELL_GAP;
+        let left = -f32::from(self.scroll.offset().x);
+        let at = index as f32 * step;
+        let to = if at < left {
+            at
+        } else if at + CELL_WIDTH > left + width {
+            at + CELL_WIDTH - width
+        } else {
+            return;
+        };
+        let most = (len as f32 * step - CELL_GAP - width).max(0.);
+        self.scroll
+            .set_offset(gpui::point(px(-to.clamp(0., most)), px(0.)));
+    }
+
     /// The page closed. The clock starts again when the frames play.
     pub(super) fn stop(&mut self) {
         self.clock = None;
+        self.tick = None;
         self.drop_gap = None;
     }
 }
 
 impl FileBuddy {
     /// A new source. The images of the last one leave the atlas.
-    pub(super) fn reset_strip(
-        &mut self,
-        thumbs: HashMap<usize, Arc<RenderImage>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn reset_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let strip = &mut self.studio.strip;
-        let old: Vec<_> = std::mem::replace(&mut strip.thumbs, thumbs)
+        let old: Vec<_> = std::mem::take(&mut strip.thumbs)
             .into_values()
             .chain(strip.shown.take().map(|(_, image)| image))
             .collect();
@@ -175,14 +209,14 @@ impl FileBuddy {
         strip.selected.clear();
         strip.anchor = 0;
         strip.at_ms = 0.;
-        strip.clock = None;
-        strip.drop_gap = None;
+        strip.held = None;
+        strip.stop();
         strip.moved = false;
         self.sync_delay_input(window, cx);
     }
 
-    /// Opens a GIF or an animated WebP in frame mode, once the frames are
-    /// decoded away from the window.
+    /// Opens a GIF or an animated WebP in frame mode. The frames decode away
+    /// from the window, and the edit opens with the first of them.
     pub(super) fn open_frames(
         &mut self,
         path: std::path::PathBuf,
@@ -190,33 +224,83 @@ impl FileBuddy {
         cx: &mut Context<Self>,
     ) {
         self.flash("opening the frames", false, cx);
+        let (sender, mut decoded) = mpsc::unbounded();
+        let source = path.clone();
+        let decoding = cx.background_executor().spawn(async move {
+            frames::decode_each(&source, |frame| {
+                let thumb = thumbnail(&frame);
+                sender.unbounded_send((frame, thumb)).is_ok()
+            })
+        });
         let task = cx.spawn_in(window, async move |this, cx| {
-            let source = path.clone();
-            let decoded = cx
-                .background_executor()
-                .spawn(async move { decode(&source) })
-                .await;
-            this.update_in(cx, |this, window, cx| match decoded {
-                Ok(decoded) => {
-                    this.studio.opening = None;
-                    this.notice = None;
-                    let edit = Edit::with_frames(path, decoded.frames);
-                    this.start_edit(edit, None, window, cx);
-                    this.reset_strip(decoded.thumbs, window, cx);
+            let mut opened = false;
+            while let Some(next) = decoded.next().await {
+                let mut batch = vec![next];
+                while let Ok(more) = decoded.try_recv() {
+                    batch.push(more);
                 }
-                Err(e) => {
-                    this.studio.opening = None;
+                let path = path.clone();
+                let added = this.update_in(cx, |this, window, cx| {
+                    this.add_frames(path, batch, opened, window, cx)
+                });
+                if added.is_err() {
+                    return;
+                }
+                opened = true;
+            }
+            let result = decoding.await;
+            this.update(cx, |this, cx| {
+                this.studio.opening = None;
+                if let Err(e) = result {
                     log::warn!("cannot decode {}: {e:#}", path.display());
-                    this.flash("this file cannot open", true, cx);
+                    let message = if opened {
+                        "some frames cannot open"
+                    } else {
+                        "this file cannot open"
+                    };
+                    this.flash(message, true, cx);
                 }
+                cx.notify();
             })
             .ok();
         });
         self.studio.opening = Some(task);
     }
 
+    /// Frames that just decoded. The first of them open the edit.
+    fn add_frames(
+        &mut self,
+        path: std::path::PathBuf,
+        batch: Vec<(Frame, Arc<RenderImage>)>,
+        opened: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (frames, thumbs): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
+        let keys: Vec<_> = frames.iter().map(key).collect();
+        if opened {
+            if let Some(edit) = &mut self.studio.edit {
+                edit.push_frames(frames);
+            }
+        } else {
+            self.notice = None;
+            self.start_edit(Edit::with_frames(path, frames), None, window, cx);
+            self.reset_strip(window, cx);
+        }
+        self.studio
+            .strip
+            .thumbs
+            .extend(keys.into_iter().zip(thumbs));
+        cx.notify();
+    }
+
     pub(in crate::ui) fn framed(&self) -> bool {
         self.studio.edit.as_ref().is_some_and(Edit::framed)
+    }
+
+    /// The frames of the edit still decode.
+    pub(super) fn frames_loading(&self) -> bool {
+        self.framed() && self.studio.opening.is_some()
     }
 
     /// Where the Studio is, in milliseconds of the source or of the strip.
@@ -240,30 +324,50 @@ impl FileBuddy {
         let strip = &mut self.studio.strip;
         strip.at_ms = (to.as_millis() as u64).min(length.saturating_sub(1)) as f64;
         strip.clock = None;
+        strip.held = None;
     }
 
-    /// Called on every frame of the page. The playhead runs at the speed of
-    /// the edit and the speed button, and the stage holds the frame under it.
+    /// Called on every frame of the page. The playhead runs over the range at
+    /// the speed of the edit and the speed button, and the stage holds the
+    /// frame under it. The window draws again when the next frame is due, not
+    /// at the rate of the display.
     pub(super) fn step_strip(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(edit) = self.studio.edit.as_ref().filter(|edit| edit.framed()) else {
             return;
         };
-        let playing = self.studio.transport.playing() && self.studio.seek_bar.dragging.is_none();
-        let length = edit.duration_ms.max(1) as f64;
+        let (start, end) = (edit.range.start_ms as f64, edit.range.end_ms as f64);
+        let playing = self.studio.transport.playing()
+            && self.studio.seek_bar.dragging.is_none()
+            && end > start;
         let speed = self.clip_speed(Clip::Studio);
         let strip = &mut self.studio.strip;
-        if playing {
+        let index = if playing {
+            strip.held = None;
             let now = Instant::now();
             if let Some(then) = strip.clock {
-                strip.at_ms = (strip.at_ms + (now - then).as_secs_f64() * 1000. * speed) % length;
+                strip.at_ms += (now - then).as_secs_f64() * 1000. * speed;
+            }
+            if strip.at_ms >= end {
+                strip.at_ms = start + (strip.at_ms - end) % (end - start);
             }
             strip.clock = Some(now);
-            window.request_animation_frame();
+            let index = edit.frame_at(strip.at_ms as u64);
+            let next = (edit.frame_start_ms(index + 1) as f64).min(end);
+            let wait = Duration::from_secs_f64((next - strip.at_ms).max(1.) / speed / 1000.);
+            strip.tick = Some(cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(wait).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }));
+            index
         } else {
             strip.clock = None;
-        }
+            strip.tick = None;
+            strip
+                .held
+                .filter(|&held| held < edit.frames.len())
+                .unwrap_or_else(|| edit.frame_at(strip.at_ms as u64))
+        };
 
-        let index = edit.frame_at(strip.at_ms as u64);
         let frame = &edit.frames[index];
         if strip
             .shown
@@ -277,14 +381,14 @@ impl FileBuddy {
             cx.drop_image(old, Some(window));
         }
         if playing {
-            strip.scroll.scroll_to_item(index);
+            strip.reveal(index, edit.frames.len());
         }
     }
 
     /// A press on a frame. Shift and ctrl change the selection at once. A
     /// press on a frame already selected waits for the release, so a drag can
     /// move the whole selection.
-    fn press_frame(
+    pub(super) fn press_frame(
         &mut self,
         index: usize,
         modifiers: Modifiers,
@@ -308,7 +412,7 @@ impl FileBuddy {
     }
 
     /// The release of a plain press on a selected frame, with no drag.
-    fn click_frame(
+    pub(super) fn click_frame(
         &mut self,
         index: usize,
         event: &ClickEvent,
@@ -329,6 +433,7 @@ impl FileBuddy {
     fn show_frame(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(edit) = &self.studio.edit {
             self.studio.strip.at_ms = edit.frame_start_ms(index) as f64;
+            self.studio.strip.held = Some(index);
         }
         self.studio.transport.paused = true;
         self.select_text(None, window, cx);
@@ -388,7 +493,62 @@ impl FileBuddy {
         strip.selected = copies;
         strip.anchor = first;
         self.show_frame(first, window, cx);
-        self.studio.strip.scroll.scroll_to_item(first);
+        let len = self
+            .studio
+            .edit
+            .as_ref()
+            .map_or(0, |edit| edit.frames.len());
+        self.studio.strip.reveal(first, len);
+    }
+
+    /// `s` skips the selected frames, or plays them again. The Skip button of a
+    /// frame in the grid does it to that frame alone.
+    pub(super) fn skip_frames(&mut self, only: Option<usize>, cx: &mut Context<Self>) {
+        let Some(edit) = self.studio.edit.as_mut().filter(|edit| edit.framed()) else {
+            return;
+        };
+        let chosen = match only {
+            Some(index) => BTreeSet::from([index]),
+            None => self.studio.strip.selected.clone(),
+        };
+        if !edit.toggle_skip(&chosen) && !chosen.is_empty() {
+            self.flash("an animation keeps one frame", true, cx);
+        }
+        cx.notify();
+    }
+
+    /// The Copy button of a frame in the grid. The frame goes to the clipboard
+    /// as `p` puts the stage there: with the crop and the texts.
+    pub(super) fn copy_frame(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(edit) = self.studio.edit.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let copied = cx
+                .background_executor()
+                .spawn(async move {
+                    export::frame_screenshot(&edit, index)
+                        .and_then(|png| clipboard::copy_image(&png))
+                })
+                .await;
+            this.update(cx, |this, cx| match copied {
+                Ok(_) => this.flash(format!("copied frame {}", index + 1), false, cx),
+                Err(e) => {
+                    log::error!("copy of frame {index} failed: {e:#}");
+                    this.flash(format!("copy failed: {e}"), true, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// `g`.
+    pub(super) fn toggle_frame_grid(&mut self, cx: &mut Context<Self>) {
+        if self.framed() {
+            self.studio.strip.grid = !self.studio.strip.grid;
+            cx.notify();
+        }
     }
 
     /// The pointer moves with frames held. The gap is the one nearest it.
@@ -400,13 +560,18 @@ impl FileBuddy {
         let offset = f32::from(strip.scroll.offset().x);
         let along = (x - left - offset) / (CELL_WIDTH + CELL_GAP);
         let gap = (along + 0.5).floor().clamp(0., edit.frames.len() as f32) as usize;
+        self.set_drop_gap(gap, cx);
+    }
+
+    pub(super) fn set_drop_gap(&mut self, gap: usize, cx: &mut Context<Self>) {
+        let strip = &mut self.studio.strip;
         if strip.drop_gap != Some(gap) {
             strip.drop_gap = Some(gap);
             cx.notify();
         }
     }
 
-    fn drop_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn drop_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(gap) = self.studio.strip.drop_gap.take() else {
             return;
         };
@@ -438,8 +603,38 @@ pub(super) fn stage_frame(this: &FileBuddy, width: f32, height: f32) -> Option<A
     )
 }
 
-/// Every frame with its delay, in a row that scrolls. The frame under the
-/// playhead has its delay in the accent color.
+/// The small copy of a frame, whole inside `room`. GPUI keeps an image at its
+/// own aspect, so a box of another aspect would cut it.
+pub(super) fn thumb(this: &FileBuddy, edit: &Edit, frame: &Frame, room: (f32, f32)) -> AnyElement {
+    let (width, height) = fitted(edit.size, room);
+    div()
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .children(
+            this.studio
+                .strip
+                .thumbs
+                .get(&key(frame))
+                .map(|thumb| img(thumb.clone()).w(px(width)).h(px(height))),
+        )
+        .into_any_element()
+}
+
+/// The cells in sight, with a few on each side.
+fn cells_in_sight(scroll: &ScrollHandle, len: usize, width: f32) -> std::ops::Range<usize> {
+    let step = CELL_WIDTH + CELL_GAP;
+    let left = -f32::from(scroll.offset().x);
+    let last = (((left + width) / step).ceil().max(0.) as usize + 2).min(len);
+    let first = ((left / step).floor().max(0.) as usize).saturating_sub(2);
+    first.min(last)..last
+}
+
+/// Every frame with its delay, in a row that scrolls. Only the cells in sight
+/// are built, because the window draws the strip again on every frame while
+/// the frames play. The frame under the playhead has its delay in the accent
+/// color, and a skipped frame is faint.
 pub(super) fn strip(
     this: &FileBuddy,
     edit: &Edit,
@@ -451,13 +646,19 @@ pub(super) fn strip(
     let accent = Hsla::from(rgb(seek_bar::RANGE_COLOR));
     let (muted, secondary) = (theme.muted_foreground, theme.secondary);
     let current = edit.frame_at(strip.at_ms());
-    let cells = edit.frames.iter().enumerate().map(|(index, frame)| {
+    // The border takes 2 pixels on each side.
+    let room = (CELL_WIDTH - 4., THUMB_HEIGHT - 4.);
+    let len = edit.frames.len();
+    let step = CELL_WIDTH + CELL_GAP;
+    let cells = cells_in_sight(&strip.scroll, len, width).map(|index| {
+        let frame = &edit.frames[index];
         let selected = strip.selected.contains(&index);
         let gap_before = strip.drop_gap == Some(index);
         div()
             .id(("strip-frame", index))
-            .relative()
-            .flex_shrink_0()
+            .absolute()
+            .top_0()
+            .left(px(index as f32 * step))
             .w(px(CELL_WIDTH))
             .flex()
             .flex_col()
@@ -475,27 +676,35 @@ pub(super) fn strip(
                     } else {
                         gpui::transparent_black()
                     })
-                    .children(strip.thumbs.get(&key(frame)).map(|thumb| {
-                        img(thumb.clone())
+                    .child(
+                        div()
                             .size_full()
-                            .object_fit(ObjectFit::Contain)
-                    })),
+                            .when(frame.skipped, |thumb| thumb.opacity(SKIPPED_OPACITY))
+                            .child(thumb(this, edit, frame, room)),
+                    ),
             )
             .child(
                 div()
                     .h(px(DELAY_LINE))
                     .text_xs()
                     .text_center()
-                    .text_color(if index == current { accent } else { muted })
-                    .child(format!("{} ms", frame.delay_ms)),
+                    .text_color(if index == current && !frame.skipped {
+                        accent
+                    } else {
+                        muted
+                    })
+                    .child(if frame.skipped {
+                        "skip".to_string()
+                    } else {
+                        format!("{} ms", frame.delay_ms)
+                    }),
             )
             .when(gap_before, |cell| {
                 cell.child(gap_marker(accent, -CELL_GAP / 2. - 1.))
             })
-            .when(
-                strip.drop_gap == Some(edit.frames.len()) && index + 1 == edit.frames.len(),
-                |cell| cell.child(gap_marker(accent, CELL_WIDTH + CELL_GAP / 2. - 1.)),
-            )
+            .when(strip.drop_gap == Some(len) && index + 1 == len, |cell| {
+                cell.child(gap_marker(accent, CELL_WIDTH + CELL_GAP / 2. - 1.))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -520,7 +729,6 @@ pub(super) fn strip(
                 .w_full()
                 .h_full()
                 .flex()
-                .gap(px(CELL_GAP))
                 .on_drag_move(
                     cx.listener(|this, event: &DragMoveEvent<FrameDrag>, _, cx| {
                         let left = f32::from(event.bounds.left());
@@ -535,45 +743,86 @@ pub(super) fn strip(
                     MouseButton::Left,
                     cx.listener(|this, _, window, cx| this.drop_frames(window, cx)),
                 )
-                .children(cells),
+                .child(
+                    div()
+                        .relative()
+                        .flex_shrink_0()
+                        .h_full()
+                        .w(px((len as f32 * step - CELL_GAP).max(0.)))
+                        .children(cells),
+                ),
         )
         .horizontal_scrollbar(&strip.scroll)
         .into_any_element()
 }
 
 fn gap_marker(color: Hsla, left: f32) -> impl IntoElement {
+    marker(color, left, THUMB_HEIGHT)
+}
+
+/// Where a drag would put the selected frames, on the strip or in the grid.
+pub(super) fn marker(color: Hsla, left: f32, height: f32) -> gpui::Div {
     div()
         .absolute()
         .top_0()
         .left(px(left))
         .w(px(2.))
-        .h(px(THUMB_HEIGHT))
+        .h(px(height))
         .bg(color)
 }
 
-/// The panel in frame mode: the count and length, and the delay of the
-/// selected frames with the keys that copy and remove them.
+/// The panel in frame mode: the count and length, the grid toggle, and the
+/// delay of the selected frames with the keys that skip, copy and remove them.
 pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) -> AnyElement {
     let selected = this.studio.strip.selected.len();
+    let loading = this.frames_loading();
     let theme = cx.theme();
     let muted = theme.muted_foreground;
     let length = |ms: u64| crate::media::duration(ms as f64 / 1000.);
+    let skipped = edit.frames.iter().filter(|frame| frame.skipped).count();
+    let (first, last) = edit.frame_range;
+    let count = match (loading, skipped) {
+        (true, _) => format!("{} frames, loading", edit.frames.len()),
+        (false, 0) => format!("{} frames", edit.frames.len()),
+        (false, n) => format!("{} frames, {n} skipped", edit.frames.len()),
+    };
+    let action = |id: &'static str, label: &'static str, key: &'static str| {
+        Button::new(id)
+            .xsmall()
+            .label(label)
+            .tooltip(key)
+            .disabled(selected == 0)
+            .when(selected > 0, |button| button.cursor_pointer())
+    };
     v_flex()
         .gap_1()
         .child(
             h_flex()
+                .gap_1()
+                .items_center()
+                .child(div().flex_1().child(count))
+                .child(
+                    toggle("frames-grid", "Grid", this.studio.strip.grid)
+                        .xsmall()
+                        .tooltip("G")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_frame_grid(cx))),
+                ),
+        )
+        .child(
+            h_flex()
+                .gap_1()
+                .text_color(muted)
                 .child(
                     div()
                         .flex_1()
-                        .child(format!("{} frames", edit.frames.len())),
+                        .child(format!("Frames {} - {}", first + 1, last + 1)),
                 )
-                .child(length(edit.output_ms()))
                 .child(
                     div()
-                        .text_color(muted)
-                        .ml_1()
-                        .child(format!("/ {}", length(edit.duration_ms))),
-                ),
+                        .text_color(theme.foreground)
+                        .child(length(edit.output_ms())),
+                )
+                .child(format!("/ {}", length(edit.duration_ms))),
         )
         .child(
             h_flex()
@@ -590,26 +839,18 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
                 .child(div().text_color(muted).child("ms"))
                 .child(div().flex_1())
                 .child(
-                    Button::new("frames-duplicate")
-                        .xsmall()
-                        .label("Duplicate")
-                        .tooltip("Ctrl+D")
-                        .disabled(selected == 0)
-                        .when(selected > 0, |button| button.cursor_pointer())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.duplicate_frames(window, cx)),
-                        ),
+                    action("frames-skip", "Skip", "S")
+                        .on_click(cx.listener(|this, _, _, cx| this.skip_frames(None, cx))),
                 )
                 .child(
-                    Button::new("frames-delete")
-                        .xsmall()
-                        .label("Delete")
-                        .tooltip("Delete")
-                        .disabled(selected == 0)
-                        .when(selected > 0, |button| button.cursor_pointer())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.delete_frames(window, cx)),
-                        ),
+                    action("frames-duplicate", "Duplicate", "Ctrl+D").on_click(
+                        cx.listener(|this, _, window, cx| this.duplicate_frames(window, cx)),
+                    ),
+                )
+                .child(
+                    action("frames-delete", "Delete", "Delete").on_click(
+                        cx.listener(|this, _, window, cx| this.delete_frames(window, cx)),
+                    ),
                 ),
         )
         .child(div().text_xs().text_color(muted).child(match selected {

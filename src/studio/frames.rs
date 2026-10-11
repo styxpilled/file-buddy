@@ -1,6 +1,7 @@
 //! Frame mode: every frame of a GIF or an animated WebP in memory, each with
 //! its delay, and the edits of the strip. Text times are in output time, so a
-//! text stays at its moment when frames go or move.
+//! text stays at its moment when frames go or move. The range is a first and a
+//! last frame, and a skipped frame stays on the strip with no time.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -13,7 +14,7 @@ use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, RgbaImage};
 use image_webp::WebPDecoder;
 
-use super::{Edit, Range};
+use super::{Edge, Edit, Range};
 
 /// Browsers play a delay this short or shorter at `SHORT_DELAY_PLAYS_AT`.
 const SHORT_DELAY_MS: u32 = 10;
@@ -27,11 +28,34 @@ pub const MIN_DELAY_MS: u32 = 20;
 pub struct Frame {
     pub image: Arc<RgbaImage>,
     pub delay_ms: u32,
+    /// It does not play and does not export.
+    pub skipped: bool,
+}
+
+impl Frame {
+    pub fn new(image: RgbaImage, delay_ms: u32) -> Self {
+        Self {
+            image: Arc::new(image),
+            delay_ms,
+            skipped: false,
+        }
+    }
+
+    /// Its time on the strip.
+    pub fn length_ms(&self) -> u64 {
+        if self.skipped {
+            0
+        } else {
+            u64::from(self.delay_ms)
+        }
+    }
 }
 
 impl PartialEq for Frame {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.image, &other.image) && self.delay_ms == other.delay_ms
+        Arc::ptr_eq(&self.image, &other.image)
+            && self.delay_ms == other.delay_ms
+            && self.skipped == other.skipped
     }
 }
 
@@ -40,6 +64,7 @@ impl std::fmt::Debug for Frame {
         f.debug_struct("Frame")
             .field("size", &self.image.dimensions())
             .field("delay_ms", &self.delay_ms)
+            .field("skipped", &self.skipped)
             .finish()
     }
 }
@@ -55,40 +80,54 @@ pub fn played(delay_ms: u32) -> u32 {
 
 /// Every frame of a GIF or a WebP, whole and in RGBA.
 pub fn decode(path: &Path) -> Result<Vec<Frame>> {
+    let mut frames = Vec::new();
+    decode_each(path, |frame| {
+        frames.push(frame);
+        true
+    })?;
+    Ok(frames)
+}
+
+/// The frames of a GIF or a WebP in order, one at a time, as they decode.
+/// `each` returns false to stop.
+pub fn decode_each(path: &Path, mut each: impl FnMut(Frame) -> bool) -> Result<()> {
     let mut head = [0u8; 12];
     File::open(path)
         .and_then(|mut file| file.read_exact(&mut head))
         .with_context(|| format!("read {}", path.display()))?;
-    let frames = if head.starts_with(b"GIF8") {
-        gif(path)?
+    let mut count = 0;
+    let mut counted = |frame| {
+        count += 1;
+        each(frame)
+    };
+    if head.starts_with(b"GIF8") {
+        gif(path, &mut counted)?;
     } else if &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP" {
-        webp(path)?
+        webp(path, &mut counted)?;
     } else {
         bail!("not a GIF or a WebP");
-    };
-    if frames.is_empty() {
+    }
+    if count == 0 {
         bail!("the animation has no frames");
     }
-    Ok(frames)
+    Ok(())
 }
 
-fn gif(path: &Path) -> Result<Vec<Frame>> {
+fn gif(path: &Path, each: &mut impl FnMut(Frame) -> bool) -> Result<()> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let decoder = GifDecoder::new(BufReader::new(file)).context("decode the GIF")?;
-    decoder
-        .into_frames()
-        .map(|frame| {
-            let frame = frame.context("decode a frame")?;
-            let (numerator, denominator) = frame.delay().numer_denom_ms();
-            Ok(Frame {
-                delay_ms: played(numerator / denominator.max(1)),
-                image: Arc::new(frame.into_buffer()),
-            })
-        })
-        .collect()
+    for frame in decoder.into_frames() {
+        let frame = frame.context("decode a frame")?;
+        let (numerator, denominator) = frame.delay().numer_denom_ms();
+        let delay_ms = played(numerator / denominator.max(1));
+        if !each(Frame::new(frame.into_buffer(), delay_ms)) {
+            break;
+        }
+    }
+    Ok(())
 }
 
-fn webp(path: &Path) -> Result<Vec<Frame>> {
+fn webp(path: &Path, each: &mut impl FnMut(Frame) -> bool) -> Result<()> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut decoder = WebPDecoder::new(BufReader::new(file)).context("decode the WebP")?;
     let (width, height) = decoder.dimensions();
@@ -112,20 +151,16 @@ fn webp(path: &Path) -> Result<Vec<Frame>> {
         decoder
             .read_image(&mut buffer)
             .context("decode the image")?;
-        return Ok(vec![Frame {
-            image: Arc::new(rgba(&buffer)?),
-            delay_ms: SHORT_DELAY_PLAYS_AT,
-        }]);
+        each(Frame::new(rgba(&buffer)?, SHORT_DELAY_PLAYS_AT));
+        return Ok(());
     }
-    (0..decoder.num_frames())
-        .map(|_| {
-            let delay = decoder.read_frame(&mut buffer).context("decode a frame")?;
-            Ok(Frame {
-                image: Arc::new(rgba(&buffer)?),
-                delay_ms: played(delay),
-            })
-        })
-        .collect()
+    for _ in 0..decoder.num_frames() {
+        let delay = decoder.read_frame(&mut buffer).context("decode a frame")?;
+        if !each(Frame::new(rgba(&buffer)?, played(delay))) {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// A click on the strip. Shift selects the run from the last plain click, and
@@ -159,6 +194,7 @@ impl Edit {
             .map_or((0, 0), |frame| frame.image.dimensions());
         let mut edit = Self {
             frames,
+            frame_range: (0, usize::MAX),
             ..Self::new(source.clone(), source, 0, size)
         };
         edit.retime();
@@ -169,35 +205,125 @@ impl Edit {
         !self.frames.is_empty()
     }
 
-    /// The length and the range follow the strip. Frame mode has no range of
-    /// its own.
+    /// Frames that decode after the edit opens go at the end. A range on the
+    /// whole strip grows with them.
+    pub fn push_frames(&mut self, frames: Vec<Frame>) {
+        let whole = self.whole_range();
+        self.frames.extend(frames);
+        if whole {
+            self.frame_range.1 = usize::MAX;
+        }
+        self.retime();
+    }
+
+    fn whole_range(&self) -> bool {
+        self.frame_range == (0, self.frames.len().saturating_sub(1))
+    }
+
+    /// The length follows the strip, and the range follows its first and last
+    /// frame.
     fn retime(&mut self) {
-        let total = self.frames.iter().map(|f| u64::from(f.delay_ms)).sum();
-        self.duration_ms = total;
+        self.duration_ms = self.frames.iter().map(Frame::length_ms).sum();
+        let last = self.frames.len().saturating_sub(1);
+        let (first, end) = self.frame_range;
+        self.frame_range = (first.min(last), end.clamp(first.min(last), last));
         self.range = Range {
-            start_ms: 0,
-            end_ms: total,
+            start_ms: self.frame_start_ms(self.frame_range.0),
+            end_ms: self.frame_start_ms(self.frame_range.1 + 1),
         };
     }
 
     pub fn frame_start_ms(&self, index: usize) -> u64 {
         self.frames[..index.min(self.frames.len())]
             .iter()
-            .map(|f| u64::from(f.delay_ms))
+            .map(Frame::length_ms)
             .sum()
     }
 
-    /// The frame that shows at `at_ms` of the strip. The last one holds past
-    /// the end.
+    /// The frame that shows at `at_ms` of the strip. A skipped frame never
+    /// shows, and the last shown frame holds past the end.
     pub fn frame_at(&self, at_ms: u64) -> usize {
         let mut end = 0;
         for (index, frame) in self.frames.iter().enumerate() {
-            end += u64::from(frame.delay_ms);
+            end += frame.length_ms();
             if at_ms < end {
                 return index;
             }
         }
-        self.frames.len().saturating_sub(1)
+        self.frames
+            .iter()
+            .rposition(|frame| !frame.skipped)
+            .unwrap_or(0)
+    }
+
+    /// The gap between frames nearest `at_ms`, from 0 to the length of the
+    /// strip.
+    fn gap_near(&self, at_ms: u64) -> usize {
+        let mut start = 0u64;
+        let mut best = (u64::MAX, 0);
+        for gap in 0..=self.frames.len() {
+            best = best.min((start.abs_diff(at_ms), gap));
+            if let Some(frame) = self.frames.get(gap) {
+                start += frame.length_ms();
+            }
+        }
+        best.1
+    }
+
+    /// The frames the export keeps: those in the range that are not skipped,
+    /// each with its start on the strip.
+    pub fn kept_frames(&self) -> impl Iterator<Item = (u64, &Frame)> {
+        let (first, last) = self.frame_range;
+        let frames = self.frames.get(first..=last).unwrap_or_default();
+        frames
+            .iter()
+            .scan(self.range.start_ms, |start, frame| {
+                let at = *start;
+                *start += frame.length_ms();
+                Some((at, frame))
+            })
+            .filter(|(_, frame)| !frame.skipped)
+    }
+
+    /// `[`. The range starts at the frame on the stage.
+    pub(super) fn set_first_frame(&mut self, at_ms: u64) {
+        let first = self.frame_at(at_ms);
+        if first > self.frame_range.1 {
+            self.frame_range.1 = usize::MAX;
+        }
+        self.frame_range.0 = first;
+        self.retime();
+    }
+
+    /// `]`. The range ends with the frame on the stage.
+    pub(super) fn set_last_frame(&mut self, at_ms: u64) {
+        let last = self.frame_at(at_ms);
+        if last < self.frame_range.0 {
+            self.frame_range.0 = 0;
+        }
+        self.frame_range.1 = last;
+        self.retime();
+    }
+
+    /// A drag on a handle snaps it to the gap between frames nearest it. It
+    /// stops at the other handle, so the range keeps one frame.
+    pub(super) fn drag_frame_edge(&mut self, edge: Edge, at_ms: u64) {
+        let gap = self.gap_near(at_ms);
+        let (first, last) = self.frame_range;
+        self.frame_range = match edge {
+            Edge::Start => (gap.min(last), last),
+            Edge::End => (first, gap.max(first + 1) - 1),
+        };
+        self.retime();
+    }
+
+    /// Where the playhead goes for a handle. At the end it is the last frame
+    /// of the range, not the frame after it.
+    pub fn handle_ms(&self, edge: Edge) -> u64 {
+        match edge {
+            Edge::End if self.framed() => self.frame_start_ms(self.frame_range.1),
+            _ => self.range.at(edge),
+        }
     }
 
     /// `delete`. Returns the frame to select after it: the one after the
@@ -210,18 +336,29 @@ impl Edit {
             return None;
         }
         let first = *selected.first()?;
+        let whole = self.whole_range();
         let mut index = 0;
         self.frames.retain(|_| {
             let keep = !selected.contains(&index);
             index += 1;
             keep
         });
+        // The range keeps the frames of it that stay. With none of them left,
+        // it is the whole strip.
+        let (start, end) = self.frame_range;
+        let new_start = start - selected.range(..start).count();
+        let kept_to_end = end + 1 - selected.range(..=end).count();
+        self.frame_range = if whole || kept_to_end <= new_start {
+            (0, usize::MAX)
+        } else {
+            (new_start, kept_to_end - 1)
+        };
         self.retime();
         Some(first.min(self.frames.len() - 1))
     }
 
     /// `ctrl-d`. The copies go after the last selected frame, in order, and
-    /// become the selection.
+    /// become the selection. Inside the range they join it.
     pub fn duplicate_frames(&mut self, selected: &BTreeSet<usize>) -> BTreeSet<usize> {
         let copies: Vec<Frame> = selected
             .iter()
@@ -232,16 +369,40 @@ impl Edit {
         };
         let at = last + 1;
         let count = copies.len();
+        let whole = self.whole_range();
         self.frames.splice(at..at, copies);
+        let (start, end) = self.frame_range;
+        self.frame_range = if whole {
+            (0, usize::MAX)
+        } else {
+            (
+                if at <= start { start + count } else { start },
+                if at <= end + 1 { end + count } else { end },
+            )
+        };
         self.retime();
         (at..at + count).collect()
     }
 
     /// A drag puts the selected frames in the gap before `gap`, from 0 to the
-    /// length of the strip. They keep their order and stay selected.
+    /// length of the strip. They keep their order and stay selected. The range
+    /// follows its first and last frame.
     pub fn move_frames(&mut self, selected: &BTreeSet<usize>, gap: usize) -> BTreeSet<usize> {
         let gap = gap.min(self.frames.len());
+        let whole = self.whole_range();
+        let at = gap - selected.range(..gap).count();
+        let count = selected.range(..self.frames.len()).count();
         let (mut moved, mut rest) = (Vec::new(), Vec::new());
+        let new_index = |index: usize| {
+            if selected.contains(&index) {
+                at + selected.range(..index).count()
+            } else {
+                let before = index - selected.range(..index).count();
+                if before < at { before } else { before + count }
+            }
+        };
+        let (start, end) = self.frame_range;
+        let (start, end) = (new_index(start), new_index(end));
         for (index, frame) in self.frames.drain(..).enumerate() {
             if selected.contains(&index) {
                 moved.push(frame);
@@ -249,11 +410,43 @@ impl Edit {
                 rest.push(frame);
             }
         }
-        let at = gap - selected.range(..gap).count();
-        let count = moved.len();
         rest.splice(at..at, moved);
         self.frames = rest;
+        self.frame_range = if whole {
+            (0, usize::MAX)
+        } else {
+            (start.min(end), start.max(end))
+        };
+        self.retime();
         (at..at + count).collect()
+    }
+
+    /// `s`. The selected frames stop playing, or play again when all of them
+    /// were skipped. One frame always plays, so a skip of every frame that
+    /// plays does nothing and returns false.
+    pub fn toggle_skip(&mut self, selected: &BTreeSet<usize>) -> bool {
+        let chosen = || {
+            self.frames
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| selected.contains(index))
+        };
+        let skip = chosen().any(|(_, frame)| !frame.skipped);
+        let plays_on = self
+            .frames
+            .iter()
+            .enumerate()
+            .any(|(index, frame)| !frame.skipped && !selected.contains(&index));
+        if chosen().next().is_none() || skip && !plays_on {
+            return false;
+        }
+        for &index in selected {
+            if let Some(frame) = self.frames.get_mut(index) {
+                frame.skipped = skip;
+            }
+        }
+        self.retime();
+        true
     }
 
     pub fn set_delay(&mut self, selected: &BTreeSet<usize>, delay_ms: u32) {
@@ -285,13 +478,11 @@ mod tests {
         let frames = delays
             .iter()
             .enumerate()
-            .map(|(at, &delay_ms)| Frame {
-                image: Arc::new(RgbaImage::from_pixel(
-                    1,
-                    1,
-                    image::Rgba([at as u8, 0, 0, 255]),
-                )),
-                delay_ms,
+            .map(|(at, &delay_ms)| {
+                Frame::new(
+                    RgbaImage::from_pixel(1, 1, image::Rgba([at as u8, 0, 0, 255])),
+                    delay_ms,
+                )
             })
             .collect();
         Edit::with_frames("a.gif".into(), frames)
@@ -388,6 +579,97 @@ mod tests {
         assert_eq!(selected, set(&[0, 2, 7]));
         click(&mut selected, &mut anchor, 5, true, false);
         assert_eq!(selected, set(&[5, 6, 7]));
+    }
+
+    /// The first number of each frame the export keeps, with its start.
+    fn kept(edit: &Edit) -> Vec<(u8, u64)> {
+        edit.kept_frames()
+            .map(|(at, frame)| (frame.image.get_pixel(0, 0)[0], at))
+            .collect()
+    }
+
+    #[test]
+    fn the_range_is_whole_frames_and_snaps_to_the_nearest_gap() {
+        let mut edit = strip(&[100, 50, 250, 30]);
+        // `[` and `]` take the frame on the stage.
+        edit.set_start(120);
+        edit.set_end(160);
+        assert_eq!(edit.frame_range, (1, 2));
+        assert_eq!((edit.range.start_ms, edit.range.end_ms), (100, 400));
+        assert_eq!(kept(&edit), [(1, 100), (2, 150)]);
+        assert_eq!(edit.handle_ms(Edge::End), 150);
+        // An in point past the out point moves the out point to the end.
+        edit.set_start(410);
+        assert_eq!(edit.frame_range, (3, 3));
+        edit.set_end(0);
+        assert_eq!(edit.frame_range, (0, 0));
+        // A handle snaps to the gap nearest it, and keeps one frame.
+        edit.drag(Edge::End, 330);
+        assert_eq!(edit.frame_range, (0, 2));
+        edit.drag(Edge::Start, 110);
+        assert_eq!(edit.frame_range, (1, 2));
+        edit.drag(Edge::Start, 9_000);
+        assert_eq!(edit.frame_range, (2, 2));
+        edit.drag(Edge::End, 0);
+        assert_eq!(edit.frame_range, (2, 2));
+    }
+
+    #[test]
+    fn a_skipped_frame_has_no_time_and_is_not_kept() {
+        let mut edit = strip(&[100, 50, 250, 30]);
+        assert!(edit.toggle_skip(&set(&[1, 3])));
+        assert_eq!(edit.duration_ms, 350);
+        assert_eq!(edit.frame_at(100), 2);
+        assert_eq!(edit.frame_at(9_000), 2);
+        assert_eq!(edit.frame_start_ms(3), 350);
+        assert_eq!(kept(&edit), [(0, 0), (2, 100)]);
+        // A selection with one frame that plays is skipped whole.
+        assert!(edit.toggle_skip(&set(&[0, 1])));
+        assert_eq!(kept(&edit), [(2, 0)]);
+        // The last frame that plays stays.
+        assert!(!edit.toggle_skip(&set(&[2])));
+        // All of them skipped play again.
+        assert!(edit.toggle_skip(&set(&[0, 1, 3])));
+        assert_eq!(edit.duration_ms, 430);
+        assert!(!edit.toggle_skip(&set(&[])));
+    }
+
+    #[test]
+    fn the_range_keeps_its_frames_through_the_edits() {
+        let mut edit = strip(&[10, 20, 30, 40, 50]);
+        edit.set_start(10);
+        edit.set_end(30);
+        assert_eq!(edit.frame_range, (1, 2));
+        // A delete before the range moves it back.
+        edit.delete_frames(&set(&[0]));
+        assert_eq!(edit.frame_range, (0, 1));
+        assert_eq!(kept(&edit), [(1, 0), (2, 20)]);
+        // A copy inside the range joins it, one after it does not.
+        edit.duplicate_frames(&set(&[1]));
+        assert_eq!(edit.frame_range, (0, 2));
+        edit.duplicate_frames(&set(&[3]));
+        assert_eq!(edit.frame_range, (0, 2));
+        // The range follows its first and last frame through a move.
+        edit.move_frames(&set(&[3, 4]), 0);
+        assert_eq!(edit.frame_range, (2, 4));
+        assert_eq!(kept(&edit), [(1, 80), (2, 100), (2, 130)]);
+        // With every frame of it gone, the range is the whole strip.
+        edit.delete_frames(&set(&[2, 3, 4]));
+        assert_eq!(edit.frame_range, (0, 2));
+        assert_eq!(edit.range.end_ms, edit.duration_ms);
+    }
+
+    #[test]
+    fn a_whole_range_grows_with_the_frames_that_decode() {
+        let mut edit = strip(&[10, 20]);
+        let more = strip(&[30, 40]).frames;
+        edit.push_frames(more.clone());
+        assert_eq!(edit.frame_range, (0, 3));
+        assert_eq!(edit.range.end_ms, 100);
+        edit.set_end(15);
+        edit.push_frames(more);
+        assert_eq!(edit.frame_range, (0, 1));
+        assert_eq!(edit.duration_ms, 170);
     }
 
     #[test]

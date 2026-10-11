@@ -205,7 +205,7 @@ fn video_filter(edit: &Edit, controls: &Controls) -> String {
     filter
 }
 
-/// The delay of each frame in the export, after the speed. A GIF or a WebP
+/// The delay of each frame the export keeps, after the speed. A GIF or a WebP
 /// delay stays at `MIN_DELAY_MS` or more, because a browser plays a shorter one
 /// slower than asked.
 pub fn output_delays(edit: &Edit, format: Format) -> Vec<u32> {
@@ -214,19 +214,19 @@ pub fn output_delays(edit: &Edit, format: Format) -> Vec<u32> {
     } else {
         1
     };
-    edit.frames
-        .iter()
-        .map(|frame| ((f64::from(frame.delay_ms) / edit.speed).round() as u32).max(floor))
+    edit.kept_frames()
+        .map(|(_, frame)| ((f64::from(frame.delay_ms) / edit.speed).round() as u32).max(floor))
         .collect()
 }
 
 /// When a text shows in a frame mode export, in seconds. Its times are in the
 /// strip, before the speed.
 fn frame_window(edit: &Edit, delays: &[u32], text: &Text) -> Option<(f64, f64)> {
-    let end = text.end_ms.min(edit.duration_ms);
-    (end > text.start_ms).then(|| {
+    let start = text.start_ms.max(edit.range.start_ms);
+    let end = text.end_ms.min(edit.range.end_ms);
+    (end > start).then(|| {
         (
-            output_seconds(edit, delays, text.start_ms),
+            output_seconds(edit, delays, start),
             output_seconds(edit, delays, end),
         )
     })
@@ -235,14 +235,13 @@ fn frame_window(edit: &Edit, delays: &[u32], text: &Text) -> Option<(f64, f64)> 
 /// A time of the strip in the export. Inside a frame it moves at the rate of
 /// that frame's change of delay.
 fn output_seconds(edit: &Edit, delays: &[u32], at_ms: u64) -> f64 {
-    let (mut strip, mut out) = (0u64, 0u64);
-    for (frame, &delay) in edit.frames.iter().zip(delays) {
-        let length = u64::from(frame.delay_ms);
-        if at_ms < strip + length {
-            let into = (at_ms - strip) as f64 * f64::from(delay) / length as f64;
+    let mut out = 0u64;
+    for ((start, frame), &delay) in edit.kept_frames().zip(delays) {
+        let length = frame.length_ms();
+        if at_ms < start + length {
+            let into = at_ms.saturating_sub(start) as f64 * f64::from(delay) / length as f64;
             return (out as f64 + into) / 1000.;
         }
-        strip += length;
         out += u64::from(delay);
     }
     out as f64 / 1000.
@@ -324,7 +323,7 @@ impl FrameFiles {
     fn write(&self, edit: &Edit, format: Format) -> Result<PathBuf> {
         let mut files: HashMap<*const RgbaImage, usize> = HashMap::new();
         let mut images = Vec::with_capacity(edit.frames.len());
-        for frame in &edit.frames {
+        for (_, frame) in edit.kept_frames() {
             let next = files.len();
             let image = *files.entry(Arc::as_ptr(&frame.image)).or_insert(next);
             if image == next {
@@ -514,17 +513,7 @@ fn screenshot_filter(edit: &Edit, at_ms: u64) -> String {
 /// `at_ms` goes to FFmpeg as a still.
 pub fn screenshot(edit: &Edit, at_ms: u64) -> Result<Vec<u8>> {
     if edit.framed() {
-        let files = FrameFiles::new()?;
-        let input = files.dir.join("frame.png");
-        write_png(&edit.frames[edit.frame_at(at_ms)].image, &input)?;
-        let mut still = Edit {
-            input,
-            still: true,
-            frames: Vec::new(),
-            ..edit.clone()
-        };
-        still.texts.retain(|text| edit.shows(text, at_ms));
-        return screenshot(&still, 0);
+        return frame_screenshot(edit, edit.frame_at(at_ms));
     }
     let mut command = ffmpeg::command(Tool::Ffmpeg);
     command.args(screenshot_args(edit, at_ms));
@@ -533,6 +522,24 @@ pub fn screenshot(edit: &Edit, at_ms: u64) -> Result<Vec<u8>> {
         bail!("FFmpeg gave no frame");
     }
     Ok(png)
+}
+
+/// The PNG bytes of one frame of the strip, skipped or not, with the crop and
+/// the texts of its moment.
+pub fn frame_screenshot(edit: &Edit, index: usize) -> Result<Vec<u8>> {
+    let frame = edit.frames.get(index).context("no such frame")?;
+    let files = FrameFiles::new()?;
+    let input = files.dir.join("frame.png");
+    write_png(&frame.image, &input)?;
+    let at_ms = edit.frame_start_ms(index);
+    let mut still = Edit {
+        input,
+        still: true,
+        frames: Vec::new(),
+        ..edit.clone()
+    };
+    still.texts.retain(|text| edit.shows(text, at_ms));
+    screenshot(&still, 0)
 }
 
 /// Write the export to `destination`. FFmpeg writes a partial file beside it,
@@ -1112,10 +1119,7 @@ mod tests {
     fn framed(delays: &[u32]) -> Edit {
         let frames = delays
             .iter()
-            .map(|&delay_ms| studio::Frame {
-                image: Arc::new(RgbaImage::new(1, 1)),
-                delay_ms,
-            })
+            .map(|&delay_ms| studio::Frame::new(RgbaImage::new(1, 1), delay_ms))
             .collect();
         let mut edit = Edit::with_frames("D:/clips/cat.gif".into(), frames);
         edit.size = (640, 480);
@@ -1189,6 +1193,29 @@ mod tests {
             "file '1.png'\noption framerate 1000\nduration 0.125\n\
              file '1.png'\noption framerate 1000\n"
         ));
+    }
+
+    #[test]
+    fn frame_mode_keeps_the_range_and_drops_the_skipped_frames() {
+        let mut edit = framed(&[100, 100, 200, 300]);
+        edit.set_start(100);
+        edit.toggle_skip(&std::collections::BTreeSet::from([2]));
+        assert_eq!(output_delays(&edit, Format::Gif), [100, 300]);
+        let at = edit.add_text();
+        edit.texts[at].words = "hi".into();
+        edit.texts[at].start_ms = 250;
+        edit.texts[at].end_ms = 9_000;
+        let vf = after(
+            &strings_of(
+                &edit,
+                Controls {
+                    format: Format::Webp,
+                    ..Controls::default()
+                },
+            ),
+            "-vf",
+        );
+        assert!(vf.ends_with(r":enable=gte(t\,0.150)*lt(t\,0.400)"), "{vf}");
     }
 
     #[test]

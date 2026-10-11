@@ -29,6 +29,9 @@ pub struct Edit {
     pub still: bool,
     /// Frame mode, for a GIF or an animated WebP. Empty for any other source.
     pub frames: Vec<Frame>,
+    /// In frame mode, the first and the last frame of the range. `range` is
+    /// their time on the strip.
+    pub frame_range: (usize, usize),
 }
 
 impl Edit {
@@ -50,6 +53,7 @@ impl Edit {
             texts: Vec::new(),
             still: false,
             frames: Vec::new(),
+            frame_range: (0, 0),
         }
     }
 
@@ -167,6 +171,9 @@ impl Edit {
 
     /// `[`. An in point at or past the out point moves the out point to the end.
     pub fn set_start(&mut self, at_ms: u64) {
+        if self.framed() {
+            return self.set_first_frame(at_ms);
+        }
         self.range.start_ms = at_ms.min(self.duration_ms);
         if self.range.end_ms <= self.range.start_ms {
             self.range.end_ms = self.duration_ms;
@@ -176,6 +183,9 @@ impl Edit {
     /// `]`. An out point at or before the in point moves the in point to the
     /// start.
     pub fn set_end(&mut self, at_ms: u64) {
+        if self.framed() {
+            return self.set_last_frame(at_ms);
+        }
         self.range.end_ms = at_ms.min(self.duration_ms);
         if self.range.end_ms <= self.range.start_ms {
             self.range.start_ms = 0;
@@ -184,6 +194,9 @@ impl Edit {
 
     /// A drag on a handle. It stops at the other handle.
     pub fn drag(&mut self, edge: Edge, at_ms: u64) {
+        if self.framed() {
+            return self.drag_frame_edge(edge, at_ms);
+        }
         match edge {
             Edge::Start => self.range.start_ms = at_ms.min(self.range.end_ms),
             Edge::End => {
