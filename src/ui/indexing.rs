@@ -163,6 +163,7 @@ impl FileBuddy {
                     this.requeue(retry);
                     if !stats.is_empty() {
                         this.rerun_search(cx);
+                        this.select_pasted(cx);
                         this.flash(summary(&stats), false, cx);
                         this.index_text(Stage::Ocr, cx);
                     }

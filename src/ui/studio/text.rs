@@ -4,8 +4,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Bounds, ClickEvent, Context, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels,
-    Point, Render, ScrollWheelEvent, Window, black, div, px, rgb, white,
+    AnyElement, Bounds, ClickEvent, Context, Font, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    Pixels, Point, Render, ScrollWheelEvent, TextRun, Window, black, div, px, rgb, white,
 };
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
@@ -15,6 +15,8 @@ use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use std::time::Duration;
 
 use super::{frame_in, strip};
+use crate::db::segments;
+use crate::index::jobs::{self, Stage};
 use crate::studio::{self, Edit, Text};
 use crate::ui::seek_bar::{self, Clip};
 use crate::ui::{FileBuddy, preview, toggle};
@@ -123,6 +125,63 @@ impl FileBuddy {
         self.studio
             .words_input
             .update(cx, |input, cx| input.select_all(window, cx));
+    }
+
+    /// The Captions button. Nothing happens to a source with no transcript, and
+    /// the header says why.
+    fn add_captions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(hash) = self.studio.sources.first().cloned() else {
+            return;
+        };
+        let conn = self.db.conn();
+        let why = match jobs::state(conn, &hash, Stage::Whisper) {
+            Ok(Some((state, error))) => match state.as_str() {
+                "done" => None,
+                "skipped" => Some(format!("not transcribed: {}", error.unwrap_or_default())),
+                "failed" => Some(format!("transcription failed: {}", error.unwrap_or_default())),
+                _ => Some("not transcribed yet".to_string()),
+            },
+            _ => Some("no transcript for this kind of file".to_string()),
+        };
+        if let Some(why) = why {
+            self.flash(why, true, cx);
+            return;
+        }
+        let segments = match segments::of_hash(conn, &hash) {
+            Ok(segments) => segments,
+            Err(e) => {
+                self.flash(format!("cannot read the transcript: {e:#}"), true, cx);
+                return;
+            }
+        };
+        let Some(edit) = &mut self.studio.edit else {
+            return;
+        };
+        let font = Font {
+            weight: FontWeight::BOLD,
+            ..gpui::font(studio::FONT_FAMILY)
+        };
+        let text_system = window.text_system().clone();
+        let em_width = |line: &str| {
+            let run = TextRun {
+                len: line.len(),
+                font: font.clone(),
+                color: black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = text_system.shape_line(line.to_string().into(), px(100.), &[run], None);
+            f64::from(f32::from(shaped.width)) / 100.
+        };
+        let first = edit.texts.len();
+        match edit.add_captions(&segments, em_width) {
+            0 => self.flash("no speech in the range", true, cx),
+            added => {
+                self.flash(format!("added {added} captions"), false, cx);
+                self.select_text(Some(first), window, cx);
+            }
+        }
     }
 
     /// A double click on a row of the Text tab: its words become the input.
@@ -468,7 +527,18 @@ pub(super) fn panel(this: &FileBuddy, edit: &Edit, cx: &mut Context<FileBuddy>) 
         .pr(px(12. + preview::ROW_INSET))
         .children(rows);
     let add = h_flex()
+        .gap_1()
         .child(div().flex_1().text_color(muted).child("Text"))
+        .when(!edit.still && !edit.framed(), |row| {
+            row.child(
+                Button::new("text-captions")
+                    .xsmall()
+                    .label("Captions")
+                    .tooltip("A text for each speech segment in the range")
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, window, cx| this.add_captions(window, cx))),
+            )
+        })
         .child(
             Button::new("text-add")
                 .xsmall()

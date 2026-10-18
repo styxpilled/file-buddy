@@ -332,11 +332,12 @@ impl FileBuddy {
     pub(super) fn open_sequence(
         &mut self,
         paths: Vec<PathBuf>,
+        sources: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let first = paths[0].clone();
-        self.open_frames(first, Some(paths), window, cx);
+        self.open_frames(first, Some(paths), sources, window, cx);
     }
 
     /// Opens a GIF or an animated WebP in frame mode, or with `stills` a
@@ -346,6 +347,7 @@ impl FileBuddy {
         &mut self,
         path: PathBuf,
         stills: Option<Vec<PathBuf>>,
+        sources: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -370,14 +372,15 @@ impl FileBuddy {
         });
         let task = cx.spawn_in(window, async move |this, cx| {
             let mut opened = false;
+            let mut sources = Some(sources);
             while let Some(next) = decoded.next().await {
                 let mut batch = vec![next];
                 while let Ok(more) = decoded.try_recv() {
                     batch.push(more);
                 }
-                let path = path.clone();
+                let (path, sources) = (path.clone(), sources.take());
                 let added = this.update_in(cx, |this, window, cx| {
-                    this.add_frames(path, batch, opened, is_sequence, window, cx)
+                    this.add_frames(path, sources, batch, is_sequence, window, cx)
                 });
                 if added.is_err() {
                     return;
@@ -403,31 +406,30 @@ impl FileBuddy {
         self.studio.opening = Some(task);
     }
 
-    /// Frames that just decoded. The first of them open the edit.
+    /// Frames that just decoded. The first batch comes with the sources, and
+    /// opens the edit.
     fn add_frames(
         &mut self,
         path: PathBuf,
+        sources: Option<Vec<String>>,
         batch: Vec<(Frame, Arc<RenderImage>)>,
-        opened: bool,
         is_sequence: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let (frames, thumbs): (Vec<_>, Vec<_>) = batch.into_iter().unzip();
         let keys: Vec<_> = frames.iter().map(key).collect();
-        if opened {
-            if let Some(edit) = &mut self.studio.edit {
-                edit.push_frames(frames);
-            }
-        } else {
+        if let Some(sources) = sources {
             self.notice = None;
             let edit = if is_sequence {
                 Edit::sequence(path, frames)
             } else {
                 Edit::with_frames(path, frames)
             };
-            self.start_edit(edit, None, window, cx);
+            self.start_edit(edit, None, sources, window, cx);
             self.reset_strip(window, cx);
+        } else if let Some(edit) = &mut self.studio.edit {
+            edit.push_frames(frames);
         }
         self.studio
             .strip

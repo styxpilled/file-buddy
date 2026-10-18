@@ -2165,6 +2165,7 @@ dependencies = [
  "clipboard-win",
  "dhat",
  "dunce",
+ "embed-resource",
  "env_logger",
  "futures",
  "globset",

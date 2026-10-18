@@ -1,14 +1,17 @@
-//! Files dropped on the window from Explorer, and `forget_file`, which takes the
-//! marked files or the selection out of the index.
+//! Files dropped on the window from Explorer or pasted, and `forget_file`,
+//! which takes the marked files or the selection out of the index.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use gpui::{Context, Window};
 
+use crate::actions::clipboard::{self, Pasted};
+use crate::db::files;
 use crate::index::dropped::{self, Added, Forgot};
 use crate::index::jobs::Stage;
-use crate::ui::{FileBuddy, Page, counted};
+use crate::studio;
+use crate::ui::{FileBuddy, Page, counted, when};
 
 impl FileBuddy {
     /// A drop on the window. The new dropped files open on the Folders page.
@@ -34,6 +37,57 @@ impl FileBuddy {
             .ok();
         })
         .detach();
+    }
+
+    /// `ctrl-v` outside the inputs. Files join as a drop does. An image goes
+    /// to the export folder, which is a root, and is selected when the watcher
+    /// indexes it.
+    pub(super) fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match clipboard::paste() {
+            Ok(Pasted::Files(paths)) => self.add_dropped(paths, window, cx),
+            Ok(Pasted::Image(png)) => self.save_pasted(&png, cx),
+            Ok(Pasted::Nothing) => self.flash("no files or image to paste", true, cx),
+            Err(e) => {
+                log::error!("paste failed: {e:#}");
+                self.flash(format!("paste failed: {e}"), true, cx);
+            }
+        }
+    }
+
+    fn save_pasted(&mut self, png: &[u8], cx: &mut Context<Self>) {
+        let Some(folder) = self.config.export_folder.clone() else {
+            self.flash("set an export folder in Settings", true, cx);
+            return;
+        };
+        let name = format!("pasted {}.png", when::file_stamp_now());
+        let path = studio::unique_path(&folder, &name);
+        if let Err(e) = std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&path, png)) {
+            log::error!("writing {} failed: {e}", path.display());
+            self.flash(format!("paste failed: {e}"), true, cx);
+            return;
+        }
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        self.flash(format!("pasted {name}"), false, cx);
+        self.pasted = Some(dropped::place(&path, &self.config.roots).0);
+    }
+
+    /// After the watcher indexed a batch: the pasted image, once it is in the
+    /// index, is selected if the results show it.
+    pub(super) fn select_pasted(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = &self.pasted else {
+            return;
+        };
+        let Ok(Some(file)) = files::by_path(self.db.conn(), path) else {
+            return;
+        };
+        self.pasted = None;
+        if let Some(at) = self
+            .results
+            .iter()
+            .position(|entry| entry.hit().is_some_and(|hit| hit.file.id == file.id))
+        {
+            self.select(at, cx);
+        }
     }
 
     fn show_dropped(&mut self, added: Result<Added>, window: &mut Window, cx: &mut Context<Self>) {

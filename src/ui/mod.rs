@@ -128,6 +128,7 @@ gpui_kit::actions!(
         TrashFiles,
         DeleteFiles,
         ForgetFile,
+        Paste,
         ShowStudio,
         OpenInStudio,
         Screenshot,
@@ -209,6 +210,8 @@ pub struct FileBuddy {
     folder: Option<PathBuf>,
     /// The Folders page shows the dropped files. `folder` is `None` then.
     dropped: bool,
+    /// A pasted image, selected when the watcher indexes it.
+    pasted: Option<PathBuf>,
     /// The order of a folder on the Folders page, and of Browse with nothing
     /// typed. A query keeps its ranking.
     folder_sort: Sort,
@@ -361,6 +364,7 @@ impl FileBuddy {
             context_menu: None,
             folder: None,
             dropped: false,
+            pasted: None,
             folder_sort: Sort::Name,
             browse_sort: Sort::Recent,
             table: false,
@@ -777,8 +781,11 @@ impl FileBuddy {
         } else if !self.marked.is_empty() {
             self.marked.clear();
             cx.notify();
-        } else {
-            self.leave_like(window, cx);
+        } else if !self.leave_like(window, cx) && !self.input.read(cx).value().is_empty() {
+            self.input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.typed.clear();
+            self.run_search(cx);
         }
     }
 
@@ -953,6 +960,7 @@ impl Render for FileBuddy {
                 this.delete_files(DeleteMode::Delete, window, cx)
             }))
             .on_action(cx.listener(|this, _: &ForgetFile, _, cx| this.forget_files(cx)))
+            .on_action(cx.listener(|this, _: &Paste, window, cx| this.paste(window, cx)))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, window, cx| {
                 this.add_dropped(paths.paths().to_vec(), window, cx)
             }))
@@ -1072,7 +1080,7 @@ impl Render for FileBuddy {
                                 .child(
                                     resizable_panel()
                                         .size(px(SIDE_PANE_WIDTH))
-                                        .size_range(px(260.)..px(900.))
+                                        .size_range(px(preview::MIN_PANE_WIDTH)..px(900.))
                                         .child(preview::pane(self, window, cx)),
                                 ),
                         ),

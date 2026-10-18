@@ -1,7 +1,8 @@
 //! The window keys. The defaults, the changes in the `[keys]` table of the
 //! configuration, and the rules that join them. The context of a key comes from
 //! the key: a key with `ctrl` or `alt`, or an F key, works everywhere, and any
-//! other key works only outside the text inputs.
+//! other key works only outside the text inputs. `ctrl-v` is the exception: in
+//! an input it pastes text.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -100,6 +101,7 @@ const FIXED: &[(&str, &str)] = &[
     ("ctrl-3", "show_review"),
     ("ctrl-4", "show_settings"),
     ("ctrl-5", "show_studio"),
+    ("ctrl-v", "paste"),
     ("alt-up", "previous_suggestion"),
     ("alt-down", "next_suggestion"),
     ("alt-left", "history_back"),
@@ -128,6 +130,7 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-3", ShowReview, window),
         KeyBinding::new("ctrl-4", ShowSettings, window),
         KeyBinding::new("ctrl-5", ShowStudio, window),
+        KeyBinding::new("ctrl-v", Paste, grid),
         // Plain arrows belong to the text in the tag input, so the suggestion
         // list takes the ones the input leaves alone.
         KeyBinding::new("alt-down", NextSuggestion, window),
@@ -184,10 +187,11 @@ pub(super) fn normal(text: &str) -> Option<String> {
 }
 
 /// Whether a key works everywhere, text inputs included. `shift` alone does
-/// not count, because `shift-a` types `A`.
+/// not count, because `shift-a` types `A`, and `ctrl-v` pastes text.
 fn works_in_inputs(key: &str) -> bool {
     Keystroke::parse(key).is_ok_and(|keystroke| {
-        keystroke.modifiers.control || keystroke.modifiers.alt || is_f_key(&keystroke.key)
+        (keystroke.modifiers.control || keystroke.modifiers.alt || is_f_key(&keystroke.key))
+            && keystroke.unparse() != "ctrl-v"
     })
 }
 
@@ -367,6 +371,8 @@ mod tests {
         assert_eq!(context(Scope::Window, "ctrl-e"), "FileBuddy");
         assert_eq!(context(Scope::Window, "alt-1"), "FileBuddy");
         assert_eq!(context(Scope::Window, "f2"), "FileBuddy");
+        assert_eq!(context(Scope::Window, "ctrl-v"), "FileBuddy && !Input");
+        assert_eq!(context(Scope::Window, "ctrl-shift-v"), "FileBuddy");
         assert_eq!(context(Scope::Window, "r"), "FileBuddy && !Input");
         assert_eq!(context(Scope::Window, "shift-left"), "FileBuddy && !Input");
         assert_eq!(context(Scope::Window, "space"), "FileBuddy && !Input");

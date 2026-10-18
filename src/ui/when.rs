@@ -36,6 +36,20 @@ pub fn local_time(seconds: i64) -> String {
     )
 }
 
+/// The local date and time now, in a form a file name can hold.
+pub fn file_stamp_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    let Some(local) = local(now) else {
+        return now.to_string();
+    };
+    format!(
+        "{}-{:02}-{:02} {:02}-{:02}-{:02}",
+        local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond
+    )
+}
+
 /// The days from 1970-01-01 to a date, so two dates can be subtracted.
 fn day_number(year: i64, month: i64, day: i64) -> i64 {
     let year = if month <= 2 { year - 1 } else { year };

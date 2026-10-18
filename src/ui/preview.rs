@@ -55,6 +55,23 @@ pub(super) const CONTROLS_HEIGHT: f32 = 24.;
 const MUTE_WIDTH: f32 = 70.;
 /// The volume beside the buttons, with room for "100%".
 const VOLUME_WIDTH: f32 = 36.;
+/// The Autoplay toggle, the speed button and the file menu, as wide as their
+/// content, measured in the window.
+const AUTOPLAY_WIDTH: f32 = 74.;
+const SPEED_WIDTH: f32 = 32.;
+const MENU_WIDTH: f32 = 24.;
+const CONTROLS_GAP: f32 = 8.;
+/// The narrowest pane that holds the row of controls: the left border, the
+/// padding, six items and the spacer, and the gaps between the seven.
+pub(super) const MIN_PANE_WIDTH: f32 = 1.
+    + PADDING * 2.
+    + AUTOPLAY_WIDTH
+    + PAUSE_WIDTH
+    + MUTE_WIDTH
+    + SPEED_WIDTH
+    + VOLUME_WIDTH
+    + MENU_WIDTH
+    + CONTROLS_GAP * 6.;
 
 const DETAILS: [(Detail, &str); 2] = [(Detail::Speech, "Speech"), (Detail::Text, "Text")];
 
@@ -561,7 +578,7 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
         .w_full()
         .h(px(CONTROLS_HEIGHT))
         .flex_shrink_0()
-        .gap_2();
+        .gap(px(CONTROLS_GAP));
     if still {
         return row
             .child(div().flex_1())
@@ -572,6 +589,7 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
         row.child(
             toggle("preview-autoplay", "Autoplay", player.autoplay)
                 .small()
+                .w(px(AUTOPLAY_WIDTH))
                 .tooltip("Ctrl+Space")
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_autoplay(cx))),
         )
@@ -604,6 +622,7 @@ pub(super) fn controls(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>
     .child(
         Button::new("preview-speed")
             .small()
+            .w(px(SPEED_WIDTH))
             .cursor_pointer()
             .label(player.speed_label(transport))
             .tooltip("Hold space for 2x")
@@ -634,6 +653,7 @@ fn file_menu(this: &FileBuddy, clip: Clip, cx: &mut Context<FileBuddy>) -> AnyEl
     let several = view.clone();
     Button::new("file-menu")
         .small()
+        .w(px(MENU_WIDTH))
         .icon(IconName::Ellipsis)
         .tooltip("File actions")
         .cursor_pointer()

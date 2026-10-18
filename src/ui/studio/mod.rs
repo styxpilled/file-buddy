@@ -29,7 +29,8 @@ use gpui_video::{Video, video as video_element};
 
 use crate::actions::clipboard;
 use crate::ffmpeg::{export, probe};
-use crate::media::{self, Kind};
+use crate::db::tags;
+use crate::media::{self, Kind, hash};
 use crate::paths;
 use crate::search::folder::Entry;
 use crate::studio::{
@@ -54,6 +55,9 @@ const WIDTH_INPUT: f32 = 56.;
 
 pub(super) struct Studio {
     pub(super) edit: Option<Edit>,
+    /// The hashes of the files the edit came from: their tags go to the
+    /// export, and a video's transcript to the captions.
+    pub(super) sources: Vec<String>,
     pub(super) video: Option<Video>,
     pub(super) seek_bar: SeekBar,
     /// The handle a drag holds.
@@ -158,6 +162,7 @@ impl Studio {
             width_input,
             _width_events: width_events,
             edit: None,
+            sources: Vec::new(),
             video: None,
             seek_bar: SeekBar::new(Clip::Studio, cx),
             handle: None,
@@ -172,7 +177,8 @@ impl Studio {
 
 enum Progress {
     Share(f32),
-    Done(anyhow::Result<()>),
+    /// The hash of the export, when it could be read.
+    Done(anyhow::Result<Option<String>>),
 }
 
 impl FileBuddy {
@@ -183,16 +189,17 @@ impl FileBuddy {
             .iter()
             .filter_map(Entry::hit)
             .filter(|hit| self.is_marked(hit))
-            .map(|hit| (hit.file.path.clone(), hit.file.kind))
+            .map(|hit| (hit.file.path.clone(), hit.file.kind, hit.file.hash.clone()))
             .collect();
         if marked.len() >= 2 {
-            if marked.iter().any(|(_, kind)| *kind != Kind::Still) {
+            if marked.iter().any(|(_, kind, _)| *kind != Kind::Still) {
                 self.flash("a sequence takes only stills", true, cx);
                 return;
             }
+            let sources = marked.iter().map(|(_, _, hash)| hash.clone()).collect();
             let mut paths: Vec<_> = marked
                 .into_iter()
-                .filter_map(|(path, _)| dunce::canonicalize(path).ok())
+                .filter_map(|(path, _, _)| dunce::canonicalize(path).ok())
                 .collect();
             sequence::name_order(&mut paths);
             paths.dedup();
@@ -200,7 +207,7 @@ impl FileBuddy {
                 self.flash("the files are gone", true, cx);
                 return;
             }
-            self.open_sequence(paths, window, cx);
+            self.open_sequence(paths, sources, window, cx);
             return;
         }
         let Some(hit) = self.selected_hit() else {
@@ -220,7 +227,7 @@ impl FileBuddy {
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("gif") || e.eq_ignore_ascii_case("webp"));
         if framed {
-            self.open_frames(path, None, window, cx);
+            self.open_frames(path, None, vec![hash], window, cx);
             return;
         }
         let (edit, video) = if still {
@@ -250,7 +257,7 @@ impl FileBuddy {
             let size = (width.max(0) as u32, height.max(0) as u32);
             (Edit::new(path, input, duration_ms, size), Some(video))
         };
-        self.start_edit(edit, video, window, cx);
+        self.start_edit(edit, video, vec![hash], window, cx);
         self.reset_strip(window, cx);
     }
 
@@ -259,12 +266,14 @@ impl FileBuddy {
         &mut self,
         edit: Edit,
         video: Option<Video>,
+        sources: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.record_step(cx);
         self.studio.controls.suit(edit.still);
         self.studio.edit = Some(edit);
+        self.studio.sources = sources;
         self.studio.crop_grab = None;
         self.studio.text_grab = None;
         self.studio.text_move = None;
@@ -505,12 +514,14 @@ impl FileBuddy {
         let destination =
             studio::unique_path(&folder, &studio::export_name(&edit, controls.format));
 
+        let sources = self.studio.sources.clone();
         let (sender, mut events) = mpsc::unbounded();
         let target = destination.clone();
         std::thread::spawn(move || {
             let result = export::run(&edit, &controls, &target, |share| {
                 sender.unbounded_send(Progress::Share(share)).ok();
-            });
+            })
+            .map(|()| exported_hash(&target));
             sender.unbounded_send(Progress::Done(result)).ok();
         });
         self.studio.export = Some(0.);
@@ -521,7 +532,9 @@ impl FileBuddy {
                         this.studio.export = Some(share);
                         cx.notify();
                     }
-                    Progress::Done(result) => this.finish_export(&destination, result, cx),
+                    Progress::Done(result) => {
+                        this.finish_export(&destination, result, &sources, cx)
+                    }
                 });
                 if open.is_err() {
                     break;
@@ -622,12 +635,26 @@ impl FileBuddy {
     }
 
     /// The file goes on the clipboard, as Enter puts a result there.
-    fn finish_export(&mut self, path: &Path, result: anyhow::Result<()>, cx: &mut Context<Self>) {
+    fn finish_export(
+        &mut self,
+        path: &Path,
+        result: anyhow::Result<Option<String>>,
+        sources: &[String],
+        cx: &mut Context<Self>,
+    ) {
         self.studio.export = None;
-        if let Err(e) = result {
-            log::error!("export to {} failed: {e:#}", path.display());
-            self.flash("export failed", true, cx);
-            return;
+        let hash = match result {
+            Ok(hash) => hash,
+            Err(e) => {
+                log::error!("export to {} failed: {e:#}", path.display());
+                self.flash("export failed", true, cx);
+                return;
+            }
+        };
+        if let Some(hash) = hash
+            && let Err(e) = tags::copy(self.db.conn_mut(), sources, &hash)
+        {
+            log::error!("tags of {} failed: {e:#}", path.display());
         }
         let name = path
             .file_name()
@@ -644,6 +671,21 @@ impl FileBuddy {
                 log::error!("copy of {} failed: {e:#}", path.display());
                 self.flash(format!("exported {name}, copy failed: {e}"), true, cx);
             }
+        }
+    }
+}
+
+/// The hash the index will find the export by, so its tags are there before
+/// any scan.
+fn exported_hash(path: &Path) -> Option<String> {
+    let hashed = std::fs::metadata(path)
+        .map_err(anyhow::Error::from)
+        .and_then(|metadata| hash::file_hash(path, metadata.len()));
+    match hashed {
+        Ok(hash) => Some(hash),
+        Err(e) => {
+            log::error!("cannot hash {}: {e:#}", path.display());
+            None
         }
     }
 }

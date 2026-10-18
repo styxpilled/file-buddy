@@ -2,6 +2,7 @@
 //! the crop, the scale, the speed and the texts. Nothing of it goes to the
 //! database. `ffmpeg::export` makes a file from it.
 
+mod captions;
 pub mod frames;
 pub mod sequence;
 

@@ -57,6 +57,22 @@ pub fn detach(conn: &mut Connection, hashes: &[String], name: &str) -> Result<()
     Ok(())
 }
 
+/// The tags of every file in `from`, on `to` as well. An export gets the tags
+/// of its sources before any scan finds it, and the scan indexes them.
+pub fn copy(conn: &mut Connection, from: &[String], to: &str) -> Result<()> {
+    let transaction = conn.transaction()?;
+    for hash in from {
+        transaction.execute(
+            "INSERT OR IGNORE INTO file_tags (hash, tag_id)
+             SELECT ?1, tag_id FROM file_tags WHERE hash = ?2",
+            params![to, hash],
+        )?;
+    }
+    fts::refresh_hash(&transaction, to)?;
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Tags for the autocomplete. A tag that starts with what was typed comes
 /// first, then the one used most, which is what stops `funny` and `funnny`
 /// from both looking equally right.
@@ -146,6 +162,48 @@ mod tests {
                 params![filename, hash, filename],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn an_export_gets_the_tags_of_one_source() {
+        let mut db = Db::open_in_memory().unwrap();
+        attach(db.conn_mut(), &["src".into()], "cat").unwrap();
+        attach(db.conn_mut(), &["src".into()], "funny").unwrap();
+        attach(db.conn_mut(), &["other".into()], "dog").unwrap();
+
+        copy(db.conn_mut(), &["src".into()], "out").unwrap();
+        assert_eq!(of_hash(db.conn(), "out").unwrap(), ["cat", "funny"]);
+        assert_eq!(of_hash(db.conn(), "src").unwrap(), ["cat", "funny"]);
+    }
+
+    #[test]
+    fn a_sequence_export_gets_the_union_of_its_stills() {
+        let mut db = Db::open_in_memory().unwrap();
+        attach(db.conn_mut(), &["a".into(), "b".into()], "cat").unwrap();
+        attach(db.conn_mut(), &["a".into()], "funny").unwrap();
+        attach(db.conn_mut(), &["c".into()], "dog").unwrap();
+        attach(db.conn_mut(), &["out".into()], "kept").unwrap();
+
+        let stills = ["a".into(), "b".into(), "c".into(), "untagged".into()];
+        copy(db.conn_mut(), &stills, "out").unwrap();
+        assert_eq!(of_hash(db.conn(), "out").unwrap(), ["cat", "dog", "funny", "kept"]);
+    }
+
+    #[test]
+    fn copied_tags_reach_the_index_of_a_file_already_found() {
+        let mut db = Db::open_in_memory().unwrap();
+        seed(&db, "out", "export.mp4");
+        attach(db.conn_mut(), &["src".into()], "reaction").unwrap();
+        copy(db.conn_mut(), &["src".into()], "out").unwrap();
+        let found: i64 = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM fts WHERE fts MATCH 'tags:reaction'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1);
     }
 
     #[test]

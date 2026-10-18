@@ -69,6 +69,10 @@ opt-level = 3
 [profile.release.package.gpui-pre-macros]
 debug-assertions = true
 
+[build-dependencies]
+# The version gpui-pre already pins.
+embed-resource = "=3.0.11"
+
 [dev-dependencies]
 globset = "=0.4.20"
 tempfile = "=3.27.0"

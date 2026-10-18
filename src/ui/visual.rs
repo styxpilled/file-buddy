@@ -297,10 +297,10 @@ impl FileBuddy {
 
     /// Escape, after everything else it undoes. The results from before the
     /// last `l` come back as they were, and a search for them that had not
-    /// finished runs again.
-    pub(super) fn leave_like(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// finished runs again. Returns false when there is no step to leave.
+    pub(super) fn leave_like(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some(like) = self.visual.likes.pop() else {
-            return;
+            return false;
         };
         self.visual.task = None;
         self.input.update(cx, |input, cx| {
@@ -308,7 +308,7 @@ impl FileBuddy {
         });
         let Some(before) = like.before else {
             self.run_search(cx);
-            return;
+            return true;
         };
         self.listing = before.listing;
         self.status = before.status;
@@ -323,7 +323,7 @@ impl FileBuddy {
         self.marked = before.marked;
         self.select(before.selected, cx);
         if !before.pending {
-            return;
+            return true;
         }
         if self.visual.likes.is_empty() {
             if !before.listing {
@@ -335,6 +335,7 @@ impl FileBuddy {
         } else {
             self.search_like(false, cx);
         }
+        true
     }
 
     fn merge_visual(
