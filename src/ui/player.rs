@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use gpui::{Context, SharedString, Task};
+use gpui::{Context, SharedString, Task, Window};
 use gpui_video::{Video, VideoOptions};
 use url::Url;
 
@@ -48,6 +48,9 @@ pub(super) struct Player {
     pub step: isize,
     /// The one tile that plays. Only one does.
     pub hovered: Option<(usize, Video)>,
+    /// The tile that played when the pointer left the window. It plays again
+    /// when the pointer comes back.
+    away: Option<usize>,
     /// Both kept across selections, so the sound does not come back by itself
     /// and does not return to full.
     pub muted: bool,
@@ -104,6 +107,7 @@ impl Default for Player {
             preload_task: None,
             step: 1,
             hovered: None,
+            away: None,
             // Simulated checks run while the user works, so they are silent.
             muted: cfg!(feature = "sim"),
             volume: 0.5,
@@ -163,6 +167,9 @@ impl Player {
     pub fn retain(&mut self, keep: impl Fn(usize) -> bool) {
         if self.hovered.as_ref().is_some_and(|(at, _)| !keep(*at)) {
             self.hovered = None;
+        }
+        if self.away.is_some_and(|at| !keep(at)) {
+            self.away = None;
         }
         if self.preloaded.as_ref().is_some_and(|(at, _)| !keep(*at)) {
             self.preloaded = None;
@@ -541,6 +548,9 @@ impl FileBuddy {
     }
 
     pub(super) fn set_hovered(&mut self, index: usize, hovered: bool, cx: &mut Context<Self>) {
+        if !hovered && self.player.away == Some(index) {
+            self.player.away = None;
+        }
         if !self.autoscroll_hover(index, hovered) {
             return;
         }
@@ -600,7 +610,19 @@ impl FileBuddy {
     /// for a row of results that are gone.
     pub(super) fn stop_videos(&mut self) {
         self.player.hovered = None;
+        self.player.away = None;
         self.player.preloaded = None;
+    }
+
+    /// On Windows, a tile gets no unhover when the pointer leaves the window.
+    pub(super) fn sync_window_hover(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !window.is_window_hovered() {
+            if let Some((at, _)) = self.player.hovered.take() {
+                self.player.away = Some(at);
+            }
+        } else if let Some(at) = self.player.away.take() {
+            self.set_hovered(at, true, cx);
+        }
     }
 }
 

@@ -644,7 +644,7 @@ impl FileBuddy {
         }
         self.table = table;
         // The table has no tile to play in.
-        self.player.hovered = None;
+        self.stop_videos();
         self.rerun_search(cx);
         self.reveal_selection(window, cx);
     }
@@ -906,6 +906,7 @@ impl Render for FileBuddy {
         let width = self.grid_width(window, cx);
         self.columns = self.column_count(window, cx);
         self.step_autoscroll(window, cx);
+        self.sync_window_hover(window, cx);
 
         v_flex()
             .key_context("FileBuddy")
