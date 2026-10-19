@@ -12,6 +12,31 @@ pub const MODEL_DIR: &str = "models";
 pub const WHISPER_MODEL: &str = "ggml-large-v3-turbo.bin";
 pub const CLIP_MODEL: &str = "mobileclip2-s2";
 
+/// The path with the separators of the OS. Windows also takes `/`, but a path
+/// that mixes the two looks wrong where the user sees or copies it, and not
+/// every Windows call takes it. Every path from the user or the environment
+/// goes through this. It does not resolve the path, so it keeps the spelling
+/// the user gave and does not add the `\\?\` prefix that `canonicalize` adds.
+#[cfg(windows)]
+pub fn native(path: impl AsRef<Path>) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let wide: Vec<u16> = path
+        .as_ref()
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == '/' as u16 {
+                '\\' as u16
+            } else {
+                unit
+            }
+        })
+        .collect();
+    PathBuf::from(OsString::from_wide(&wide))
+}
+
 /// The directory that holds the executable. Both the configuration file and the
 /// default data directory sit next to it.
 pub fn executable_dir() -> Result<PathBuf> {
@@ -25,7 +50,7 @@ pub fn executable_dir() -> Result<PathBuf> {
 /// The database and the thumbnail cache. `FILE_BUDDY_DATA` moves both.
 pub fn data_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("FILE_BUDDY_DATA") {
-        return Ok(PathBuf::from(dir));
+        return Ok(native(dir));
     }
     executable_dir()
 }

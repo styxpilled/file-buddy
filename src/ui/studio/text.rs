@@ -138,7 +138,10 @@ impl FileBuddy {
             Ok(Some((state, error))) => match state.as_str() {
                 "done" => None,
                 "skipped" => Some(format!("not transcribed: {}", error.unwrap_or_default())),
-                "failed" => Some(format!("transcription failed: {}", error.unwrap_or_default())),
+                "failed" => Some(format!(
+                    "transcription failed: {}",
+                    error.unwrap_or_default()
+                )),
                 _ => Some("not transcribed yet".to_string()),
             },
             _ => Some("no transcript for this kind of file".to_string()),

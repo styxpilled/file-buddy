@@ -243,7 +243,7 @@ impl Edit {
 }
 
 /// The font of every text. GPUI finds the same file by its family name.
-pub const FONT_FILE: &str = "C:/Windows/Fonts/arialbd.ttf";
+pub const FONT_FILE: &str = r"C:\Windows\Fonts\arialbd.ttf";
 pub const FONT_FAMILY: &str = "Arial";
 /// The line advance of `drawtext`, in ems: the ascent, descent and line gap of
 /// Arial Bold.
@@ -997,7 +997,7 @@ mod tests {
             start_ms: 3_400,
             end_ms: 7_900,
         };
-        let mut edit = Edit::new("D:/clips/cat jump.mp4".into(), PathBuf::new(), 0, (0, 0));
+        let mut edit = Edit::new(r"D:\clips\cat jump.mp4".into(), PathBuf::new(), 0, (0, 0));
         edit.range = range;
         assert_eq!(export_name(&edit, Format::Mp4), "cat jump 0m03-0m07.mp4");
         edit.source = "a.b.webm".into();
@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn a_given_name_replaces_the_stem_and_still_gets_a_number() {
         let dir = tempfile::tempdir().unwrap();
-        let mut edit = Edit::new("D:/clips/cat.mp4".into(), PathBuf::new(), 9_000, (0, 0));
+        let mut edit = Edit::new(r"D:\clips\cat.mp4".into(), PathBuf::new(), 9_000, (0, 0));
         edit.name = clean_name(" my: cat?. ");
         assert_eq!(edit.name.as_deref(), Some("my cat"));
         let name = export_name(&edit, Format::Gif);
@@ -1056,7 +1056,7 @@ mod tests {
     #[test]
     fn a_sequence_name_has_the_first_stem() {
         let frame = Frame::new(image::RgbaImage::new(2, 2), 100);
-        let edit = Edit::sequence("D:/pics/cat 01.png".into(), vec![frame]);
+        let edit = Edit::sequence(r"D:\pics\cat 01.png".into(), vec![frame]);
         assert_eq!(export_name(&edit, Format::Gif), "cat 01 sequence.gif");
     }
 

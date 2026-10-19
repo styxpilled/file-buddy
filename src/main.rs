@@ -81,6 +81,7 @@ fn main() -> Result<()> {
             .detach();
             Theme::change(ThemeMode::Dark, None, cx);
             Theme::set_scrollbar_mode(ScrollbarMode::Always, cx);
+            ui::style_focus(cx);
             for problem in ui::bind_keys(&config.keys, cx) {
                 log::warn!("[keys]: {problem}");
             }

@@ -135,7 +135,7 @@ where
 /// next to the executable.
 fn program() -> PathBuf {
     if let Some(path) = std::env::var_os("FILE_BUDDY_FB") {
-        return PathBuf::from(path);
+        return crate::paths::native(path);
     }
     crate::paths::executable_dir()
         .map(|dir| dir.join("fb.exe"))

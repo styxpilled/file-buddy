@@ -133,10 +133,10 @@ mod tests {
 
     #[test]
     fn a_path_under_a_root_is_a_root_file() {
-        let roots = [PathBuf::from("D:/clips")];
+        let roots = [PathBuf::from(r"D:\clips")];
         assert_eq!(
             place(Path::new(r"D:\Clips\a\b.mp4"), &roots),
-            (PathBuf::from(r"D:/clips\a\b.mp4"), false)
+            (PathBuf::from(r"D:\clips\a\b.mp4"), false)
         );
         assert_eq!(
             place(Path::new(r"E:\other\b.mp4"), &roots),

@@ -68,9 +68,9 @@ pub fn output(mut command: Command) -> Result<Vec<u8>> {
 pub fn path_of(tool: Tool) -> PathBuf {
     let file = format!("{}.exe", tool.name());
     let candidates = [
-        std::env::var_os("FILE_BUDDY_FFMPEG").map(PathBuf::from),
+        std::env::var_os("FILE_BUDDY_FFMPEG").map(crate::paths::native),
         crate::paths::executable_dir().ok(),
-        Some(PathBuf::from(env!("FILE_BUDDY_FFMPEG_BIN"))),
+        Some(crate::paths::native(env!("FILE_BUDDY_FFMPEG_BIN"))),
     ];
     for dir in candidates.into_iter().flatten() {
         let candidate = dir.join(&file);

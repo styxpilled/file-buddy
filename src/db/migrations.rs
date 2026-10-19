@@ -20,8 +20,15 @@ pub fn migrations() -> Migrations<'static> {
         M::up(EDITED_ROWS),
         M::up(READ_ANIMATED_WEBP),
         M::up(RECORD_DROPPED_FILES),
+        M::up(NATIVE_SEPARATORS),
     ])
 }
+
+/// A root written with `/` put paths such as `C:/clips\a.mp4` in the index.
+/// The configuration now gives every root with `\`.
+const NATIVE_SEPARATORS: &str = r#"
+UPDATE files SET path = replace(path, '/', '\') WHERE instr(path, '/') > 0;
+"#;
 
 /// Issue 45. A file dropped on the window from outside every root. The scan
 /// does not mark it missing for being outside the roots.
@@ -228,6 +235,25 @@ mod tests {
     #[test]
     fn the_migrations_are_valid() {
         migrations().validate().unwrap();
+    }
+
+    #[test]
+    fn a_mixed_path_gets_native_separators() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        // Version 13 is the last before the separators.
+        migrations().to_version(&mut conn, 13).unwrap();
+        conn.execute(
+            r"INSERT INTO files (path, hash, filename, kind, size, mtime, seen_at)
+              VALUES ('C:/clips\a\b.mp4', 'h', 'b.mp4', 'video', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+
+        let path: String = conn
+            .query_row("SELECT path FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(path, r"C:\clips\a\b.mp4");
     }
 
     #[test]

@@ -127,10 +127,10 @@ mod tests {
     #[test]
     fn a_long_segment_wraps_to_two_lines() {
         let words = ["word"; 20].join(" ");
-        assert_eq!(wrap(&words, 36., half_em), [
-            ["word"; 14].join(" "),
-            ["word"; 6].join(" "),
-        ]);
+        assert_eq!(
+            wrap(&words, 36., half_em),
+            [["word"; 14].join(" "), ["word"; 6].join(" "),]
+        );
         let mut edit = edit();
         edit.add_captions(&[segment(2_000, 3_000, &words)], half_em);
         assert_eq!(edit.texts.len(), 1);
@@ -154,6 +154,9 @@ mod tests {
     #[test]
     fn a_word_wider_than_the_line_has_its_own() {
         let long = "x".repeat(80);
-        assert_eq!(wrap(&format!("a {long} b"), 36., half_em), ["a", &long, "b"]);
+        assert_eq!(
+            wrap(&format!("a {long} b"), 36., half_em),
+            ["a", &long, "b"]
+        );
     }
 }

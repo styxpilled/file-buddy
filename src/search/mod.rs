@@ -296,7 +296,7 @@ mod tests {
         Hit {
             file: FileRow {
                 id: 1,
-                path: "C:/clips/a.mp4".into(),
+                path: r"C:\clips\a.mp4".into(),
                 hash: "h".into(),
                 filename: "a.mp4".into(),
                 kind: Kind::Video,
@@ -325,7 +325,7 @@ mod tests {
     fn file(id: i64, name: &str, signal: Signal, mtime: i64) -> Hit {
         let mut hit = hit(name, None);
         hit.file.id = id;
-        hit.file.path = format!("C:/clips/{name}").into();
+        hit.file.path = format!(r"C:\clips\{name}").into();
         hit.file.filename = name.into();
         hit.file.mtime = mtime;
         hit.signal = signal;
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn the_first_matched_column_gives_the_chunk() {
         let db = crate::db::Db::open_in_memory().unwrap();
-        let path = PathBuf::from("C:/clips/monkey.mp4");
+        let path = PathBuf::from(r"C:\clips\monkey.mp4");
         let scanned = files::Scanned {
             path: &path,
             hash: "h",
@@ -370,7 +370,7 @@ mod tests {
         let db = crate::db::Db::open_in_memory().unwrap();
         let files = [("b.mp4", 30, 5), ("A.mp4", 10, 5), ("c.mp4", 30, 900)];
         for (name, mtime, size) in files {
-            let path = PathBuf::from(format!("C:/clips/{name}"));
+            let path = PathBuf::from(format!(r"C:\clips\{name}"));
             let scanned = files::Scanned {
                 path: &path,
                 hash: name,

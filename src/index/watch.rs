@@ -145,8 +145,8 @@ fn interesting(event: &Event, roots: &[PathBuf], ignore: &GlobSet) -> Vec<PathBu
 }
 
 /// The path under the root that holds it, joined to the root as the
-/// configuration writes it. The watcher reports `D:\clips\a.mp4` where a root
-/// of `D:/clips` puts `D:/clips\a.mp4` in the database.
+/// configuration writes it. The watcher reports `D:\Clips\a.mp4` where a root
+/// of `D:\clips` puts `D:\clips\a.mp4` in the database.
 pub(crate) fn under_root(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
     let parts = comparable(path);
     let rest_of = |root: &Path, from: usize| -> PathBuf {
@@ -245,20 +245,18 @@ mod tests {
 
     #[test]
     fn an_event_path_is_written_the_way_the_root_is() {
-        let roots = [PathBuf::from("D:/clips")];
-        assert_eq!(
-            under_root(Path::new(r"D:\Clips\a\b.mp4"), &roots),
-            Some(PathBuf::from(r"D:/clips\a\b.mp4"))
-        );
+        let roots = [PathBuf::from(r"D:\clips")];
+        let written = under_root(Path::new(r"D:\Clips\a\b.mp4"), &roots).unwrap();
+        assert_eq!(written.as_os_str(), r"D:\clips\a\b.mp4");
         assert_eq!(under_root(Path::new(r"D:\other\b.mp4"), &roots), None);
     }
 
     #[test]
     fn the_root_itself_is_under_the_root() {
-        let roots = [PathBuf::from("D:/clips")];
+        let roots = [PathBuf::from(r"D:\clips")];
         assert_eq!(
-            under_root(Path::new(r"D:\clips"), &roots),
-            Some(PathBuf::from("D:/clips"))
+            under_root(Path::new(r"D:\Clips"), &roots),
+            Some(PathBuf::from(r"D:\clips"))
         );
     }
 }

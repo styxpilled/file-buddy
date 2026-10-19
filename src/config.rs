@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 
+use crate::paths;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub roots: Vec<PathBuf>,
@@ -76,7 +78,7 @@ fn default_ignore() -> Vec<String> {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            roots: vec![PathBuf::from("D:/clips")],
+            roots: vec![PathBuf::from(r"D:\clips")],
             ignore: default_ignore(),
             export_folder: None,
             weights: Weights::default(),
@@ -100,7 +102,10 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parse the configuration")
+        let mut config: Self = toml::from_str(text).context("parse the configuration")?;
+        config.roots = config.roots.iter().map(paths::native).collect();
+        config.export_folder = config.export_folder.as_deref().map(paths::native);
+        Ok(config)
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -184,13 +189,13 @@ mod tests {
     fn parses_the_documented_file() {
         let config = Config::parse(
             r#"
-roots = ["D:/clips"]
+roots = ['D:\clips']
 ignore = ["**/thumbs/**", "**/.git/**"]
 weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
 "#,
         )
         .unwrap();
-        assert_eq!(config.roots, vec![PathBuf::from("D:/clips")]);
+        assert_eq!(config.roots, vec![PathBuf::from(r"D:\clips")]);
         assert_eq!(config.weights.tags, 20.0);
         // A file from before the visual weight gets its default.
         assert_eq!(config.weights.visual, 0.5);
@@ -198,10 +203,21 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
 
     #[test]
     fn weights_and_ignore_are_optional() {
-        let config = Config::parse(r#"roots = ["D:/clips"]"#).unwrap();
+        let config = Config::parse(r#"roots = ['D:\clips']"#).unwrap();
         assert_eq!(config.weights.ocr, 1.0);
         assert_eq!(config.ignore.len(), 2);
         assert_eq!(config.paused, Paused::default());
+    }
+
+    #[test]
+    fn a_path_written_with_slashes_reads_native() {
+        let config = Config::parse(
+            r#"roots = ["D:/clips/a"]
+export_folder = "D:/out""#,
+        )
+        .unwrap();
+        assert_eq!(config.roots[0].as_os_str(), r"D:\clips\a");
+        assert_eq!(config.export_folder.unwrap().as_os_str(), r"D:\out");
     }
 
     #[test]
@@ -225,7 +241,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
                 clip: false,
                 whisper: true,
             },
-            export_folder: Some(PathBuf::from("D:/exports")),
+            export_folder: Some(PathBuf::from(r"D:\exports")),
             ..written
         };
         paused.write(&path).unwrap();
@@ -236,11 +252,11 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
 
     #[test]
     fn an_edited_configuration_is_checked() {
-        let roots = vec![PathBuf::from("D:/clips")];
+        let roots = vec![PathBuf::from(r"D:\clips")];
         let config = Config::edited(
             roots.clone(),
             "**/thumbs/**\n\n  **/.git/**  \n",
-            Some(PathBuf::from("D:/exports")),
+            Some(PathBuf::from(r"D:\exports")),
             ["20", "10.5", " 3 ", "0", "0.5"],
             Paused::default(),
             BTreeMap::new(),
@@ -250,7 +266,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
         assert_eq!(config.weights.filename, 10.5);
         assert_eq!(config.weights.ocr, 0.0);
         assert_eq!(config.weights.visual, 0.5);
-        assert_eq!(config.export_folder, Some(PathBuf::from("D:/exports")));
+        assert_eq!(config.export_folder, Some(PathBuf::from(r"D:\exports")));
 
         let error = |roots, ignore, weights| {
             Config::edited(
@@ -306,7 +322,7 @@ weights = { tags = 20.0, filename = 10.0, speech = 3.0, ocr = 1.0 }
     fn ignore_globs_match_a_nested_path() {
         let config = Config::default();
         let set = config.ignore_set().unwrap();
-        assert!(set.is_match("D:/clips/thumbs/a.png"));
-        assert!(!set.is_match("D:/clips/a.png"));
+        assert!(set.is_match(r"D:\clips\thumbs\a.png"));
+        assert!(!set.is_match(r"D:\clips\a.png"));
     }
 }

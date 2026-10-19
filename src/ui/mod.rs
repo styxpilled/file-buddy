@@ -41,8 +41,8 @@ use gpui::{
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::component::{
-    ActiveTheme, ResizableState, Selectable, VirtualListScrollHandle, h_resizable, resizable_panel,
-    v_flex,
+    ActiveTheme, ResizableState, Selectable, Theme, VirtualListScrollHandle, h_resizable,
+    resizable_panel, v_flex,
 };
 
 use self::history::Travel;
@@ -101,7 +101,6 @@ gpui_kit::actions!(
         ShowFolders,
         ShowReview,
         ShowSettings,
-        SaveSettings,
         ReviewDuplicates,
         ReviewSameNames,
         ReviewLong,
@@ -150,6 +149,11 @@ pub fn bind_keys(changes: &BTreeMap<String, Vec<String>>, cx: &mut App) -> Vec<S
     keys::apply(changes, cx)
 }
 
+/// A focused control gets only its tinted border, with no ring outside it.
+pub fn style_focus(cx: &mut App) {
+    Theme::global_mut(cx).focus_ring = false;
+}
+
 pub struct FileBuddy {
     db: Db,
     db_path: PathBuf,
@@ -185,6 +189,8 @@ pub struct FileBuddy {
     /// count is the state; this is the answer to the key that was just pressed.
     notice: Option<Notice>,
     notice_task: Option<Task<()>>,
+    /// The scan that new folders or globs start once the typing stops.
+    settings_scan: Option<Task<()>>,
     /// Files marked for one bulk action, by row id. An id survives a new search
     /// and a rename; a grid index survives neither. A hash would mark every
     /// copy of a duplicate at once.
@@ -255,8 +261,8 @@ enum Page {
     Browse,
     Folders,
     Review,
-    Settings,
     Studio,
+    Settings,
 }
 
 /// What the side pane shows under the name: the speech the transcriber heard,
@@ -352,6 +358,7 @@ impl FileBuddy {
             status: "".into(),
             notice: None,
             notice_task: None,
+            settings_scan: None,
             marked: HashSet::new(),
             typed: String::new(),
             tagger: None,
@@ -1031,7 +1038,6 @@ impl Render for FileBuddy {
                 cx.listener(|this, _: &OpenInStudio, window, cx| this.open_in_studio(window, cx)),
             )
             .on_action(cx.listener(|this, _: &Screenshot, _, cx| this.screenshot(cx)))
-            .on_action(cx.listener(|this, _: &SaveSettings, _, cx| this.save_settings(cx)))
             .on_action(cx.listener(|this, _: &Rescan, _, cx| {
                 this.flash("scanning the folders", false, cx);
                 this.rescan(cx);

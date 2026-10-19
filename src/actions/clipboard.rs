@@ -133,7 +133,11 @@ fn from_dib(dib: &[u8]) -> Result<image::RgbaImage> {
         }
         _ => return Err(anyhow!("a bitmap of {bits} bits is not supported")),
     };
-    let extra = if compression == BI_BITFIELDS && header == 40 { 12 } else { 0 };
+    let extra = if compression == BI_BITFIELDS && header == 40 {
+        12
+    } else {
+        0
+    };
     let start = header + extra + colors * 4;
     let (width, rows) = (width as u32, height.unsigned_abs());
     let bytes = (bits / 8) as usize;

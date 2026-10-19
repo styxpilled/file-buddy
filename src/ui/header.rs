@@ -29,8 +29,8 @@ const PAGES: [(Page, &str, &str); 5] = [
     (Page::Browse, "Browse", "Ctrl+1"),
     (Page::Folders, "Folders", "Ctrl+2"),
     (Page::Review, "Review", "Ctrl+3"),
-    (Page::Settings, "Settings", "Ctrl+4"),
-    (Page::Studio, "Studio", "Ctrl+5"),
+    (Page::Studio, "Studio", "Ctrl+4"),
+    (Page::Settings, "Settings", "Ctrl+5"),
 ];
 
 /// The media kind filters. All are on by default, and the last one on cannot

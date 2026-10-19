@@ -131,10 +131,10 @@ mod tests {
 
     #[test]
     fn extension_decides_the_first_guess() {
-        assert_eq!(Kind::from_path(Path::new("a/b.MP4")), Some(Kind::Video));
-        assert_eq!(Kind::from_path(Path::new("a/b.gif")), Some(Kind::Animated));
-        assert_eq!(Kind::from_path(Path::new("a/b.webp")), Some(Kind::Still));
-        assert_eq!(Kind::from_path(Path::new("a/b.txt")), None);
+        assert_eq!(Kind::from_path(Path::new(r"a\b.MP4")), Some(Kind::Video));
+        assert_eq!(Kind::from_path(Path::new(r"a\b.gif")), Some(Kind::Animated));
+        assert_eq!(Kind::from_path(Path::new(r"a\b.webp")), Some(Kind::Still));
+        assert_eq!(Kind::from_path(Path::new(r"a\b.txt")), None);
         assert_eq!(Kind::from_path(Path::new("a/b")), None);
     }
 }

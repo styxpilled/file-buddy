@@ -633,8 +633,8 @@ mod tests {
 
     fn edit() -> Edit {
         let mut edit = Edit::new(
-            "D:/clips/cat jump.mkv".into(),
-            "D:/cache/ab/abcd.proxy.mp4".into(),
+            r"D:\clips\cat jump.mkv".into(),
+            r"D:\cache\ab\abcd.proxy.mp4".into(),
             10_000,
             (1920, 1080),
         );
@@ -650,7 +650,7 @@ mod tests {
     }
 
     fn strings_of(edit: &Edit, controls: Controls) -> Vec<String> {
-        let output = format!("D:/out/x.{}.part", controls.format.extension());
+        let output = format!(r"D:\out\x.{}.part", controls.format.extension());
         args(edit, &controls, &edit.input, Path::new(&output))
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
@@ -672,7 +672,7 @@ mod tests {
             "-t",
             "3.750",
             "-i",
-            "D:/cache/ab/abcd.proxy.mp4",
+            r"D:\cache\ab\abcd.proxy.mp4",
             "-map",
             "0:v:0",
         ]
@@ -720,7 +720,7 @@ mod tests {
                 "+faststart",
                 "-f",
                 "mp4",
-                "D:/out/x.mp4.part",
+                r"D:\out\x.mp4.part",
             ])
         );
     }
@@ -756,7 +756,7 @@ mod tests {
                 "160k",
                 "-f",
                 "webm",
-                "D:/out/x.webm.part",
+                r"D:\out\x.webm.part",
             ])
         );
     }
@@ -778,7 +778,7 @@ mod tests {
                 "0",
                 "-f",
                 "gif",
-                "D:/out/x.gif.part",
+                r"D:\out\x.gif.part",
             ])
         );
     }
@@ -804,7 +804,7 @@ mod tests {
                 "0",
                 "-f",
                 "webp",
-                "D:/out/x.webp.part",
+                r"D:\out\x.webp.part",
             ])
         );
     }
@@ -924,8 +924,8 @@ mod tests {
     #[test]
     fn a_value_is_escaped_for_the_graph_and_for_the_filter() {
         assert_eq!(
-            escape("C:/Windows/Fonts/arialbd.ttf"),
-            r"C\\:/Windows/Fonts/arialbd.ttf"
+            escape(r"C:\Windows\Fonts\arialbd.ttf"),
+            r"C\\:\\\\Windows\\\\Fonts\\\\arialbd.ttf"
         );
         assert_eq!(escape(r"a:b'c\d"), r"a\\:b\\\'c\\\\d");
         assert_eq!(escape("e,f[g];h\ni"), "e\\,f\\[g\\]\\;h\ni");
@@ -952,7 +952,7 @@ mod tests {
             after(&strings_of(&edit, Controls::default()), "-vf"),
             concat!(
                 r"crop=1280:720:0:0,scale=640:360:flags=lanczos,",
-                r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
+                r"drawtext=fontfile=C\\:\\\\Windows\\\\Fonts\\\\arialbd.ttf:expansion=none",
                 r":text=it\\\'s 5\\:00:fontsize=29:fontcolor=white:text_align=C:y_align=font",
                 r":x=320.00-text_w/2:y=180.48-text_h/2:enable=gte(t\,0.750)*lt(t\,3.750)",
                 r":box=1:boxcolor=black:boxborderw=7,setpts=PTS/2",
@@ -972,7 +972,7 @@ mod tests {
 
     #[test]
     fn a_still_with_a_crop_and_a_text_is_one_frame_with_no_time() {
-        let mut edit = Edit::still("D:/pics/cat.png".into(), (1920, 1080));
+        let mut edit = Edit::still(r"D:\pics\cat.png".into(), (1920, 1080));
         edit.crop = Crop {
             x: 100,
             y: 50,
@@ -984,7 +984,7 @@ mod tests {
         edit.texts[at].words = "hi".into();
         let filter = concat!(
             r"crop=1280:720:100:50,scale=640:360:flags=lanczos,",
-            r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
+            r"drawtext=fontfile=C\\:\\\\Windows\\\\Fonts\\\\arialbd.ttf:expansion=none",
             r":text=hi:fontsize=29:fontcolor=white:text_align=C:y_align=font",
             r":x=320.00-text_w/2:y=180.48-text_h/2",
         );
@@ -999,7 +999,7 @@ mod tests {
         };
         let start = [
             "-i",
-            "D:/pics/cat.png",
+            r"D:\pics\cat.png",
             "-map",
             "0:v:0",
             "-an",
@@ -1026,7 +1026,7 @@ mod tests {
                 "1",
                 "-f",
                 "image2",
-                "D:/out/x.png.part"
+                r"D:\out\x.png.part"
             ])
         );
         assert_eq!(
@@ -1044,7 +1044,7 @@ mod tests {
                 "1",
                 "-f",
                 "image2",
-                "D:/out/x.jpg.part",
+                r"D:\out\x.jpg.part",
             ])
         );
         let lowest = strings_of(
@@ -1080,7 +1080,7 @@ mod tests {
             .collect();
         let filter = concat!(
             r"crop=641:481:101:50:exact=1,",
-            r"drawtext=fontfile=C\\:/Windows/Fonts/arialbd.ttf:expansion=none",
+            r"drawtext=fontfile=C\\:\\\\Windows\\\\Fonts\\\\arialbd.ttf:expansion=none",
             r":text=now:fontsize=38:fontcolor=white:text_align=C:y_align=font",
             r":x=320.00-text_w/2:y=240.62-text_h/2",
         );
@@ -1088,7 +1088,7 @@ mod tests {
             "-ss",
             "4.000",
             "-i",
-            "D:/cache/ab/abcd.proxy.mp4",
+            r"D:\cache\ab\abcd.proxy.mp4",
             "-map",
             "0:v:0",
             "-an",
@@ -1129,7 +1129,7 @@ mod tests {
             .iter()
             .map(|&delay_ms| studio::Frame::new(RgbaImage::new(1, 1), delay_ms))
             .collect();
-        let mut edit = Edit::with_frames("D:/clips/cat.gif".into(), frames);
+        let mut edit = Edit::with_frames(r"D:\clips\cat.gif".into(), frames);
         edit.size = (640, 480);
         edit.crop = Crop::full(edit.size);
         edit
@@ -1146,7 +1146,7 @@ mod tests {
             args(
                 &edit,
                 &controls,
-                Path::new("T:/f/frames.txt"),
+                Path::new(r"T:\f\frames.txt"),
                 Path::new("x"),
             )
             .into_iter()
@@ -1162,7 +1162,7 @@ mod tests {
                 "-safe",
                 "0",
                 "-i",
-                "T:/f/frames.txt",
+                r"T:\f\frames.txt",
                 "-map",
                 "0:v:0",
                 "-an",
@@ -1296,8 +1296,8 @@ mod tests {
 
     #[test]
     fn the_partial_file_is_not_media() {
-        let partial = partial_path(Path::new("D:/out/cat 0m01-0m02.mp4"));
-        assert_eq!(partial, Path::new("D:/out/cat 0m01-0m02.mp4.part"));
+        let partial = partial_path(Path::new(r"D:\out\cat 0m01-0m02.mp4"));
+        assert_eq!(partial, Path::new(r"D:\out\cat 0m01-0m02.mp4.part"));
         assert_eq!(crate::media::Kind::from_path(&partial), None);
     }
 }

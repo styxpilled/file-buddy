@@ -221,7 +221,7 @@ mod tests {
         Hit {
             file: FileRow {
                 id,
-                path: format!("C:/clips/{id}.mp4").into(),
+                path: format!(r"C:\clips\{id}.mp4").into(),
                 hash: format!("h{id}"),
                 filename: format!("{id}.mp4"),
                 kind: Kind::Video,

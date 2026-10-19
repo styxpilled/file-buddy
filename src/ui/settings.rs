@@ -1,20 +1,20 @@
 //! The Settings page. It edits the fields of `file-buddy.toml`: the folders to
 //! index, the ignore globs, the export folder, the search weights, the paused
 //! stages and the keys.
-//! A switch that pauses a stage is written at once. Nothing else is written
-//! until Save, and Save writes nothing that `Config::edited` refuses or that
+//! Each change is written at once, unless `Config::edited` refuses it or it
 //! gives one key to two actions.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Keystroke, PathPromptOptions, ScrollHandle,
     Subscription, Window, div, px,
 };
-use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
@@ -30,6 +30,8 @@ const WEIGHT_WIDTH: f32 = 120.;
 const WEIGHT_NAMES: [&str; 5] = ["Tags", "Filename", "Speech", "Screen text", "Visual"];
 const KEY_LIST_HEIGHT: f32 = 320.;
 const KEY_NAME_WIDTH: f32 = 180.;
+/// How long after the last change to the folders or globs the scan starts.
+const SCAN_DELAY: Duration = Duration::from_millis(1000);
 
 pub struct Settings {
     roots: Vec<PathBuf>,
@@ -45,10 +47,11 @@ pub struct Settings {
     key_scroll: ScrollHandle,
     /// The next key pressed goes to the row.
     capturing: bool,
+    _edits: Vec<Subscription>,
 }
 
 impl Settings {
-    pub fn new(config: &Config, window: &mut Window, cx: &mut App) -> Self {
+    pub fn new(config: &Config, window: &mut Window, cx: &mut Context<FileBuddy>) -> Self {
         let weights = config.weights;
         let values = [
             weights.tags,
@@ -57,22 +60,30 @@ impl Settings {
             weights.ocr,
             weights.visual,
         ];
+        let ignore = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(4, 12)
+                .default_value(config.ignore.join("\n"))
+        });
+        let weights = values
+            .map(|value| cx.new(|cx| InputState::new(window, cx).default_value(value.to_string())));
+        let mut edits = vec![cx.subscribe_in(&ignore, window, save_on_change)];
+        edits.extend(
+            weights
+                .iter()
+                .map(|input| cx.subscribe_in(input, window, save_on_change)),
+        );
         Self {
             roots: config.roots.clone(),
-            ignore: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .auto_grow(4, 12)
-                    .default_value(config.ignore.join("\n"))
-            }),
+            ignore,
             export_folder: config.export_folder.clone(),
-            weights: values.map(|value| {
-                cx.new(|cx| InputState::new(window, cx).default_value(value.to_string()))
-            }),
+            weights,
             keys: config.keys.clone(),
             key_row: 0,
             key_focus: cx.focus_handle(),
             key_scroll: ScrollHandle::new(),
             capturing: false,
+            _edits: edits,
         }
     }
 
@@ -120,8 +131,8 @@ impl FileBuddy {
     }
 
     /// Check the form, write the file, and use it. New weights reach the next
-    /// search; new folders or globs start a scan.
-    pub(super) fn save_settings(&mut self, cx: &mut Context<Self>) {
+    /// search; new folders or globs start a scan once the changes stop.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
         let Some(settings) = self.settings() else {
             return;
         };
@@ -147,18 +158,15 @@ impl FileBuddy {
         }
         self.config = config;
         if rescan {
-            self.flash("saved, scanning the folders", false, cx);
-            self.start_watching();
-            self.rescan(cx);
-        } else {
-            self.flash("saved", false, cx);
-        }
-    }
-
-    fn revert_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings().is_some() {
-            self.mode = Mode::Settings(Box::new(Settings::new(&self.config, window, cx)));
-            cx.notify();
+            self.settings_scan = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SCAN_DELAY).await;
+                this.update(cx, |this, cx| {
+                    this.flash("scanning the folders", false, cx);
+                    this.start_watching();
+                    this.rescan(cx);
+                })
+                .ok();
+            }));
         }
     }
 
@@ -182,6 +190,7 @@ impl FileBuddy {
                         settings.roots.push(folder);
                     }
                 }
+                this.save_settings(cx);
                 cx.notify();
             })
             .ok();
@@ -203,6 +212,7 @@ impl FileBuddy {
             this.update(cx, |this, cx| {
                 if let Some(settings) = this.settings_mut() {
                     settings.export_folder = folders.into_iter().next();
+                    this.save_settings(cx);
                     cx.notify();
                 }
             })
@@ -214,6 +224,7 @@ impl FileBuddy {
     fn clear_export_folder(&mut self, cx: &mut Context<Self>) {
         if let Some(settings) = self.settings_mut() {
             settings.export_folder = None;
+            self.save_settings(cx);
             cx.notify();
         }
     }
@@ -263,6 +274,7 @@ impl FileBuddy {
             let mut keys = keys::keys_of(action, &settings.keys);
             keys.pop();
             settings.set_keys(action.name, keys);
+            self.save_settings(cx);
             cx.notify();
         }
     }
@@ -271,6 +283,7 @@ impl FileBuddy {
     pub(super) fn reset_keys(&mut self, cx: &mut Context<Self>) {
         if let Some(settings) = self.settings_mut() {
             settings.keys.remove(ACTIONS[settings.key_row].name);
+            self.save_settings(cx);
             cx.notify();
         }
     }
@@ -298,6 +311,7 @@ impl FileBuddy {
                 keys.push(key);
             }
             settings.set_keys(action.name, keys);
+            self.save_settings(cx);
         }
         cx.notify();
         true
@@ -308,6 +322,7 @@ impl FileBuddy {
             && at < settings.roots.len()
         {
             settings.roots.remove(at);
+            self.save_settings(cx);
             cx.notify();
         }
     }
@@ -327,16 +342,9 @@ pub fn page(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
                 .gap_6()
                 .p_6()
                 .child(folders(settings, cx))
-                .child(
-                    section(
-                        "Ignore",
-                        "One glob per line. A path that matches is not indexed.",
-                        cx,
-                    )
-                    .child(Textarea::new(&settings.ignore)),
-                )
+                .child(section("Ignore").child(Textarea::new(&settings.ignore)))
                 .child(export_folder(settings, cx))
-                .child(weights(settings, cx))
+                .child(weights(settings))
                 .child(stages(this.config.paused, cx))
                 .child(key_list(settings, cx))
                 .child(footer(cx)),
@@ -344,53 +352,41 @@ pub fn page(this: &FileBuddy, cx: &mut Context<FileBuddy>) -> AnyElement {
         .into_any_element()
 }
 
-fn section(title: &'static str, about: &'static str, cx: &App) -> gpui::Div {
-    v_flex()
-        .gap_2()
-        .child(div().text_base().child(title))
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(about),
-        )
+fn section(title: &'static str) -> gpui::Div {
+    v_flex().gap_2().child(div().text_base().child(title))
 }
 
 fn folders(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
-    section(
-        "Folders",
-        "Every file under these folders is indexed. A change starts a scan when you save.",
-        cx,
-    )
-    .children(settings.roots.iter().enumerate().map(|(at, root)| {
-        h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .truncate()
-                    .child(root.display().to_string()),
-            )
-            .child(
-                Button::new(("remove-root", at))
+    section("Folders")
+        .children(settings.roots.iter().enumerate().map(|(at, root)| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .truncate()
+                        .child(root.display().to_string()),
+                )
+                .child(
+                    Button::new(("remove-root", at))
+                        .small()
+                        .label("Remove")
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.remove_root(at, cx))),
+                )
+        }))
+        .child(
+            h_flex().child(
+                Button::new("add-root")
                     .small()
-                    .label("Remove")
+                    .label("Add folder")
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_root(at, cx))),
-            )
-    }))
-    .child(
-        h_flex().child(
-            Button::new("add-root")
-                .small()
-                .label("Add folder")
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.add_roots(cx))),
-        ),
-    )
-    .into_any_element()
+                    .on_click(cx.listener(|this, _, _, cx| this.add_roots(cx))),
+            ),
+        )
+        .into_any_element()
 }
 
 fn export_folder(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
@@ -401,89 +397,77 @@ fn export_folder(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement
             false,
         ),
     };
-    section(
-        "Export folder",
-        "The Studio writes its exports here. Add it to the folders above to index them.",
-        cx,
-    )
-    .child(
-        h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .truncate()
-                    .when(!set, |text| text.text_color(cx.theme().muted_foreground))
-                    .child(text),
-            )
-            .child(
-                Button::new("choose-export-folder")
-                    .small()
-                    .label("Choose folder")
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.choose_export_folder(cx))),
-            )
-            .when(set, |row| {
-                row.child(
-                    Button::new("clear-export-folder")
-                        .small()
-                        .label("Clear")
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_export_folder(cx))),
+    section("Export folder")
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .truncate()
+                        .when(!set, |text| text.text_color(cx.theme().muted_foreground))
+                        .child(text),
                 )
-            }),
-    )
-    .into_any_element()
+                .child(
+                    Button::new("choose-export-folder")
+                        .small()
+                        .label("Choose folder")
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| this.choose_export_folder(cx))),
+                )
+                .when(set, |row| {
+                    row.child(
+                        Button::new("clear-export-folder")
+                            .small()
+                            .label("Clear")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_export_folder(cx))),
+                    )
+                }),
+        )
+        .into_any_element()
 }
 
-fn weights(settings: &Settings, cx: &App) -> AnyElement {
-    section(
-        "Search weights",
-        "The sort orders the results. These only pick the 500 best text matches when more match. Visual above 0 adds the files whose frames look like the query, after the text matches.",
-        cx,
-    )
-    .children(
-        settings
-            .weights
-            .iter()
-            .zip(WEIGHT_NAMES)
-            .map(|(input, name)| {
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().w(px(WEIGHT_WIDTH)).text_sm().child(name))
-                    .child(div().w(px(WEIGHT_WIDTH)).child(Input::new(input).small()))
-            }),
-    )
-    .into_any_element()
+fn weights(settings: &Settings) -> AnyElement {
+    section("Search weights")
+        .children(
+            settings
+                .weights
+                .iter()
+                .zip(WEIGHT_NAMES)
+                .map(|(input, name)| {
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().w(px(WEIGHT_WIDTH)).text_sm().child(name))
+                        .child(div().w(px(WEIGHT_WIDTH)).child(Input::new(input).small()))
+                }),
+        )
+        .into_any_element()
 }
 
 fn stages(paused: Paused, cx: &mut Context<FileBuddy>) -> AnyElement {
-    section(
-        "Paused stages",
-        "A paused stage doesn't start any new jobs.",
-        cx,
-    )
-    .children(
-        [
-            (Stage::Ocr, paused.ocr, "Screen text (OCR)"),
-            (Stage::Clip, paused.clip, "Visual/semantic (CLIP)"),
-            (Stage::Whisper, paused.whisper, "Speech (Whisper)"),
-        ]
-        .map(|(stage, checked, label)| {
-            Switch::new(stage.as_str())
-                .small()
-                .checked(checked)
-                .label(label)
-                .cursor_pointer()
-                .on_change(cx.listener(move |this, checked: &bool, _, cx| {
-                    this.pause_stage(stage, *checked, cx)
-                }))
-        }),
-    )
-    .into_any_element()
+    section("Paused stages")
+        .children(
+            [
+                (Stage::Ocr, paused.ocr, "Screen text (OCR)"),
+                (Stage::Clip, paused.clip, "Visual/semantic (CLIP)"),
+                (Stage::Whisper, paused.whisper, "Speech (Whisper)"),
+            ]
+            .map(|(stage, checked, label)| {
+                Switch::new(stage.as_str())
+                    .small()
+                    .checked(checked)
+                    .label(label)
+                    .cursor_pointer()
+                    .on_change(cx.listener(move |this, checked: &bool, _, cx| {
+                        this.pause_stage(stage, *checked, cx)
+                    }))
+            }),
+        )
+        .into_any_element()
 }
 
 /// Takes keys for the Keys section before the keymap does. It acts only while
@@ -543,71 +527,68 @@ fn key_list(settings: &Settings, cx: &mut Context<FileBuddy>) -> AnyElement {
             })
     });
 
-    section(
-        "Keys",
-        "Up and down pick an action. Enter adds the next key you press, delete removes the last key, r resets the row to its default, and escape cancels. A key with ctrl or alt, or an F key, works in the text boxes too.",
-        cx,
-    )
-    .child(
-        // GPUI scrolls every scroll area under the pointer, so the page would
-        // move with the list. The wheel stops here, after the list took it.
-        div()
-            .id("keys-frame")
-            .relative()
-            .h(px(KEY_LIST_HEIGHT))
-            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .id("keys")
-                    .track_focus(&settings.key_focus)
-                    .key_context("Keys")
-                    .track_scroll(&settings.key_scroll)
-                    .size_full()
-                    .overflow_y_scroll()
-                    .p_1()
-                    .rounded(px(4.))
-                    .bg(cx.theme().secondary)
-                    .children(rows),
-            )
-            .vertical_scrollbar(&settings.key_scroll),
-    )
-    .children(problems.into_iter().map(|problem| {
-        div()
-            .text_sm()
-            .text_color(cx.theme().danger)
-            .child(problem)
-    }))
-    .into_any_element()
-}
-
-fn footer(cx: &mut Context<FileBuddy>) -> AnyElement {
-    let file = paths::config_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_default();
-    h_flex()
-        .gap_2()
-        .items_center()
-        .child(
-            Button::new("save-settings")
-                .small()
-                .primary()
-                .label("Save")
-                .tooltip("Ctrl+S")
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, _, cx| this.save_settings(cx))),
-        )
-        .child(
-            Button::new("revert-settings")
-                .small()
-                .label("Revert")
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.revert_settings(window, cx))),
-        )
+    section("Keys")
         .child(
             div()
-                .text_xs()
+                .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(file),
+                .child("Press \"r\" to reset."),
+        )
+        .child(
+            // GPUI scrolls every scroll area under the pointer, so the page would
+            // move with the list. The wheel stops here, after the list took it.
+            div()
+                .id("keys-frame")
+                .relative()
+                .h(px(KEY_LIST_HEIGHT))
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("keys")
+                        .track_focus(&settings.key_focus)
+                        .key_context("Keys")
+                        .track_scroll(&settings.key_scroll)
+                        .size_full()
+                        .overflow_y_scroll()
+                        .p_1()
+                        .rounded(px(4.))
+                        .bg(cx.theme().secondary)
+                        .children(rows),
+                )
+                .vertical_scrollbar(&settings.key_scroll),
+        )
+        .children(
+            problems
+                .into_iter()
+                .map(|problem| div().text_sm().text_color(cx.theme().danger).child(problem)),
         )
         .into_any_element()
+}
+
+/// The path of the config file. A click shows it in Explorer.
+fn footer(cx: &mut Context<FileBuddy>) -> AnyElement {
+    let Ok(path) = paths::config_path() else {
+        return div().into_any_element();
+    };
+    div()
+        .id("config-path")
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .hover(|text| text.text_color(cx.theme().foreground))
+        .cursor_pointer()
+        .child(path.display().to_string())
+        .on_click(move |_, _, cx| cx.reveal_path(&path))
+        .into_any_element()
+}
+
+fn save_on_change<T>(
+    this: &mut FileBuddy,
+    _: &Entity<T>,
+    event: &InputEvent,
+    _: &mut Window,
+    cx: &mut Context<FileBuddy>,
+) {
+    if matches!(event, InputEvent::Change) {
+        this.save_settings(cx);
+    }
 }

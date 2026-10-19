@@ -28,8 +28,8 @@ use gpui_kit::component::{ActiveTheme, Disableable, Sizable, h_flex, v_flex};
 use gpui_video::{Video, video as video_element};
 
 use crate::actions::clipboard;
-use crate::ffmpeg::{export, probe};
 use crate::db::tags;
+use crate::ffmpeg::{export, probe};
 use crate::media::{self, Kind, hash};
 use crate::paths;
 use crate::search::folder::Entry;

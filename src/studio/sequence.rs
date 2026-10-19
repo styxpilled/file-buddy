@@ -472,13 +472,13 @@ mod tests {
 
     #[test]
     fn stills_go_in_name_order() {
-        let mut paths: Vec<PathBuf> = ["D:/b/c.png", "D:/a/B.png", "D:/c/a.png"]
+        let mut paths: Vec<PathBuf> = [r"D:\b\c.png", r"D:\a\B.png", r"D:\c\a.png"]
             .map(PathBuf::from)
             .into();
         name_order(&mut paths);
         assert_eq!(
             paths,
-            ["D:/c/a.png", "D:/a/B.png", "D:/b/c.png"].map(PathBuf::from)
+            [r"D:\c\a.png", r"D:\a\B.png", r"D:\b\c.png"].map(PathBuf::from)
         );
     }
 }

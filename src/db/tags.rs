@@ -186,7 +186,10 @@ mod tests {
 
         let stills = ["a".into(), "b".into(), "c".into(), "untagged".into()];
         copy(db.conn_mut(), &stills, "out").unwrap();
-        assert_eq!(of_hash(db.conn(), "out").unwrap(), ["cat", "dog", "funny", "kept"]);
+        assert_eq!(
+            of_hash(db.conn(), "out").unwrap(),
+            ["cat", "dog", "funny", "kept"]
+        );
     }
 
     #[test]
